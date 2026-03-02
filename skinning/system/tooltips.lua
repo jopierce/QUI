@@ -429,7 +429,6 @@ local tooltipsToSkin = {
     "ItemRefShoppingTooltip2",
     "ShoppingTooltip1",
     "ShoppingTooltip2",
-    "EmbeddedItemTooltip",
     "GameTooltipTooltip",
     "WorldMapTooltip",
     "WorldMapCompareTooltip1",
@@ -554,7 +553,7 @@ local function SetupTooltipPostProcessor()
     -- Modifying tooltip line properties (SetFont, SetTextColor, etc.) during combat
     -- taints the line objects and breaks other addons (e.g. Altoholic).
     TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, function(tooltip)
-        if not tooltip then return end
+        if not tooltip or tooltip == EmbeddedItemTooltip then return end
         HookTooltipOnShow(tooltip)
         if not InCombatLockdown() then
             ApplyTooltipFontSizeToFrame(tooltip)
