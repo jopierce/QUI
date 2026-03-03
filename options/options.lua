@@ -62,26 +62,29 @@ function GUI:InitializeOptions()
 
     -- Sidebar tabs (short names for vertical layout)
     GUI:AddTab(frame, "Welcome", ns.QUI_WelcomeOptions.CreateWelcomePage)
-    GUI:AddTab(frame, "General & QoL", ns.QUI_GeneralOptions.CreateGeneralQoLPage)
-    GUI:AddTab(frame, "Anchoring & Layout", ns.QUI_FrameAnchoringOptions.CreateFrameAnchoringPage)
-    GUI:AddTab(frame, "Cooldown Manager", ns.QUI_NCDMOptions.CreateCDMSetupPage)
-    GUI:AddTab(frame, "Unit Frames", ns.QUI_UnitFramesOptions.CreateUnitFramesPage)
-    GUI:AddTab(frame, "Action Bars", ns.QUI_ActionBarsOptions.CreateActionBarsPage)
-    GUI:AddTab(frame, "Minimap & Datatext", ns.QUI_MinimapPageOptions.CreateMinimapPage)
-    GUI:AddTab(frame, "Skinning & Autohide", ns.QUI_AutohidesOptions.CreateAutohidesPage)
-    GUI:AddTab(frame, "Custom Trackers", ns.QUI_CustomTrackersOptions.CreateCustomTrackersPage)
+    local generalTab = GUI:AddTab(frame, "General & QoL", ns.QUI_GeneralOptions.CreateGeneralQoLPage)
+    local anchoringTab = GUI:AddTab(frame, "Anchoring & Layout", ns.QUI_FrameAnchoringOptions.CreateFrameAnchoringPage)
+    local cdmTab = GUI:AddTab(frame, "Cooldown Manager", ns.QUI_NCDMOptions.CreateCDMSetupPage)
+    local unitFramesTab = GUI:AddTab(frame, "Unit Frames", ns.QUI_UnitFramesOptions.CreateUnitFramesPage)
+    local actionBarsTab = GUI:AddTab(frame, "Action Bars", ns.QUI_ActionBarsOptions.CreateActionBarsPage)
+    local minimapTab = GUI:AddTab(frame, "Minimap & Datatext", ns.QUI_MinimapPageOptions.CreateMinimapPage)
+    local skinningTab = GUI:AddTab(frame, "Skinning & Autohide", ns.QUI_AutohidesOptions.CreateAutohidesPage)
+    local customTrackersTab = GUI:AddTab(frame, "Custom Trackers", ns.QUI_CustomTrackersOptions.CreateCustomTrackersPage)
     GUI:AddTab(frame, "Frame Levels", ns.QUI_HUDLayeringOptions.CreateHUDLayeringPage)
     GUI:AddTab(frame, "Profiles", ns.QUI_ProfilesOptions.CreateSpecProfilesPage)
-    GUI:AddTab(frame, "Import & Export Strings", ns.QUI_ImportOptions.CreateImportExportPage)
-    -- Bottom sidebar items (Search tab, Help tab, action buttons)
-    -- Add separator line between normal tabs and bottom items
-    local sepLine = frame.sidebar:CreateTexture(nil, "ARTWORK")
-    sepLine:SetHeight(1)
-    sepLine:SetColorTexture(C.border[1], C.border[2], C.border[3], 0.6)
-    -- Position separator above the bottom items (will sit above 4 items * 28px + some padding)
-    sepLine:SetPoint("BOTTOMLEFT", frame.sidebar, "BOTTOMLEFT", 8, 4 * 28 + 8)
-    sepLine:SetPoint("BOTTOMRIGHT", frame.sidebar, "BOTTOMRIGHT", -8, 4 * 28 + 8)
+    local importExportTab = GUI:AddTab(frame, "Import & Export Strings", ns.QUI_ImportOptions.CreateImportExportPage)
 
+    -- Hint caret visibility on first load for tabs that have level-2 entries.
+    generalTab._hasSubTabsHint = true
+    anchoringTab._hasSubTabsHint = true
+    cdmTab._hasSubTabsHint = true
+    unitFramesTab._hasSubTabsHint = true
+    actionBarsTab._hasSubTabsHint = true
+    minimapTab._hasSubTabsHint = true
+    skinningTab._hasSubTabsHint = true
+    customTrackersTab._hasSubTabsHint = true
+    importExportTab._hasSubTabsHint = true
+    -- Bottom sidebar items (Search tab, Help tab, action buttons)
     local searchTab = GUI:AddTab(frame, "Search", CreateSearchPage, true)  -- isBottomItem = true
     GUI._searchTabIndex = #frame.tabs
 
