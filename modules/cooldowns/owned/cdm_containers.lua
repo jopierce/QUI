@@ -46,6 +46,23 @@ local initialized = false
 -- Anchor proxy for Utility below Essential
 local UtilityAnchorProxy = nil
 
+-- Point→center offset (mirrors anchoring.lua GetPointOffsetForRect).
+-- Returns the offset of the named anchor point relative to the frame's center.
+local function PointOffset(point, width, height)
+    local halfW = (width or 0) * 0.5
+    local halfH = (height or 0) * 0.5
+    if point == "TOPLEFT" then     return -halfW,  halfH
+    elseif point == "TOP" then     return 0,       halfH
+    elseif point == "TOPRIGHT" then return  halfW,  halfH
+    elseif point == "LEFT" then    return -halfW,  0
+    elseif point == "RIGHT" then   return  halfW,  0
+    elseif point == "BOTTOMLEFT" then  return -halfW, -halfH
+    elseif point == "BOTTOM" then      return 0,      -halfH
+    elseif point == "BOTTOMRIGHT" then return  halfW, -halfH
+    end
+    return 0, 0
+end
+
 ---------------------------------------------------------------------------
 -- DB ACCESS
 ---------------------------------------------------------------------------
@@ -185,8 +202,28 @@ local function SaveContainerPosition(trackerKey)
             if settings and settings.enabled then
                 local parent = settings.parent or "screen"
                 if parent == "screen" or parent == "disabled" then
-                    settings.offsetX = ox
-                    settings.offsetY = oy
+                    -- ox/oy are CENTER→CENTER offsets. If the anchoring config
+                    -- uses a non-CENTER point/relative pair, reverse the
+                    -- ComputeCenterOffsetsForAnchor math so
+                    -- ApplyFrameAnchor produces the correct screen position.
+                    -- Equation: centerOff = targetOff + offset - sourceOff
+                    -- So:       offset    = centerOff - targetOff + sourceOff
+                    local pt  = settings.point or "CENTER"
+                    local rel = settings.relative or "CENTER"
+                    if pt == "CENTER" and rel == "CENTER" then
+                        settings.offsetX = ox
+                        settings.offsetY = oy
+                    else
+                        local vs = viewerState[container]
+                        local frameW = (vs and (vs.cdmIconWidth or vs.row1Width)) or Helpers.SafeValue(container:GetWidth(), 1) or 1
+                        local frameH = (vs and vs.cdmTotalHeight) or Helpers.SafeValue(container:GetHeight(), 1) or 1
+                        local parentW = Helpers.SafeValue(UIParent:GetWidth(), 1) or 1
+                        local parentH = Helpers.SafeValue(UIParent:GetHeight(), 1) or 1
+                        local srcX, srcY = PointOffset(pt, frameW, frameH)
+                        local tgtX, tgtY = PointOffset(rel, parentW, parentH)
+                        settings.offsetX = ox - tgtX + srcX
+                        settings.offsetY = oy - tgtY + srcY
+                    end
                 end
             end
         end
@@ -237,31 +274,10 @@ local function RestoreContainerPosition(container, trackerKey)
     return false
 end
 
--- One-time fallback: seed a QUI container's position from the Blizzard viewer.
--- Only used on first-ever init when no saved DB position exists yet.
--- After seeding, immediately saves to DB so future loads use the DB path.
-local function SeedPositionFromViewer(container, trackerKey, blizzViewerName)
-    if not container then return end
-    local viewer = _G[blizzViewerName]
-    if not viewer then return end
-    local cx, cy = viewer:GetCenter()
-    local sx, sy = UIParent:GetCenter()
-    if cx and cy and sx and sy then
-        local ox = cx - sx
-        local oy = cy - sy
-        container:ClearAllPoints()
-        container:SetPoint("CENTER", UIParent, "CENTER", ox, oy)
-        -- Persist so this is the last time we read from Blizzard
-        SaveContainerPosition(trackerKey)
-    end
-end
-
--- Restore container position from DB; fall back to Blizzard viewer if no
--- saved position exists (first-ever init).  The QUI container is always
--- the source of truth — Blizzard viewers are synced FROM the container.
-local function InitContainerPosition(container, trackerKey, blizzViewerName)
-    if RestoreContainerPosition(container, trackerKey) then return end
-    SeedPositionFromViewer(container, trackerKey, blizzViewerName)
+-- Restore container position from DB.  If no saved position exists
+-- (first-ever init), the container stays at screen center (0,0).
+local function InitContainerPosition(container, trackerKey)
+    RestoreContainerPosition(container, trackerKey)
 end
 
 -- Blizzard viewer name lookup (used by Edit Mode and position save)
@@ -281,18 +297,18 @@ local function InitContainers()
     containers.trackedBar = CreateContainer("QUI_BuffBarContainer")
     _G["QUI_BuffIconContainer"] = containers.buff
 
-    InitContainerPosition(containers.essential, "essential", "EssentialCooldownViewer")
-    InitContainerPosition(containers.utility, "utility", "UtilityCooldownViewer")
+    InitContainerPosition(containers.essential, "essential")
+    InitContainerPosition(containers.utility, "utility")
     -- Buff: skip position init when anchored — ApplyBuffIconAnchor manages position.
     local db = GetDB()
     local anchorTo = db and db.buff and db.buff.anchorTo or "disabled"
     if anchorTo == "disabled" then
-        InitContainerPosition(containers.buff, "buff", "BuffIconCooldownViewer")
+        InitContainerPosition(containers.buff, "buff")
     end
     -- TrackedBar: skip position init when anchored — ApplyTrackedBarAnchor manages position.
     local barAnchorTo = db and db.trackedBar and db.trackedBar.anchorTo or "disabled"
     if barAnchorTo == "disabled" then
-        InitContainerPosition(containers.trackedBar, "trackedBar", "BuffBarCooldownViewer")
+        InitContainerPosition(containers.trackedBar, "trackedBar")
     end
 end
 
@@ -310,7 +326,7 @@ local function InitBuffContainer()
     local db = GetDB()
     local anchorTo = db and db.buff and db.buff.anchorTo or "disabled"
     if anchorTo == "disabled" then
-        InitContainerPosition(containers.buff, "buff", "BuffIconCooldownViewer")
+        InitContainerPosition(containers.buff, "buff")
     end
     if ns.InvalidateCDMFrameCache then ns.InvalidateCDMFrameCache() end
     -- Notify buffbar.lua to set up hooks on the new container
