@@ -1333,6 +1333,7 @@ local defaults = {
 
         -- Tooltip Management
         tooltip = {
+            engine = "owned",                  -- "classic" (hook-based) or "owned" (taint-free)
             enabled = true,                    -- Master toggle for tooltip module
             anchorToCursor = true,             -- Follow cursor vs default anchor
             cursorAnchor = "TOPLEFT",          -- Tooltip point anchored to cursor
@@ -1350,6 +1351,7 @@ local defaults = {
             borderUseClassColor = false,       -- Use player class color for border
             borderUseAccentColor = false,      -- Use addon accent color for border
             showSpellIDs = false,              -- Show spell ID and icon ID on buff/debuff tooltips
+            hideDelay = 0,                     -- Seconds before tooltip hides after mouse leaves (0 = instant, >0 = fade out)
             -- Per-Context Visibility (SHOW/HIDE/SHIFT/CTRL/ALT)
             visibility = {
                 npcs = "SHOW",                 -- NPCs/players in world
@@ -3708,6 +3710,9 @@ function QUICore:OnInitialize()
     -- Track CDM engine so profile switches to a different engine trigger reload
     self._lastKnownEngine = self.db.profile.ncdm and self.db.profile.ncdm.engine or "owned"
 
+    -- Track tooltip engine so profile switches to a different engine trigger reload
+    self._lastKnownTooltipEngine = self.db.profile.tooltip and self.db.profile.tooltip.engine or "owned"
+
     self.db.RegisterCallback(self, "OnProfileChanged", "OnProfileChanged")
     self.db.RegisterCallback(self, "OnProfileCopied",  "OnProfileChanged")
     self.db.RegisterCallback(self, "OnProfileReset",   "OnProfileChanged")
@@ -3775,6 +3780,14 @@ function QUICore:OnProfileChanged(event, db, profileKey)
     local newEngine = self.db.profile.ncdm and self.db.profile.ncdm.engine or "owned"
     if newEngine ~= self._lastKnownEngine then
         self._lastKnownEngine = newEngine
+        self:SafeReload()
+        return
+    end
+
+    -- Check if tooltip engine changed — requires reload since engines can't hot-swap
+    local newTooltipEngine = self.db.profile.tooltip and self.db.profile.tooltip.engine or "owned"
+    if newTooltipEngine ~= self._lastKnownTooltipEngine then
+        self._lastKnownTooltipEngine = newTooltipEngine
         self:SafeReload()
         return
     end

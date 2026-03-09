@@ -665,6 +665,7 @@ end)
 ---------------------------------------------------------------------------
 
 local ahFilterHooked = false
+local ahVisualHooked = false
 
 local function SetupAuctionHouseFilter()
     if ahFilterHooked then return end
@@ -698,6 +699,40 @@ local function SetupAuctionHouseFilter()
     end
 end
 
+-- Update the FilterButton visual state to reflect the injected expansion filter.
+-- Safe to write to FilterButton.filters here because the AH can only be open
+-- out of combat — taint is contained to AH UI frames that are hidden before combat.
+local function ApplyAuctionHouseFilterVisual()
+    if not AuctionHouseFrame then return end
+    local searchBar = AuctionHouseFrame.SearchBar
+    if not searchBar or not searchBar.FilterButton then return end
+
+    local settings = GetSettings()
+    if not settings or not settings.auctionHouseExpansionFilter then return end
+
+    searchBar.FilterButton.filters[Enum.AuctionHouseFilter.CurrentExpansionOnly] = true
+    if searchBar.UpdateClearFiltersButton then
+        searchBar:UpdateClearFiltersButton()
+    end
+end
+
+local function SetupAuctionHouseFilterVisual()
+    if ahVisualHooked then return end
+    if not AuctionHouseFrame then return end
+
+    ahVisualHooked = true
+
+    local searchBar = AuctionHouseFrame.SearchBar
+    if searchBar then
+        searchBar:HookScript("OnShow", function()
+            C_Timer.After(0, ApplyAuctionHouseFilterVisual)
+        end)
+    end
+
+    -- Apply immediately for the first open
+    C_Timer.After(0, ApplyAuctionHouseFilterVisual)
+end
+
 ---------------------------------------------------------------------------
 -- EVENT REGISTRATION
 ---------------------------------------------------------------------------
@@ -716,6 +751,7 @@ qolFrame:RegisterEvent("CHALLENGE_MODE_RESET")
 qolFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 qolFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 qolFrame:RegisterEvent("ADDON_LOADED")
+qolFrame:RegisterEvent("AUCTION_HOUSE_SHOW")
 
 qolFrame:SetScript("OnEvent", function(self, event, ...)
     if event == "MERCHANT_SHOW" then
@@ -744,6 +780,8 @@ qolFrame:SetScript("OnEvent", function(self, event, ...)
         C_Timer.After(2, RefreshPopupBlocker)
     elseif event == "ZONE_CHANGED_NEW_AREA" then
         UpdateRaidAutoLogging()
+    elseif event == "AUCTION_HOUSE_SHOW" then
+        SetupAuctionHouseFilterVisual()
     elseif event == "ADDON_LOADED" then
         local loadedAddon = ...
         if loadedAddon == addonName then
