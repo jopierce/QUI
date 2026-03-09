@@ -75,6 +75,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
 
+
+## v2.48.1 - 2026-03-09
+
+### Fixed
+- clean up group frames side menu
 ## v2.48.0 - 2026-03-09
 
 ### Added
