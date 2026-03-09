@@ -3180,6 +3180,7 @@ local defaults = {
                 offsetY = 0,            -- Vertical offset from anchor position
                 toggleOffsetX = 0,      -- Horizontal offset for the toggle button
                 toggleOffsetY = 0,      -- Vertical offset for the toggle button
+                openOnMouseover = true, -- Open drawer when hovering the toggle button
                 autoHideToggle = false, -- Auto-hide the toggle button (show on minimap hover)
                 hiddenButtons = {},     -- Table of button names hidden from the drawer (e.g., { ["LibDBIcon10_Details"] = true })
                 autoHideDelay = 1.5,    -- Seconds after mouse leave before hiding (0 = no auto-hide)

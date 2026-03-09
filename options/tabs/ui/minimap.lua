@@ -645,6 +645,7 @@ local function BuildMinimapTab(tabContent)
                 bgOpacity = 98,
                 borderSize = 1,
                 borderColor = {0.2, 0.8, 0.6, 1},
+                openOnMouseover = true,
                 autoHideToggle = false,
                 hiddenButtons = {},
             }
@@ -655,6 +656,7 @@ local function BuildMinimapTab(tabContent)
         if mm.buttonDrawer.toggleOffsetY == nil then mm.buttonDrawer.toggleOffsetY = 0 end
         if mm.buttonDrawer.toggleSize == nil then mm.buttonDrawer.toggleSize = 20 end
         if not mm.buttonDrawer.toggleIcon then mm.buttonDrawer.toggleIcon = "hammer" end
+        if mm.buttonDrawer.openOnMouseover == nil then mm.buttonDrawer.openOnMouseover = true end
         if mm.buttonDrawer.autoHideToggle == nil then mm.buttonDrawer.autoHideToggle = false end
         if mm.buttonDrawer.hiddenButtons == nil then mm.buttonDrawer.hiddenButtons = {} end
         if mm.buttonDrawer.padding == nil then mm.buttonDrawer.padding = 6 end
@@ -670,6 +672,11 @@ local function BuildMinimapTab(tabContent)
         local drawerEnable = GUI:CreateFormCheckbox(tabContent, "Enable Button Drawer", "enabled", drawer, RefreshMinimap)
         drawerEnable:SetPoint("TOPLEFT", PAD, y)
         drawerEnable:SetPoint("RIGHT", tabContent, "RIGHT", -PAD, 0)
+        y = y - FORM_ROW
+
+        local drawerHoverOpen = GUI:CreateFormCheckbox(tabContent, "Open Drawer on Mouseover", "openOnMouseover", drawer, RefreshMinimap)
+        drawerHoverOpen:SetPoint("TOPLEFT", PAD, y)
+        drawerHoverOpen:SetPoint("RIGHT", tabContent, "RIGHT", -PAD, 0)
         y = y - FORM_ROW
 
         -- Anchor dropdown
