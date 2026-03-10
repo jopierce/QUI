@@ -27,7 +27,6 @@ local math_abs = math.abs
 
 local FLAT_TEXTURE = "Interface\\Buttons\\WHITE8x8"
 
-
 ---------------------------------------------------------------------------
 -- OWNED ENGINE TABLE
 ---------------------------------------------------------------------------
@@ -922,6 +921,42 @@ local function ReadAllContent(blizzTip)
         lines = merged
     end
 
+    -- When embedded content exists (EmbeddedItemTooltip for item rewards),
+    -- Blizzard inserts contiguous blocks of blank spacer lines to reserve space
+    -- for the overlay. Strip multi-line blank blocks so we don't double-count
+    -- the embedded content (which we render ourselves at the end).
+    if #embedded > 0 then
+        local stripped = {}
+        local i = 1
+        while i <= #lines do
+            local text = lines[i].leftText
+            local okMatch, hasContent = pcall(string.match, text, "%S")
+            local isBlank = okMatch and not hasContent
+
+            if isBlank then
+                -- Measure the contiguous blank block
+                local blockStart = i
+                while i <= #lines do
+                    text = lines[i].leftText
+                    okMatch, hasContent = pcall(string.match, text, "%S")
+                    isBlank = okMatch and not hasContent
+                    if not isBlank then break end
+                    i = i + 1
+                end
+                local blockSize = i - blockStart
+                if blockSize <= 1 then
+                    -- Single blank line — keep as intentional spacer
+                    stripped[#stripped + 1] = lines[blockStart]
+                end
+                -- Multi-line blank blocks are stripped (reserved for embedded overlay)
+            else
+                stripped[#stripped + 1] = lines[i]
+                i = i + 1
+            end
+        end
+        lines = stripped
+    end
+
     -- Append embedded content (items, progress bars)
     for _, e in ipairs(embedded) do
         lines[#lines + 1] = e
@@ -1150,10 +1185,13 @@ end
 -- do our own side-by-side chaining relative to QUI_Tooltip.
 ---------------------------------------------------------------------------
 
-local function AnchorShoppingTooltips(mainOwnedTip)
+local function AnchorShoppingTooltips(mainOwnedTip, aboutToShow)
     if not mainOwnedTip or not mainOwnedTip:IsShown() then return end
 
-    -- Collect visible shopping tooltips in order
+    -- Collect visible shopping tooltips in order.
+    -- `aboutToShow` is an owned tooltip that's about to be shown (not yet
+    -- IsShown) but should be included in the chain — prevents a 1-frame
+    -- flash at the wrong position before the tooltip is anchored.
     local shoppingFrames = {}
     local shoppingBlizzNames = {
         "ShoppingTooltip1", "ShoppingTooltip2",
@@ -1164,7 +1202,7 @@ local function AnchorShoppingTooltips(mainOwnedTip)
         local blizz = _G[name]
         if blizz then
             local owned = tooltipPairs[blizz]
-            if owned and owned:IsShown() then
+            if owned and (owned:IsShown() or owned == aboutToShow) then
                 shoppingFrames[#shoppingFrames + 1] = owned
             end
         end
@@ -1200,7 +1238,7 @@ local function AnchorOwnedTooltip(ownedTip, blizzTip, settings)
     -- beside the main tooltip. Don't use Blizzard's anchor points — they're
     -- relative to GameTooltip which is off-screen at -10000.
     if ownedTip._isShoppingTooltip then
-        AnchorShoppingTooltips(ownedTip._parentOwnedTip)
+        AnchorShoppingTooltips(ownedTip._parentOwnedTip, ownedTip)
         return
     end
 
@@ -1292,6 +1330,22 @@ local function ApplyClassColorName(lines, settings, blizzTip, tooltipType)
     end
 end
 
+-- Build a quick content fingerprint from tooltip lines.
+-- Used to skip redundant repopulation when Blizzard's comparison system
+-- repeatedly fires TooltipDataProcessor with identical content.
+-- Uses only the first line (item name) — Blizzard's comparison cycling
+-- alternates line counts mid-setup (e.g., 9↔13) while showing the same
+-- item. Including line count would defeat the dedup.
+local function BuildContentFingerprint(lines)
+    local n = #lines
+    if n == 0 then return "" end
+    local first = lines[1].leftText or ""
+    -- pcall in case text is a secret value
+    local okFirst, firstStr = pcall(tostring, first)
+    if not okFirst then firstStr = "?" end
+    return firstStr
+end
+
 ---------------------------------------------------------------------------
 -- VISIBILITY WATCHER
 -- Monitors Blizzard tooltip visibility without hooking their frames
@@ -1369,12 +1423,15 @@ local function SetupVisibilityWatcher()
             ownerChanged[blizzTip] = nil
 
             if isNewContent then
+                -- Shopping tooltips defer to the continuous check below.
+                if ownedTip._isShoppingTooltip then
+                    activelyHandling[blizzTip] = true
+                elseif not pendingPopulate[blizzTip] then
                 -- Tooltip just became visible or changed target.
                 -- If not already populated by PostCall (no pending populate and
                 -- owned tip not shown), do a deferred read. This catches tooltips
                 -- that bypass TooltipDataProcessor (world quest map pins, manual
-                -- AddLine tooltips, shopping/comparison tooltips, etc.).
-                if not pendingPopulate[blizzTip] then
+                -- AddLine tooltips, etc.).
                     activelyHandling[blizzTip] = true
                     pendingPopulate[blizzTip] = (pendingPopulate[blizzTip] or 0) + 1
                     local myToken = pendingPopulate[blizzTip]
@@ -1422,10 +1479,61 @@ local function SetupVisibilityWatcher()
                     end)
                 end
             elseif wasShown[blizzTip] and not shown then
-                -- Blizzard tooltip just hid — hide ours (with optional fade-out)
-                local hideDelay = settings and settings.hideDelay or 0
-                StartFadeOut(ownedTip, hideDelay)
-                activelyHandling[blizzTip] = nil
+                -- Shopping tooltip lifetime is tied to GameTooltip OnHide.
+                if not ownedTip._isShoppingTooltip then
+                    local hideDelay = settings and settings.hideDelay or 0
+                    StartFadeOut(ownedTip, hideDelay)
+                    activelyHandling[blizzTip] = nil
+                end
+            end
+
+            -- Shopping tooltip continuous check: throttled per-frame content
+            -- sync (0.3s initial settle, 0.15s updates). Detects content changes
+            -- via full text hash since Blizzard fills stat comparisons async.
+            if ownedTip._isShoppingTooltip then
+                local okBlizzShown, blizzShown = pcall(blizzTip.IsShown, blizzTip)
+                local now = GetTime()
+                local lastRefresh = ownedTip._shoppingLastRefresh or 0
+                local delay = ownedTip:IsShown() and 0.15 or 0.3
+                local canRefresh = (now - lastRefresh) >= delay
+                if okBlizzShown and blizzShown and canRefresh then
+                    local curLines = ReadAllContent(blizzTip)
+                    if #curLines > 0 then
+                        -- Build a content hash from all line texts to detect
+                        -- changes even when line count stays the same.
+                        local hashParts = {}
+                        for hi, hl in ipairs(curLines) do
+                            local ht = hl.leftText
+                            if ht and type(issecretvalue) == "function" and issecretvalue(ht) then
+                                hashParts[hi] = "~"
+                            else
+                                local okS, s = pcall(tostring, ht or "")
+                                hashParts[hi] = okS and s or "~"
+                            end
+                        end
+                        local contentHash = table.concat(hashParts, "|")
+
+                        local curFP = BuildContentFingerprint(curLines)
+                        local itemChanged = curFP ~= (ownedTip._contentFingerprint or "")
+                        local needsUpdate = not ownedTip:IsShown()
+                            or itemChanged
+                            or contentHash ~= ownedTip._contentHash
+
+                        if needsUpdate then
+                            local wasHidden = not ownedTip:IsShown()
+                            ownedTip._contentFingerprint = curFP
+                            ownedTip._contentHash = contentHash
+                            ownedTip._shoppingLastRefresh = now
+                            ownedTip._hasEmbeddedContent = false
+                            ApplyClassColorName(curLines, settings, blizzTip)
+                            PopulateTooltip(ownedTip, curLines, nil, nil, blizzTip)
+                            AnchorOwnedTooltip(ownedTip, blizzTip, settings)
+                            if wasHidden then
+                                ownedTip:Show()
+                            end
+                        end
+                    end
+                end
             end
             wasShown[blizzTip] = shown
 
@@ -1501,22 +1609,27 @@ local function HandleTooltipData(blizzTip, tooltipData, tooltipType)
 
     -- Check visibility
     local settings = Provider:GetSettings()
-    if not settings or not settings.enabled then return end
+    if not settings or not settings.enabled then
+        return
+    end
 
     local owner = nil
     local okOwner
     okOwner, owner = pcall(blizzTip.GetOwner, blizzTip)
     if not okOwner then owner = nil end
 
-    -- Context/visibility check
-    local context = Provider:GetTooltipContext(owner)
-    if not Provider:ShouldShowTooltip(context) then
-        return
-    end
+    -- Shopping tooltips inherit visibility from GameTooltip.
+    if not ownedTip._isShoppingTooltip then
+        -- Context/visibility check
+        local context = Provider:GetTooltipContext(owner)
+        if not Provider:ShouldShowTooltip(context) then
+            return
+        end
 
-    -- Check if owner is faded out
-    if Provider:IsOwnerFadedOut(owner) then
-        return
+        -- Check if owner is faded out
+        if Provider:IsOwnerFadedOut(owner) then
+            return
+        end
     end
 
     -- IMMEDIATE POPULATE: Read lines now and show the owned tooltip right away.
@@ -1526,6 +1639,24 @@ local function HandleTooltipData(blizzTip, tooltipData, tooltipType)
     -- prevents a 1-frame flash of old content.
     local lines, hasExtra = ReadAllContent(blizzTip)
     if #lines > 0 then
+        if ownedTip._isShoppingTooltip then
+            -- Defer shopping tooltips to the watcher — Blizzard adds stat
+            -- comparison lines asynchronously, so showing partial content here
+            -- causes a visible flash. Only reset state when the item changes
+            -- (fingerprint differs). HandleTooltipData fires every frame —
+            -- resetting _shoppingLastRefresh each time would starve the watcher.
+            local fp = BuildContentFingerprint(lines)
+            if fp ~= ownedTip._contentFingerprint then
+                ownedTip._contentFingerprint = fp
+                ownedTip._contentHash = nil
+                ownedTip._shoppingLastRefresh = GetTime()
+                if ownedTip:IsShown() then
+                    ownedTip:Hide()
+                end
+            end
+            return
+        end
+
         ownedTip._hasEmbeddedContent = hasExtra
         local extraLines = AppendSpellIDLines(lines, settings, tooltipData, tooltipType)
         ownedTip._extraLines = extraLines
@@ -1755,6 +1886,16 @@ function OwnedEngine:Initialize()
                 -- cycles (Blizzard clears and re-populates tooltips during setup).
                 -- If the tooltip re-shows within that frame, cancel the hide.
                 pcall(blizzFrame.HookScript, blizzFrame, "OnHide", function(self)
+                    -- Shopping tooltips: don't hide via OnHide. Blizzard's
+                    -- comparison system cycles shopping tooltips through
+                    -- hide/show during setup — reacting to OnHide causes
+                    -- a visible flash on the owned replacement. Instead,
+                    -- shopping tooltip lifetime is tied to the main tooltip
+                    -- (cleaned up when GameTooltip hides below).
+                    if isShopping then
+                        return
+                    end
+
                     C_Timer.After(0, function()
                         -- If Blizzard re-showed the tooltip (refresh cycle), don't hide
                         local okShown, shown = pcall(self.IsShown, self)
@@ -1768,9 +1909,10 @@ function OwnedEngine:Initialize()
                         activelyHandling[self] = nil
                         pendingPopulate[self] = nil
 
-                        -- When main GameTooltip hides, clean up embedded state.
-                        -- Clear the embedded flag so GameTooltipTooltip can be used
-                        -- as a standalone tooltip in other contexts.
+                        -- When main GameTooltip hides, clean up embedded state
+                        -- and shopping tooltips. Clear the embedded flag so
+                        -- GameTooltipTooltip can be used as a standalone tooltip
+                        -- in other contexts.
                         if self == GameTooltip then
                             local itemTooltip = self.ItemTooltip
                             if itemTooltip then
@@ -1788,6 +1930,20 @@ function OwnedEngine:Initialize()
                                     end
                                     activelyHandling[itemTooltip.Tooltip] = nil
                                     pendingPopulate[itemTooltip.Tooltip] = nil
+                                end
+                            end
+
+                            -- Hide all shopping/comparison owned tooltips.
+                            -- Their Blizzard counterparts are torn down by
+                            -- TooltipComparisonManager when GameTooltip hides.
+                            for blizz, owned in pairs(tooltipPairs) do
+                                if owned._isShoppingTooltip then
+                                    owned:Hide()
+                                    owned._contentFingerprint = nil
+                                    owned._contentHash = nil
+                                    owned._shoppingLastRefresh = nil
+                                    activelyHandling[blizz] = nil
+                                    pendingPopulate[blizz] = nil
                                 end
                             end
                         end
