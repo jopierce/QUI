@@ -76,6 +76,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
 
+
+## v2.48.2 - 2026-03-10
+
+### Changed
+- did a major performance pass to reduce unneccesary CPU and memory usage
+- entering the search menu should be pretty much instant now
+
+### Fixed
+- fixed unitframe class color resolution regression
+- fixed blizzard party frames not hiding when wanted
 ## v2.48.1 - 2026-03-09
 
 ### Fixed
