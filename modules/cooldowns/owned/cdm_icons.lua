@@ -2126,18 +2126,31 @@ cdEventFrame:SetScript("OnEvent", function(self, event, arg1)
 end)
 
 -- Visual state polling: 250ms OnUpdate for range + usability checks.
--- Only runs when at least one tracker has rangeIndicator or usabilityIndicator.
-cdEventFrame:SetScript("OnUpdate", function(self, elapsed)
+-- Only active when at least one tracker has rangeIndicator or usabilityIndicator.
+local function RangePollOnUpdate(self, elapsed)
     rangePollElapsed = rangePollElapsed + elapsed
     if rangePollElapsed < RANGE_POLL_INTERVAL then return end
     rangePollElapsed = 0
-
-    -- Quick check: is any visual state indicator enabled?
-    local db = GetDB()
-    if not db then return end
-    local anyEnabled = (db.essential and (db.essential.rangeIndicator or db.essential.usabilityIndicator))
-        or (db.utility and (db.utility.rangeIndicator or db.utility.usabilityIndicator))
-    if not anyEnabled then return end
-
     CDMIcons:UpdateAllIconRanges()
-end)
+end
+
+local rangePollActive = false
+
+--- Call after settings change to start/stop the range poll OnUpdate.
+function CDMIcons:SyncRangePoll()
+    local db = GetDB()
+    local anyEnabled = db
+        and ((db.essential and (db.essential.rangeIndicator or db.essential.usabilityIndicator))
+          or (db.utility and (db.utility.rangeIndicator or db.utility.usabilityIndicator)))
+    if anyEnabled and not rangePollActive then
+        rangePollActive = true
+        rangePollElapsed = 0
+        cdEventFrame:SetScript("OnUpdate", RangePollOnUpdate)
+    elseif not anyEnabled and rangePollActive then
+        rangePollActive = false
+        cdEventFrame:SetScript("OnUpdate", nil)
+    end
+end
+
+-- Start disabled — SyncRangePoll is called from Refresh/init paths
+cdEventFrame:SetScript("OnUpdate", nil)
