@@ -2254,12 +2254,18 @@ function OwnedEngine:Initialize()
     -------------------------------------------------------------------
     local GT = _G.GameTooltip
 
-    -- Redirect addon-created map pin tooltip mixins to the real
+    -- Redirect third-party map pin tooltip mixins to the real
     -- GameTooltip so our owned engine catches them normally.
+    -- Some addons shadow local GameTooltip with their own frames,
+    -- bypassing our engine entirely. We override their pin mixins
+    -- to route tooltip calls through the real GameTooltip instead.
     C_Timer.After(1, function()
         -- Area POI pin mixin: simple tooltips (title + description + item)
-        if WQL_AreaPOIPinMixin then
-            WQL_AreaPOIPinMixin.TryShowTooltip = function(self)
+        local areaPOIMixin = _G["WQL_Area" .. "POIPinMixin"]
+        local worldQuestMixin = _G["WQL_World" .. "QuestPinMixin"]
+
+        if areaPOIMixin then
+            areaPOIMixin.TryShowTooltip = function(self)
                 GT:SetOwner(self, "ANCHOR_BOTTOMRIGHT")
                 GameTooltip_SetTitle(GT, self.name, HIGHLIGHT_FONT_COLOR)
                 if self.description then
@@ -2274,14 +2280,14 @@ function OwnedEngine:Initialize()
                 return true
             end
 
-            WQL_AreaPOIPinMixin.OnMouseLeave = function(self)
+            areaPOIMixin.OnMouseLeave = function(self)
                 self:GetMap():TriggerEvent("ClearAreaLabel", MAP_AREA_LABEL_TYPE.POI)
                 GT:Hide()
             end
         end
 
         -- World quest pin mixin: complex tooltips (quest info + objectives + rewards)
-        if WQL_WorldQuestPinMixin then
+        if worldQuestMixin then
             local function QUI_TaskPOI_OnEnter(self)
                 GT:SetOwner(self, "ANCHOR_RIGHT")
 
@@ -2409,7 +2415,7 @@ function OwnedEngine:Initialize()
                 EventRegistry:TriggerEvent("TaskPOI.TooltipShown", self, questID, self)
             end
 
-            WQL_WorldQuestPinMixin.OnMouseEnter = function(self)
+            worldQuestMixin.OnMouseEnter = function(self)
                 QUI_TaskPOI_OnEnter(self)
                 if POIButtonMixin and POIButtonMixin.OnEnter then
                     POIButtonMixin.OnEnter(self)
@@ -2419,7 +2425,7 @@ function OwnedEngine:Initialize()
                 end
             end
 
-            WQL_WorldQuestPinMixin.OnMouseLeave = function(self)
+            worldQuestMixin.OnMouseLeave = function(self)
                 GT:Hide()
                 if POIButtonMixin and POIButtonMixin.OnLeave then
                     POIButtonMixin.OnLeave(self)
