@@ -304,6 +304,11 @@ local function CreateOwnedTooltip(name)
     frame:SetFrameStrata("TOOLTIP")
     frame:SetFrameLevel(100)
     frame:SetClampedToScreen(true)
+    -- Propagate mouse motion to frames below so owned tooltips don't block
+    -- OnHyperlinkLeave, OnLeave, etc. on underlying frames (chat, map pins).
+    if frame.SetPropagateMouseMotion then
+        frame:SetPropagateMouseMotion(true)
+    end
     frame:Hide()
 
     -- FontString pool
@@ -2291,203 +2296,145 @@ function OwnedEngine:Initialize()
     end)
     mainTip:EnableMouse(true)
     -- Allow mouse clicks (hyperlinks) but don't intercept mouse motion.
-    -- Without this, the owned tooltip steals hover from the frame underneath,
-    -- causing an OnLeave/OnEnter flicker loop when the tooltip overlaps its owner.
+    -- SetMouseMotionEnabled(false) prevents Enter/Leave on this frame, but
+    -- still CONSUMES motion events — frames below never see them. This
+    -- blocks OnHyperlinkLeave on chat frames when the tooltip overlaps,
+    -- causing stuck tooltips. SetPropagateMouseMotion(true) actually lets
+    -- motion pass through so underlying frames receive their events.
     if mainTip.SetMouseMotionEnabled then
         mainTip:SetMouseMotionEnabled(false)
+    end
+    if mainTip.SetPropagateMouseMotion then
+        mainTip:SetPropagateMouseMotion(true)
     end
     mainTip:SetHyperlinksEnabled(true)
 
     -------------------------------------------------------------------
-    -- ADDON TOOLTIP REDIRECTS
-    -- Some addons create their own GameTooltip-template frames and
+    -- EXTERNAL TOOLTIP REGISTRATION
+    -- Some addons create their own GameTooltipTemplate frames and
     -- shadow the local `GameTooltip` variable, bypassing the real
-    -- GameTooltip entirely. We override their mixin methods to
-    -- redirect tooltip calls to the real GameTooltip, which our
-    -- owned engine already handles.
+    -- GameTooltip entirely. Instead of overriding their mixin methods
+    -- (which taints the real GameTooltip), we register their private
+    -- tooltip frames with our engine at the frame level — the same
+    -- OnShow/OnUpdate/OnHide/SetAlpha/SetPoint/SetOwner hooks used
+    -- for Blizzard tooltips suppress the addon's frame and let the
+    -- watcher read its content into an owned replacement.
     -------------------------------------------------------------------
-    local GT = _G.GameTooltip
+    local function RegisterExternalTooltip(extFrame)
+        if not extFrame or tooltipPairs[extFrame] then return end
 
-    -- Redirect third-party map pin tooltip mixins to the real
-    -- GameTooltip so our owned engine catches them normally.
-    -- Some addons shadow local GameTooltip with their own frames,
-    -- bypassing our engine entirely. We override their pin mixins
-    -- to route tooltip calls through the real GameTooltip instead.
+        local frameName = extFrame:GetName() or "QUI_ExternalTooltip"
+        local ownedFrame = CreateOwnedTooltip("QUI_" .. frameName)
+        tooltipPairs[extFrame] = ownedFrame
+        ownedFrames[#ownedFrames + 1] = ownedFrame
+
+        pcall(extFrame.SetFrameLevel, extFrame, 1)
+        pcall(extFrame.SetClampedToScreen, extFrame, false)
+
+        -- SetAlpha suppression
+        local alphaGuard = false
+        hooksecurefunc(extFrame, "SetAlpha", function(self, alpha)
+            if alphaGuard then return end
+            if alpha and alpha > 0 and ShouldSuppressBlizz(self) then
+                local s = Provider and Provider:GetSettings()
+                if s and s.enabled then
+                    alphaGuard = true
+                    pcall(self.SetAlpha, self, 0)
+                    alphaGuard = false
+                end
+            end
+        end)
+
+        -- SetPoint suppression + anchor caching
+        local pointGuard = false
+        hooksecurefunc(extFrame, "SetPoint", function(self, point, relativeTo, relPoint, xOfs, yOfs)
+            if pointGuard then return end
+            if yOfs == -10000 then return end
+            blizzAnchorCache[self] = {
+                point = point,
+                relativeTo = relativeTo,
+                relPoint = relPoint,
+                x = xOfs,
+                y = yOfs,
+            }
+            if ShouldSuppressBlizz(self) then
+                local s = Provider and Provider:GetSettings()
+                if s and s.enabled then
+                    pointGuard = true
+                    pcall(self.ClearAllPoints, self)
+                    pcall(self.SetPoint, self, "TOP", UIParent, "BOTTOM", 0, -10000)
+                    pointGuard = false
+                end
+            end
+        end)
+
+        -- SetOwner: cache owner for anchor mirroring, trigger re-read
+        hooksecurefunc(extFrame, "SetOwner", function(self, owner, anchorType, offsetX, offsetY)
+            ownerChanged[self] = true
+            blizzOwnerCache[self] = { owner = owner, anchorType = anchorType, offsetX = offsetX, offsetY = offsetY }
+            blizzAnchorCache[self] = nil
+            if ShouldSuppressBlizz(self) then
+                local s = Provider and Provider:GetSettings()
+                if s and s.enabled then
+                    pcall(self.StopAnimating, self)
+                    if UIFrameFadeRemoveFrame then pcall(UIFrameFadeRemoveFrame, self) end
+                    pcall(self.SetAlpha, self, 0)
+                    pcall(self.ClearAllPoints, self)
+                    pcall(self.SetPoint, self, "TOP", UIParent, "BOTTOM", 0, -10000)
+                end
+            end
+        end)
+
+        -- OnShow: claim and suppress
+        pcall(extFrame.HookScript, extFrame, "OnShow", function(self)
+            local s = Provider and Provider:GetSettings()
+            if not s or not s.enabled then return end
+            activelyHandling[self] = true
+            pcall(self.StopAnimating, self)
+            if UIFrameFadeRemoveFrame then pcall(UIFrameFadeRemoveFrame, self) end
+            pcall(self.SetAlpha, self, 0)
+            pcall(self.ClearAllPoints, self)
+            pcall(self.SetPoint, self, "TOP", UIParent, "BOTTOM", 0, -10000)
+        end)
+
+        -- OnUpdate: keep suppressed
+        pcall(extFrame.HookScript, extFrame, "OnUpdate", function(self)
+            if not ShouldSuppressBlizz(self) then return end
+            local s = Provider and Provider:GetSettings()
+            if not s or not s.enabled then return end
+            pcall(self.SetAlpha, self, 0)
+            pcall(self.ClearAllPoints, self)
+            pcall(self.SetPoint, self, "TOP", UIParent, "BOTTOM", 0, -10000)
+        end)
+
+        -- OnHide: hide owned tooltip
+        pcall(extFrame.HookScript, extFrame, "OnHide", function(self)
+            C_Timer.After(0, function()
+                local okShown, shown = pcall(self.IsShown, self)
+                if okShown and shown then return end
+                local owned = tooltipPairs[self]
+                if owned then
+                    local s = Provider and Provider:GetSettings()
+                    local hideDelay = s and s.hideDelay or 0
+                    StartFadeOut(owned, hideDelay)
+                end
+                activelyHandling[self] = nil
+                pendingPopulate[self] = nil
+                blizzAnchorCache[self] = nil
+                blizzOwnerCache[self] = nil
+            end)
+        end)
+    end
+
+    -- Deferred discovery: register third-party tooltip frames after
+    -- all addons have loaded. If the addon isn't installed, the global
+    -- is nil and registration is silently skipped.
     C_Timer.After(1, function()
-        -- Area POI pin mixin: simple tooltips (title + description + item)
-        local areaPOIMixin = _G["WQL_Area" .. "POIPinMixin"]
-        local worldQuestMixin = _G["WQL_World" .. "QuestPinMixin"]
-
-        if areaPOIMixin then
-            areaPOIMixin.TryShowTooltip = function(self)
-                GT:SetOwner(self, "ANCHOR_BOTTOMRIGHT")
-                GameTooltip_SetTitle(GT, self.name, HIGHLIGHT_FONT_COLOR)
-                if self.description then
-                    GameTooltip_AddNormalLine(GT, self.description)
-                end
-                if type(self.itemID) == "number" then
-                    EmbeddedItemTooltip_SetItemByID(GT.ItemTooltip, self.itemID)
-                elseif type(self.itemID) == "table" then
-                    EmbeddedItemTooltip_SetItemByID(GT.ItemTooltip, self.itemID[1])
-                end
-                GT:Show()
-                return true
-            end
-
-            areaPOIMixin.OnMouseLeave = function(self)
-                self:GetMap():TriggerEvent("ClearAreaLabel", MAP_AREA_LABEL_TYPE.POI)
-                GT:Hide()
-            end
-        end
-
-        -- World quest pin mixin: complex tooltips (quest info + objectives + rewards)
-        if worldQuestMixin then
-            local function QUI_TaskPOI_OnEnter(self)
-                GT:SetOwner(self, "ANCHOR_RIGHT")
-
-                if not HaveQuestData(self.questID) then
-                    GameTooltip_SetTitle(GT, RETRIEVING_DATA, RED_FONT_COLOR)
-                    GameTooltip_SetTooltipWaitingForData(GT, true)
-                    GT:Show()
-                    return
-                end
-
-                if C_QuestLog.IsQuestCalling(self.questID) then
-                    -- Let Blizzard's calling quest handler populate
-                    if CallingPOI_OnEnter then
-                        CallingPOI_OnEnter(self)
-                    end
-                    return
-                end
-
-                -- Populate quest info on the real GameTooltip
-                local questID = self.questID
-                local widgetSetAdded = false
-                local widgetSetID = C_TaskQuest.GetQuestUIWidgetSetByType and
-                    C_TaskQuest.GetQuestUIWidgetSetByType(questID, Enum.MapIconUIWidgetSetType.Tooltip)
-                local isThreat = C_QuestLog.IsThreatQuest(questID)
-
-                local title, factionID, capped = C_TaskQuest.GetQuestInfoByQuestID(questID)
-                title = title or self.questName
-
-                if self.worldQuest or C_QuestLog.IsWorldQuest(questID) then
-                    self.worldQuest = true
-                    local tagInfo = C_QuestLog.GetQuestTagInfo(questID)
-                    local quality = tagInfo and tagInfo.quality or Enum.WorldQuestQuality.Common
-                    local colorData = ColorManager and ColorManager.GetColorDataForWorldQuestQuality and
-                        ColorManager.GetColorDataForWorldQuestQuality(quality)
-                    if colorData then
-                        GameTooltip_SetTitle(GT, title, colorData.color)
-                    else
-                        GameTooltip_SetTitle(GT, title)
-                    end
-
-                    if C_QuestLog.IsAccountQuest and C_QuestLog.IsAccountQuest(questID) then
-                        GameTooltip_AddColoredLine(GT, ACCOUNT_QUEST_LABEL, ACCOUNT_WIDE_FONT_COLOR)
-                    end
-
-                    QuestUtils_AddQuestTypeToTooltip(GT, questID, NORMAL_FONT_COLOR)
-
-                    local factionData = factionID and C_Reputation.GetFactionDataByID(factionID)
-                    if factionData then
-                        local awardsRep = C_QuestLog.DoesQuestAwardReputationWithFaction(questID, factionID)
-                        local yieldsRewards = (not capped) or C_Reputation.IsFactionParagonForCurrentPlayer(factionID)
-                        if awardsRep and yieldsRewards then
-                            GT:AddLine(factionData.name)
-                        else
-                            GT:AddLine(factionData.name, GRAY_FONT_COLOR:GetRGB())
-                        end
-                    end
-
-                    GameTooltip_AddQuestTimeToTooltip(GT, questID)
-                elseif isThreat then
-                    GameTooltip_SetTitle(GT, title)
-                    GameTooltip_AddQuestTimeToTooltip(GT, questID)
-                else
-                    GameTooltip_SetTitle(GT, title, NORMAL_FONT_COLOR)
-                end
-
-                if self.isCombatAllyQuest or (C_QuestLog.GetQuestType and C_QuestLog.GetQuestType(questID) == Enum.QuestTag.CombatAlly) then
-                    GameTooltip_AddColoredLine(GT, AVAILABLE_FOLLOWER_QUEST, HIGHLIGHT_FONT_COLOR, true)
-                    GameTooltip_AddColoredLine(GT, GRANTS_FOLLOWER_XP, GREEN_FONT_COLOR, true)
-                elseif self.isQuestStart then
-                    GameTooltip_AddColoredLine(GT, AVAILABLE_QUEST, HIGHLIGHT_FONT_COLOR, true)
-                    if AddFloorLocationLine then
-                        AddFloorLocationLine(GT, self.floorLocation, QUESTLINE_LOCATED_ABOVE, QUESTLINE_LOCATED_BELOW)
-                    end
-                else
-                    local questCompleted = C_QuestLog.IsComplete(questID)
-                    if questCompleted and self.shouldShowObjectivesAsStatusBar then
-                        GameTooltip_AddColoredLine(GT, QUEST_DASH .. QUEST_WATCH_QUEST_READY, HIGHLIGHT_FONT_COLOR)
-                    elseif not questCompleted and self.shouldShowObjectivesAsStatusBar then
-                        local questLogIndex = C_QuestLog.GetLogIndexForQuestID(questID)
-                        if questLogIndex then
-                            local _, questDescription = GetQuestLogQuestText(questLogIndex)
-                            if questDescription then
-                                GameTooltip_AddColoredLine(GT, QUEST_DASH .. questDescription, HIGHLIGHT_FONT_COLOR)
-                            end
-                        end
-                    end
-
-                    local numObjectives = self.numbObjectives or C_QuestLog.GetNumQuestObjectives(questID)
-                    for objectiveIndex = 1, numObjectives do
-                        local objectiveText, objectiveType, finished, numFulfilled, numRequired = GetQuestObjectiveInfo(questID, objectiveIndex, false)
-                        local showObjective = not (finished and isThreat)
-                        if showObjective then
-                            if self.shouldShowObjectivesAsStatusBar then
-                                local percent = math.floor((numFulfilled / numRequired) * 100)
-                                GameTooltip_ShowProgressBar(GT, 0, numRequired, numFulfilled, PERCENTAGE_STRING:format(percent))
-                            elseif objectiveText and #objectiveText > 0 then
-                                local color = finished and GRAY_FONT_COLOR or HIGHLIGHT_FONT_COLOR
-                                GT:AddLine(QUEST_DASH .. objectiveText, color.r, color.g, color.b, true)
-                            end
-                        end
-                    end
-
-                    local objectiveText, objectiveType, finished, numFulfilled, numRequired = GetQuestObjectiveInfo(questID, 1, false)
-                    if objectiveType == "progressbar" then
-                        local percent = C_TaskQuest.GetQuestProgressBarInfo(questID)
-                        local showObjective = not (finished and isThreat)
-                        if percent and showObjective then
-                            GameTooltip_ShowProgressBar(GT, 0, 100, percent, PERCENTAGE_STRING:format(percent))
-                        end
-                    end
-
-                    if widgetSetID then
-                        widgetSetAdded = true
-                        GameTooltip_AddWidgetSet(GT, widgetSetID)
-                    end
-
-                    GameTooltip_AddQuestRewardsToTooltip(GT, questID, self.questRewardTooltipStyle or TOOLTIP_QUEST_REWARDS_STYLE_DEFAULT)
-                end
-
-                if not widgetSetAdded and widgetSetID then
-                    GameTooltip_AddWidgetSet(GT, widgetSetID)
-                end
-
-                GT:Show()
-                EventRegistry:TriggerEvent("TaskPOI.TooltipShown", self, questID, self)
-            end
-
-            worldQuestMixin.OnMouseEnter = function(self)
-                QUI_TaskPOI_OnEnter(self)
-                if POIButtonMixin and POIButtonMixin.OnEnter then
-                    POIButtonMixin.OnEnter(self)
-                end
-                if self.OnLegendPinMouseEnter then
-                    self:OnLegendPinMouseEnter()
-                end
-            end
-
-            worldQuestMixin.OnMouseLeave = function(self)
-                GT:Hide()
-                if POIButtonMixin and POIButtonMixin.OnLeave then
-                    POIButtonMixin.OnLeave(self)
-                end
-                if self.OnLegendPinMouseLeave then
-                    self:OnLegendPinMouseLeave()
-                end
-            end
+        -- Map pin addon tooltip (private GameTooltipTemplate frame that
+        -- shadows the local GameTooltip variable, bypassing the real one)
+        local extTip = _G["WQL" .. "AreaPOI" .. "Tooltip"]
+        if extTip then
+            RegisterExternalTooltip(extTip)
         end
     end)
 end
