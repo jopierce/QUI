@@ -1338,6 +1338,33 @@ local OWNER_ANCHOR_MAP = {
 local function AnchorOwnedTooltip(ownedTip, blizzTip, settings)
     if not ownedTip or not blizzTip then return end
 
+    -- Child tooltips (addon-created GameTooltip frames parented to a tracked
+    -- tooltip): anchor beside the parent owned tooltip. Their Blizzard anchor
+    -- points are relative to an intermediate frame that's now off-screen.
+    if ownedTip._isChildTooltip then
+        local parent = ownedTip._parentOwnedTip
+        if not parent or not parent:IsShown() then
+            for _, candidate in ipairs(ownedFrames) do
+                if not candidate._isShoppingTooltip and not candidate._isChildTooltip and candidate:IsShown() then
+                    parent = candidate
+                    break
+                end
+            end
+        end
+        if parent then
+            local parentLeft = parent:GetLeft() or 0
+            local screenWidth = GetScreenWidth() or 1920
+            local anchorRight = (Helpers.SafeToNumber(parentLeft, 0) < (screenWidth / 2))
+            ownedTip:ClearAllPoints()
+            if anchorRight then
+                ownedTip:SetPoint("TOPLEFT", parent, "TOPRIGHT", 2, 0)
+            else
+                ownedTip:SetPoint("TOPRIGHT", parent, "TOPLEFT", -2, 0)
+            end
+        end
+        return
+    end
+
     -- Shopping/comparison tooltips: re-anchor all visible ones as a chain
     -- beside the main tooltip. Don't use Blizzard's anchor points — they're
     -- relative to GameTooltip which is off-screen at -10000.
@@ -1416,8 +1443,8 @@ local function SetupCursorFollow()
         if not settings or not settings.anchorToCursor then return end
 
         for _, ownedTip in ipairs(ownedFrames) do
-            -- Skip shopping tooltips — they anchor to the main tooltip, not cursor
-            if ownedTip:IsShown() and not ownedTip._isShoppingTooltip then
+            -- Skip shopping and child tooltips — they anchor to the main tooltip, not cursor
+            if ownedTip:IsShown() and not ownedTip._isShoppingTooltip and not ownedTip._isChildTooltip then
                 Provider:PositionTooltipAtCursor(ownedTip, settings)
             end
         end
@@ -1626,6 +1653,10 @@ local function SetupVisibilityWatcher()
                         if IsEmbeddedSubTooltip(blizzTip) then return end
                         local okStill, still = pcall(blizzTip.IsShown, blizzTip)
                         if not okStill or not still then return end
+                        -- Discover child tooltips created by other addons
+                        if OwnedEngine._discoverChildTooltips then
+                            OwnedEngine._discoverChildTooltips(blizzTip)
+                        end
                         local lines, hasExtra = ReadAllContent(blizzTip)
                         if #lines > 0 then
                             ownedTip._hasEmbeddedContent = hasExtra
@@ -1766,6 +1797,8 @@ local function HandleTooltipData(blizzTip, tooltipData, tooltipType)
     local ownedTip = tooltipPairs[blizzTip]
     if not ownedTip then return end
 
+    local tipName = blizzTip:GetName() or tostring(blizzTip)
+
     -- Skip if this frame is currently used as an embedded sub-tooltip.
     -- Its content is already merged into the main tooltip via ReadEmbeddedContent.
     if IsEmbeddedSubTooltip(blizzTip) then
@@ -1858,6 +1891,14 @@ local function HandleTooltipData(blizzTip, tooltipData, tooltipType)
         if not okStillShown or not stillShown then
             ownedTip:Hide()
             return
+        end
+
+        -- Discover child tooltips created by other addons in response to
+        -- TooltipDataProcessor events. They fire AFTER OnShow, so the
+        -- child frame didn't exist when OnShow ran. By this deferred
+        -- callback, the external addon has created and parented it.
+        if OwnedEngine._discoverChildTooltips then
+            OwnedEngine._discoverChildTooltips(blizzTip)
         end
 
         -- Read all content (text lines + embedded items + widgets).
@@ -2071,6 +2112,13 @@ function OwnedEngine:Initialize()
                         pcall(self.SetPoint, self, "TOP", UIParent, "BOTTOM", 0, -10000)
                         return
                     end
+                    -- Lazy child tooltip discovery: addons may create
+                    -- GameTooltip-type children after init (e.g., on first
+                    -- hover over a group listing). Scan and register now.
+                    if OwnedEngine._discoverChildTooltips then
+                        OwnedEngine._discoverChildTooltips(self)
+                    end
+
                     -- Claim this tooltip for our engine
                     activelyHandling[self] = true
                     pcall(self.StopAnimating, self)
@@ -2154,9 +2202,9 @@ function OwnedEngine:Initialize()
                                 end
                             end
 
-                            -- Hide all shopping/comparison owned tooltips.
-                            -- Their Blizzard counterparts are torn down by
-                            -- TooltipComparisonManager when GameTooltip hides.
+                            -- Hide all shopping/comparison and child owned tooltips.
+                            -- Their Blizzard counterparts are torn down or hidden
+                            -- when GameTooltip hides (children follow parent).
                             for blizz, owned in pairs(tooltipPairs) do
                                 if owned._isShoppingTooltip then
                                     owned:Hide()
@@ -2165,6 +2213,19 @@ function OwnedEngine:Initialize()
                                     owned._shoppingLastRefresh = nil
                                     activelyHandling[blizz] = nil
                                     pendingPopulate[blizz] = nil
+                                elseif owned._isChildTooltip then
+                                    owned:Hide()
+                                    owned._contentHash = nil
+                                    owned._contentFingerprint = nil
+                                    activelyHandling[blizz] = nil
+                                    pendingPopulate[blizz] = nil
+                                    -- Explicitly hide the Blizzard child frame so
+                                    -- the addon's next Show() triggers OnShow and
+                                    -- the watcher detects a wasShown transition.
+                                    -- Without this, IsShown() stays true (we only
+                                    -- suppressed with alpha=0) and subsequent hovers
+                                    -- never refresh the child's content.
+                                    pcall(blizz.Hide, blizz)
                                 end
                             end
                         end
@@ -2627,6 +2688,43 @@ function OwnedEngine:Initialize()
                 end
             end)
         end)
+
+        -- If the frame is already shown (discovered mid-display), suppress
+        -- it immediately and trigger a deferred populate so the watcher
+        -- picks it up on the next frame.
+        local okShown, isShown = pcall(extFrame.IsShown, extFrame)
+        if okShown and isShown then
+            activelyHandling[extFrame] = true
+            pcall(extFrame.StopAnimating, extFrame)
+            if UIFrameFadeRemoveFrame then pcall(UIFrameFadeRemoveFrame, extFrame) end
+            pcall(extFrame.SetAlpha, extFrame, 0)
+            pcall(extFrame.SetClampedToScreen, extFrame, false)
+            pcall(extFrame.ClearAllPoints, extFrame)
+            pcall(extFrame.SetPoint, extFrame, "TOP", UIParent, "BOTTOM", 0, -10000)
+
+            -- Deferred populate: read the already-populated content next frame
+            pendingPopulate[extFrame] = (pendingPopulate[extFrame] or 0) + 1
+            local myToken = pendingPopulate[extFrame]
+            C_Timer.After(0, function()
+                if pendingPopulate[extFrame] ~= myToken then return end
+                pendingPopulate[extFrame] = nil
+                local okS, s = pcall(extFrame.IsShown, extFrame)
+                if not okS or not s then return end
+                local lines, hasExtra = ReadAllContent(extFrame)
+                if #lines > 0 then
+                    local settings = Provider:GetSettings()
+                    ownedFrame._hasEmbeddedContent = hasExtra
+                    ApplyClassColorName(lines, settings, extFrame)
+                    PopulateTooltip(ownedFrame, lines, nil, nil, extFrame)
+                    AnchorOwnedTooltip(ownedFrame, extFrame, settings)
+                    ownedFrame:Show()
+
+                    -- Store hash for late re-checks
+                    ownedFrame._contentHash = BuildContentHash(lines)
+                    ownedFrame._contentFingerprint = BuildContentFingerprint(lines)
+                end
+            end)
+        end
     end
 
     -- Deferred discovery: register third-party tooltip frames after
@@ -2665,6 +2763,56 @@ function OwnedEngine:Initialize()
             if extTip then
                 RegisterExternalTooltip(extTip, true, wqlPoiOwned)
             end
+        end
+
+        -- Generic child tooltip discovery: scan all tracked tooltips for
+        -- child frames that are GameTooltip-type (inherit GameTooltipTemplate).
+        -- Addons commonly parent their tooltip frames to GameTooltip so they
+        -- follow its position. These child tooltips fire TooltipDataProcessor
+        -- events but we skip them because they're not in tooltipPairs.
+        -- Discover and register them automatically.
+        local function DiscoverChildTooltips(parentBlizz, rootOwned)
+            -- rootOwned: the owned tooltip for the top-level tracked frame.
+            -- Passed through recursion so nested children (e.g., tooltip
+            -- parented to anchor frame parented to GameTooltip) still
+            -- resolve to the correct parent for anchoring.
+            local resolvedOwned = rootOwned or tooltipPairs[parentBlizz] or mainTip
+            local children = { parentBlizz:GetChildren() }
+            for _, child in ipairs(children) do
+                if not tooltipPairs[child] then
+                    local okType, cType = pcall(child.GetObjectType, child)
+                    if okType and cType == "GameTooltip" then
+                        -- This is a GameTooltipTemplate child — register it
+                        local okName, cName = pcall(child.GetName, child)
+                        local name = okName and cName or nil
+                        if name then
+                            RegisterExternalTooltip(child)
+                            -- Mark as child tooltip so anchoring chains it
+                            -- beside the parent owned tooltip instead of
+                            -- mirroring its (now off-screen) Blizzard anchor.
+                            local childOwned = tooltipPairs[child]
+                            if childOwned then
+                                childOwned._isChildTooltip = true
+                                childOwned._parentOwnedTip = resolvedOwned
+                            end
+                        end
+                    end
+                    -- Recurse: the tooltip might be nested (e.g., parented
+                    -- to an anchor frame that's parented to GameTooltip)
+                    local okGC = pcall(child.GetChildren, child)
+                    if okGC then
+                        DiscoverChildTooltips(child, resolvedOwned)
+                    end
+                end
+            end
+        end
+
+        -- Store for lazy discovery from OnShow hooks
+        OwnedEngine._discoverChildTooltips = DiscoverChildTooltips
+        OwnedEngine._registerExternalTooltip = RegisterExternalTooltip
+
+        for trackedBlizz in pairs(tooltipPairs) do
+            DiscoverChildTooltips(trackedBlizz)
         end
     end)
 end
