@@ -40,20 +40,6 @@ local function SafeHideFrame(frame)
     hiddenFrames[frame] = true
 end
 
-local function SafeHideFrameOffscreen(frame)
-    if not frame then return end
-    if InCombatLockdown() then
-        SafeHideFrame(frame)
-        return
-    end
-    pcall(function()
-        frame:SetAlpha(0)
-        frame:EnableMouse(false)
-        frame:ClearAllPoints()
-        frame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", -10000, 10000)
-    end)
-    hiddenFrames[frame] = true
-end
 
 local function SafeScaleContainer(frame, hide)
     if not frame then return end
@@ -250,7 +236,7 @@ local function HideBlizzardPartyFrames()
     for i = 1, 4 do
         local pf = _G["PartyMemberFrame" .. i]
         if pf then
-            SafeHideFrameOffscreen(pf)
+            SafeHideFrame(pf)
             StripUnitFrameEvents(pf)
             InstallShowHook(pf)
         end
