@@ -2941,12 +2941,17 @@ local function BuildClickCastSettings(content, gfdb, onChange)
 
     local dropLabel = dropZone:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     dropLabel:SetPoint("CENTER", 0, 0)
-    dropLabel:SetText("Drop a spell from your spellbook")
+    dropLabel:SetText("Drop a spell or macro here")
     dropLabel:SetTextColor(C.textMuted[1], C.textMuted[2], C.textMuted[3], 1)
 
     local addState = { bindingType = "mouse", button = "LeftButton", key = nil, modifiers = "", actionType = "spell", spellName = "", macroText = "" }
-    local spellInput
+    local spellInput, macroInput, actionDrop
     local mouseButtonContainer, keyCaptureContainer
+
+    local function IsDraggingSpellOrMacro()
+        local cursorType = GetCursorInfo()
+        return cursorType == "spell" or cursorType == "macro"
+    end
 
     dropZone:SetScript("OnReceiveDrag", function()
         local cursorType, id1, id2, _, id4 = GetCursorInfo()
@@ -2965,19 +2970,37 @@ local function BuildClickCastSettings(content, gfdb, onChange)
                     addState.spellName = name
                     addState.actionType = "spell"
                     if spellInput then spellInput:SetText(name) end
+                    if actionDrop then actionDrop:SetValue("spell", true) end
+                    if spellInputContainer then spellInputContainer:Show() end
+                    if macroInputContainer then macroInputContainer:Hide() end
+                end
+            end
+            ClearCursor()
+        elseif cursorType == "macro" then
+            local macroIndex = id1
+            if macroIndex then
+                local name, _, body = GetMacroInfo(macroIndex)
+                if body then
+                    addState.actionType = "macro"
+                    addState.macroText = body
+                    addState.spellName = name or "Macro"
+                    if macroInput then macroInput:SetText(body) end
+                    if actionDrop then actionDrop:SetValue("macro", true) end
+                    if macroInputContainer then macroInputContainer:Show() end
+                    if spellInputContainer then spellInputContainer:Hide() end
                 end
             end
             ClearCursor()
         end
     end)
     dropZone:SetScript("OnMouseUp", function(self)
-        if GetCursorInfo() == "spell" then
+        if IsDraggingSpellOrMacro() then
             local handler = self:GetScript("OnReceiveDrag")
             if handler then handler() end
         end
     end)
     dropZone:SetScript("OnEnter", function(self)
-        if GetCursorInfo() == "spell" then
+        if IsDraggingSpellOrMacro() then
             self:SetBackdropBorderColor(C.accent[1], C.accent[2], C.accent[3], 1)
             dropLabel:SetTextColor(C.accent[1], C.accent[2], C.accent[3], 1)
         end
@@ -3082,7 +3105,7 @@ local function BuildClickCastSettings(content, gfdb, onChange)
 
     -- Action type dropdown
     local spellInputContainer, macroInputContainer
-    local actionDrop = GUI:CreateFormDropdown(addContainer, "Action Type", ACTION_TYPE_OPTIONS, "actionType", addState, function(val)
+    actionDrop = GUI:CreateFormDropdown(addContainer, "Action Type", ACTION_TYPE_OPTIONS, "actionType", addState, function(val)
         addState.actionType = val
         if spellInputContainer then spellInputContainer:SetShown(val == "spell") end
         if macroInputContainer then macroInputContainer:SetShown(val == "macro") end
@@ -3145,7 +3168,7 @@ local function BuildClickCastSettings(content, gfdb, onChange)
     macroInputBg:SetBackdropColor(0.08, 0.08, 0.08, 1)
     macroInputBg:SetBackdropBorderColor(0.35, 0.35, 0.35, 1)
 
-    local macroInput = CreateFrame("EditBox", nil, macroInputBg)
+    macroInput = CreateFrame("EditBox", nil, macroInputBg)
     macroInput:SetPoint("LEFT", 8, 0)
     macroInput:SetPoint("RIGHT", -8, 0)
     macroInput:SetHeight(22)
@@ -3163,7 +3186,7 @@ local function BuildClickCastSettings(content, gfdb, onChange)
         SetHeightPx(dropZone, 68)
         ApplyPixelBackdrop(dropZone, 1, true)
         dropZone:SetBackdropColor(C.bg[1], C.bg[2], C.bg[3], 0.8)
-        if GetCursorInfo() == "spell" then
+        if IsDraggingSpellOrMacro() then
             dropZone:SetBackdropBorderColor(C.accent[1], C.accent[2], C.accent[3], 1)
         else
             dropZone:SetBackdropBorderColor(C.accent[1], C.accent[2], C.accent[3], 0.5)

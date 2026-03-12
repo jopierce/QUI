@@ -54,6 +54,29 @@ local GetMouseFoci = GetMouseFoci
 local WorldFrame = WorldFrame
 
 ---------------------------------------------------------------------------
+-- Cached UI Scale
+-- GetEffectiveScale() can return secret values during combat.
+-- Cache the scale on UI_SCALE_CHANGED and use the cached value for
+-- cursor positioning arithmetic. This is the MidnightTooltip pattern.
+---------------------------------------------------------------------------
+local cachedUIScale = 1
+
+local function UpdateCachedUIScale()
+    local ok, scale = pcall(UIParent.GetEffectiveScale, UIParent)
+    if ok and scale and type(scale) == "number" and scale > 0 then
+        cachedUIScale = scale
+    end
+end
+
+local scaleEventFrame = CreateFrame("Frame")
+scaleEventFrame:RegisterEvent("UI_SCALE_CHANGED")
+scaleEventFrame:RegisterEvent("DISPLAY_SIZE_CHANGED")
+scaleEventFrame:RegisterEvent("PLAYER_LOGIN")
+scaleEventFrame:SetScript("OnEvent", function()
+    UpdateCachedUIScale()
+end)
+
+---------------------------------------------------------------------------
 -- Mouse Focus Detection
 -- PERFORMANCE: Cached to prevent repeated GetMouseFoci() calls with @mouseover macros
 ---------------------------------------------------------------------------
@@ -271,15 +294,13 @@ end
 function TooltipProvider:PositionTooltipAtCursor(tooltip, settings)
     if not tooltip then return end
     if tooltip.IsForbidden and tooltip:IsForbidden() then return end
-    -- No combat guard needed — owned tooltip frames are addon-created,
-    -- so ClearAllPoints/SetPoint are safe during combat.
 
     local cursorX, cursorY = GetCursorPosition()
     if not cursorX or not cursorY then return end
 
-    local scale = UIParent:GetEffectiveScale()
-    if not scale or scale == 0 then return end
-
+    -- Use cached scale (updated on UI_SCALE_CHANGED) to avoid calling
+    -- GetEffectiveScale() during combat where it may return secret values.
+    local scale = cachedUIScale
     local anchor, offsetX, offsetY = self:GetCursorAnchorConfig(settings)
     tooltip:ClearAllPoints()
     tooltip:SetPoint(anchor, UIParent, "BOTTOMLEFT", (cursorX / scale) + offsetX, (cursorY / scale) + offsetY)
