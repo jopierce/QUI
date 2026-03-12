@@ -2848,12 +2848,17 @@ local function BuildClickCastSettings(content, gfdb, onChange)
     local GFCC = ns.QUI_GroupFrameClickCast
 
     local ACTION_TYPE_OPTIONS = {
-        { value = "spell",  text = "Spell" },
-        { value = "macro",  text = "Macro" },
-        { value = "target", text = "Target Unit" },
-        { value = "focus",  text = "Set Focus" },
-        { value = "assist", text = "Assist" },
-        { value = "menu",   text = "Unit Menu" },
+        { value = "spell",        text = "Spell" },
+        { value = "macro",        text = "Macro" },
+        { value = "target",       text = "Target Unit" },
+        { value = "focus",        text = "Set Focus" },
+        { value = "assist",       text = "Assist" },
+        { value = "menu",         text = "Unit Menu" },
+        { value = "ping",         text = "Ping (Contextual)" },
+        { value = "ping_assist",  text = "Ping: Assist" },
+        { value = "ping_attack",  text = "Ping: Attack" },
+        { value = "ping_warning", text = "Ping: Warning" },
+        { value = "ping_onmyway", text = "Ping: On My Way" },
     }
     local BINDING_TYPE_OPTIONS = {
         { value = "mouse", text = "Mouse Button" },
@@ -2877,11 +2882,23 @@ local function BuildClickCastSettings(content, gfdb, onChange)
         { value = "shift-ctrl-alt", text = "Shift+Ctrl+Alt" },
     }
     local ACTION_FALLBACK_ICONS = {
-        target = "Interface\\Icons\\Ability_Hunter_SniperShot",
-        focus  = "Interface\\Icons\\Ability_TrickShot",
-        assist = "Interface\\Icons\\Ability_Hunter_MasterMarksman",
-        macro  = "Interface\\Icons\\INV_Misc_Note_01",
-        menu   = "Interface\\Icons\\INV_Misc_GroupNeedMore",
+        target       = "Interface\\Icons\\Ability_Hunter_SniperShot",
+        focus        = "Interface\\Icons\\Ability_TrickShot",
+        assist       = "Interface\\Icons\\Ability_Hunter_MasterMarksman",
+        macro        = "Interface\\Icons\\INV_Misc_Note_01",
+        menu         = "Interface\\Icons\\INV_Misc_GroupNeedMore",
+        ping         = "Interface\\Icons\\Ping_Chat_Default",
+        ping_assist  = "Interface\\Icons\\Ping_Chat_Assist",
+        ping_attack  = "Interface\\Icons\\Ping_Chat_Attack",
+        ping_warning = "Interface\\Icons\\Ping_Chat_Warning",
+        ping_onmyway = "Interface\\Icons\\Ping_Chat_OnMyWay",
+    }
+    local PING_DISPLAY_NAMES = {
+        ping         = "Ping",
+        ping_assist  = "Ping: Assist",
+        ping_attack  = "Ping: Attack",
+        ping_warning = "Ping: Warning",
+        ping_onmyway = "Ping: On My Way",
     }
 
     -- Spec context label
@@ -3318,7 +3335,8 @@ local function BuildClickCastSettings(content, gfdb, onChange)
                 spellText:SetJustifyH("LEFT")
                 local displayName = spellName or actionType
                 if actionType == "macro" then displayName = "Macro"
-                elseif actionType == "menu" then displayName = "Unit Menu" end
+                elseif actionType == "menu" then displayName = "Unit Menu"
+                elseif PING_DISPLAY_NAMES[actionType] then displayName = PING_DISPLAY_NAMES[actionType] end
                 spellText:SetText(displayName)
                 spellText:SetTextColor(C.textMuted[1], C.textMuted[2], C.textMuted[3], 1)
                 local removeBtn = CreateFrame("Button", nil, row, "BackdropTemplate")

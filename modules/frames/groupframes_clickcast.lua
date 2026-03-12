@@ -27,6 +27,25 @@ local keyboardBindings = {} -- Resolved keyboard bindings for current spec
 local isEnabled = false
 
 ---------------------------------------------------------------------------
+-- PING MACROS: /ping [@mouseover] <type> for each ping action type
+---------------------------------------------------------------------------
+local PING_MACROS = {
+    ping         = "/ping [@mouseover]",
+    ping_assist  = "/ping [@mouseover] assist",
+    ping_attack  = "/ping [@mouseover] attack",
+    ping_warning = "/ping [@mouseover] warning",
+    ping_onmyway = "/ping [@mouseover] onmyway",
+}
+
+local PING_LABELS = {
+    ping         = "Ping",
+    ping_assist  = "Ping: Assist",
+    ping_attack  = "Ping: Attack",
+    ping_warning = "Ping: Warning",
+    ping_onmyway = "Ping: On My Way",
+}
+
+---------------------------------------------------------------------------
 -- MODIFIER / BUTTON HELPERS
 ---------------------------------------------------------------------------
 local BUTTON_NAMES = {
@@ -193,6 +212,9 @@ local function SetFrameKeyAttributes(frame)
             frame:SetAttribute("type-" .. vBtn, "assist")
         elseif actionType == "menu" then
             frame:SetAttribute("type-" .. vBtn, "togglemenu")
+        elseif actionType:match("^ping") then
+            frame:SetAttribute("type-" .. vBtn, "macro")
+            frame:SetAttribute("macrotext-" .. vBtn, PING_MACROS[actionType] or "/ping [@mouseover]")
         end
     end
 end
@@ -249,7 +271,7 @@ local function ResolveBindings()
                 modifiers = binding.modifiers or "",
                 spell = binding.spell,
                 macro = binding.macro,
-                actionType = binding.actionType, -- "spell", "macro", "target", "focus", "assist"
+                actionType = binding.actionType,
             })
         end
     end
@@ -306,6 +328,9 @@ local function SetupFrameClickCast(frame)
             frame:SetAttribute(prefix .. "type" .. btnNum, "assist")
         elseif actionType == "menu" then
             frame:SetAttribute(prefix .. "type" .. btnNum, "togglemenu")
+        elseif actionType:match("^ping") then
+            frame:SetAttribute(prefix .. "type" .. btnNum, "macro")
+            frame:SetAttribute(prefix .. "macrotext" .. btnNum, PING_MACROS[actionType] or "/ping [@mouseover]")
         end
     end
 
@@ -360,6 +385,9 @@ local function SetupFrameClickCast(frame)
                         elseif actionType == "macro" then
                             self:SetAttribute("type1", "macro")
                             self:SetAttribute("macrotext1", normalBinding.macro)
+                        elseif actionType:match("^ping") then
+                            self:SetAttribute("type1", "macro")
+                            self:SetAttribute("macrotext1", PING_MACROS[actionType] or "/ping [@mouseover]")
                         else
                             self:SetAttribute("type1", actionType)
                         end
@@ -386,7 +414,8 @@ local function SetupFrameClickCast(frame)
                     for _, binding in ipairs(activeBindings) do
                         local modLabel = MODIFIER_LABELS[binding.modifiers or ""] or ""
                         local buttonLabel = BUTTON_NAMES[binding.button] or binding.button
-                        local spellLabel = binding.spell or binding.actionType or "?"
+                        local at = binding.actionType or "spell"
+                        local spellLabel = PING_LABELS[at] or binding.spell or at or "?"
                         GameTooltip:AddDoubleLine(
                             modLabel .. buttonLabel,
                             spellLabel,
@@ -396,7 +425,8 @@ local function SetupFrameClickCast(frame)
                     for _, binding in ipairs(keyboardBindings) do
                         local modLabel = MODIFIER_LABELS[binding.modifiers or ""] or ""
                         local keyLabel = binding.key or "?"
-                        local spellLabel = binding.spell or binding.actionType or "?"
+                        local at = binding.actionType or "spell"
+                        local spellLabel = PING_LABELS[at] or binding.spell or at or "?"
                         GameTooltip:AddDoubleLine(
                             modLabel .. keyLabel,
                             spellLabel,
