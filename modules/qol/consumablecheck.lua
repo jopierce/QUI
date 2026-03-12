@@ -161,6 +161,7 @@ local ToggleConsumablePicker
 local HideConsumablePicker
 local StartButtonGlow
 local StopButtonGlow
+local RequestHideConsumablesFrame
 local ITEM_CLASS_CONSUMABLE_ID = (Enum and Enum.ItemClass and Enum.ItemClass.Consumable) or LE_ITEM_CLASS_CONSUMABLE
 local FOOD_AND_DRINK_SUBCLASS_ID = Enum and Enum.ItemConsumableSubclass and Enum.ItemConsumableSubclass.FoodAndDrink
 local FLASK_SUBCLASS_ID = Enum and Enum.ItemConsumableSubclass and Enum.ItemConsumableSubclass.Flask
@@ -481,6 +482,50 @@ ConsumablesFrame:SetSize(DEFAULT_BUTTON_SIZE * 6 + BUTTON_SPACING * 5, DEFAULT_B
 ConsumablesFrame:Hide()
 ConsumablesFrame.buttons = {}
 
+local consumableCombatDeferFrame
+local hideConsumablesAfterCombat = false
+
+local function HideConsumablesFrameNow()
+    if not ConsumablesFrame then return end
+    ConsumablesFrame:SetAlpha(1)
+    ConsumablesFrame:Hide()
+    for _, button in pairs(ConsumablesFrame.buttons) do
+        if type(button) == "table" and button.click then
+            button.click:Hide()
+        end
+    end
+end
+
+local function EnsureConsumableCombatDeferFrame()
+    if consumableCombatDeferFrame then return end
+    consumableCombatDeferFrame = CreateFrame("Frame")
+    consumableCombatDeferFrame:SetScript("OnEvent", function(f, event)
+        if event ~= "PLAYER_REGEN_ENABLED" then return end
+        f:UnregisterEvent("PLAYER_REGEN_ENABLED")
+        if hideConsumablesAfterCombat then
+            hideConsumablesAfterCombat = false
+            HideConsumablesFrameNow()
+        end
+    end)
+end
+
+RequestHideConsumablesFrame = function()
+    HideConsumablePicker()
+    if InCombatLockdown() then
+        hideConsumablesAfterCombat = true
+        if ConsumablesFrame:IsShown() then
+            -- In combat we cannot hide this protected frame safely, so make it invisible immediately.
+            ConsumablesFrame:SetAlpha(0)
+        end
+        EnsureConsumableCombatDeferFrame()
+        consumableCombatDeferFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+        return
+    end
+
+    hideConsumablesAfterCombat = false
+    HideConsumablesFrameNow()
+end
+
 -- Close button
 local closeButton = CreateFrame("Button", nil, ConsumablesFrame)
 closeButton:SetSize(DEFAULT_BUTTON_SIZE * 4, 18)
@@ -504,8 +549,7 @@ closeButton:SetScript("OnLeave", function(self)
     self.text:SetTextColor(0.8, 0.8, 0.8, 1)
 end)
 closeButton:SetScript("OnClick", function()
-    HideConsumablePicker()
-    ConsumablesFrame:Hide()
+    RequestHideConsumablesFrame()
 end)
 ConsumablesFrame.closeButton = closeButton
 
@@ -1280,6 +1324,7 @@ local function ShowConsumablesStandalone()
     InitializeButtons()
     UpdateConsumables()
     ConsumablesFrame:SetScale(GetConsumableScale())
+    ConsumablesFrame:SetAlpha(1)
 
     local settings = GetSettings()
     local anchorMode = settings and settings.consumableAnchorMode ~= false
@@ -1314,34 +1359,12 @@ local function OnReadyCheck(starter, timer)
     HideConsumablePicker()
     PositionConsumablesFrame()
     UpdateConsumables()
+    ConsumablesFrame:SetAlpha(1)
     ConsumablesFrame:Show()
 end
 
-local consumableCombatDeferFrame  -- reused for combat-deferred hides
-
 local function OnReadyCheckFinished()
-    HideConsumablePicker()
-    if not InCombatLockdown() then
-        ConsumablesFrame:Hide()
-        for _, button in pairs(ConsumablesFrame.buttons) do
-            if type(button) == "table" and button.click then button.click:Hide() end
-        end
-    else
-        -- Defer hide until combat ends to avoid ADDON_ACTION_BLOCKED
-        if not consumableCombatDeferFrame then
-            consumableCombatDeferFrame = CreateFrame("Frame")
-            consumableCombatDeferFrame:SetScript("OnEvent", function(f)
-                f:UnregisterAllEvents()
-                if ConsumablesFrame then
-                    ConsumablesFrame:Hide()
-                    for _, btn in pairs(ConsumablesFrame.buttons) do
-                        if type(btn) == "table" and btn.click then btn.click:Hide() end
-                    end
-                end
-            end)
-        end
-        consumableCombatDeferFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
-    end
+    RequestHideConsumablesFrame()
 end
 
 local function OnInstanceEnter()
@@ -1508,6 +1531,9 @@ combatFrame:SetScript("OnEvent", function(self, event)
             end
         end
     elseif event == "PLAYER_REGEN_ENABLED" then
+        if hideConsumablesAfterCombat then
+            return
+        end
         UpdateConsumables()
     end
 end)
@@ -1553,4 +1579,4 @@ end
 _G.QUI_ToggleConsumablesMover = ToggleMover
 
 _G.QUI_ShowConsumables = function() ShowConsumablesStandalone() end
-_G.QUI_HideConsumables = function() ConsumablesFrame:Hide() end
+_G.QUI_HideConsumables = function() RequestHideConsumablesFrame() end
