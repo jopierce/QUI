@@ -150,7 +150,6 @@ end
 -- Pending combat-deferred operations
 local pendingResize = false
 local pendingVisibilityUpdate = false
-local pendingInitialize = false
 local pendingRegisterClicks = false
 
 ---------------------------------------------------------------------------
@@ -2889,10 +2888,6 @@ local function OnEvent(self, event, arg1, ...)
             pendingVisibilityUpdate = false
             UpdateHeaderVisibility()
         end
-        if pendingInitialize then
-            pendingInitialize = false
-            QUI_GF:Initialize()
-        end
         if pendingRegisterClicks then
             pendingRegisterClicks = false
             DecorateHeaderChildren(QUI_GF.headers.party)
@@ -3088,11 +3083,6 @@ function QUI_GF:Initialize()
     local db = GetSettings()
     if not db or not db.enabled then return end
 
-    if InCombatLockdown() then
-        pendingInitialize = true
-        return
-    end
-
     -- Create headers
     CreateHeaders()
 
@@ -3183,11 +3173,6 @@ initFrame:SetScript("OnEvent", function(self, event, arg1)
                 UpdateFrameScaling(true)
                 QUI_GF:RefreshAllFrames()
             end)
-        end
-    elseif event == "PLAYER_REGEN_ENABLED" then
-        if pendingInitialize then
-            pendingInitialize = false
-            QUI_GF:Initialize()
         end
     end
 end)
