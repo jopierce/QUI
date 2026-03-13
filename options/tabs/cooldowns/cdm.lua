@@ -60,6 +60,9 @@ local function EnsureNCDMDefaults(db)
     if not db.ncdm.essential then
         db.ncdm.essential = { enabled = true }
     end
+    if db.ncdm.essential.growthDirection == nil then
+        db.ncdm.essential.growthDirection = "DOWN"
+    end
     for i = 1, 3 do
         local rowKey = "row" .. i
         if not db.ncdm.essential[rowKey] then
@@ -77,6 +80,9 @@ local function EnsureNCDMDefaults(db)
     -- Ensure utility exists
     if not db.ncdm.utility then
         db.ncdm.utility = { enabled = true }
+    end
+    if db.ncdm.utility.growthDirection == nil then
+        db.ncdm.utility.growthDirection = "DOWN"
     end
     for i = 1, 3 do
         local rowKey = "row" .. i
@@ -1371,6 +1377,18 @@ local function CreateCDMSetupPage(parent)
             y = y - FORM_ROW
             tabContent._currentY = y
 
+            -- Row Growth Direction dropdown
+            ess.growthDirection = ess.growthDirection or "DOWN"
+            local growthOptions = {
+                {value = "DOWN", text = "Down (default)"},
+                {value = "UP", text = "Up"},
+            }
+            local growthDropdown = GUI:CreateFormDropdown(tabContent, "Row Growth Direction", growthOptions, "growthDirection", ess, RefreshNCDM)
+            growthDropdown:SetPoint("TOPLEFT", PAD, y)
+            growthDropdown:SetPoint("RIGHT", tabContent, "RIGHT", -PAD, 0)
+            y = y - FORM_ROW
+            tabContent._currentY = y
+
             -- Hint text
             local hintText = GUI:CreateLabel(tabContent, "Tip: Set Icon Size to 100% in Edit Mode for best results.", 11, C.textMuted)
             hintText:SetPoint("TOPLEFT", PAD, y)
@@ -1467,6 +1485,18 @@ local function CreateCDMSetupPage(parent)
             local directionDropdown = GUI:CreateFormDropdown(tabContent, "Layout Direction", directionOptions, "layoutDirection", util, RefreshNCDM)
             directionDropdown:SetPoint("TOPLEFT", PAD, y)
             directionDropdown:SetPoint("RIGHT", tabContent, "RIGHT", -PAD, 0)
+            y = y - FORM_ROW
+            tabContent._currentY = y
+
+            -- Row Growth Direction dropdown
+            util.growthDirection = util.growthDirection or "DOWN"
+            local growthOptions = {
+                {value = "DOWN", text = "Down (default)"},
+                {value = "UP", text = "Up"},
+            }
+            local growthDropdown = GUI:CreateFormDropdown(tabContent, "Row Growth Direction", growthOptions, "growthDirection", util, RefreshNCDM)
+            growthDropdown:SetPoint("TOPLEFT", PAD, y)
+            growthDropdown:SetPoint("RIGHT", tabContent, "RIGHT", -PAD, 0)
             y = y - FORM_ROW
             tabContent._currentY = y
 
