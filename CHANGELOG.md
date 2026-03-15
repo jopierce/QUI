@@ -87,6 +87,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
 
+
+## v2.52.0 - 2026-03-15
+
+### Added
+- added customizable colors to CDM buff bars
+- added mount, target, m+ rating to tooltip information options
+
+### Fixed
+- fix group frames defensives would show random buffs when players are out of range
+- fix contained tooltips showing their own backdrops and borders
+- fix castbar border frame strata
 ## v2.51.1 - 2026-03-14
 
 ### Added
