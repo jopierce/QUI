@@ -303,6 +303,12 @@ local function PostUpdate()
         break
     end
 
+    -- Blizzard normally manages visibility, but ensure active totems are not
+    -- left hidden after combat-safe deferred updates.
+    if hasActive and not tf:IsShown() then
+        tf:Show()
+    end
+
     if hasActive then
         if not TotemBar.ticker then
             TotemBar.ticker = C_Timer.NewTicker(0.5, UpdateDurationTexts)
@@ -481,8 +487,9 @@ function TotemBar:Refresh()
         return
     end
 
-    -- Never call Blizzard TotemFrame:Update() from addon code in combat.
-    -- That can taint secret return values used inside Blizzard_UnitFrame code.
+    -- Never call Blizzard TotemFrame:Update() from addon code (combat or not).
+    -- Calling it from addon code can taint TotemButton OnUpdate and break
+    -- Blizzard's secret-number math (e.g. math.ceil(GetTotemTimeLeft(...))).
     if InCombatLockdown() then
         pendingTotemRefresh = true
     end
@@ -492,14 +499,16 @@ function TotemBar:Refresh()
     end
 
     if not TotemFrame then return end
-    if InCombatLockdown() then return end
 
-    PositionTotemFrame()
-
-    -- Trigger a full update to apply our styling
-    if TotemFrame.Update then
-        TotemFrame:Update()
+    -- Allow refresh during combat so totem updates still receive QUI styling/layout.
+    -- Keep explicit frame repositioning out of combat only.
+    if not InCombatLockdown() then
+        PositionTotemFrame()
     end
+
+    -- Run a deferred style/layout pass on the current active pool without
+    -- invoking Blizzard TotemFrame:Update() from addon code.
+    C_Timer.After(0, PostUpdate)
 end
 
 function TotemBar:Hide()
