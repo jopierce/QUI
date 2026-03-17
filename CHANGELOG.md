@@ -89,6 +89,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
 
+
+## v2.53.0 - 2026-03-18
+
+### Added
+- added partial profile imports
+- added avoidance and stagger to character stats plus some skinning improvements
+
+### Fixed
+- fix tooltip combat visibility for custom trackers and CDM viewers
+- hopefully fixed tooltips breaking when BtWQuests taints values
+- fixed raid tooltip taint
+- fixed totem bar taint issue
 ## v2.52.1 - 2026-03-15
 
 ### Added
