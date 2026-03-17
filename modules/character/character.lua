@@ -2194,6 +2194,31 @@ local function UpdateStatsPanel(panel, unit)
     local dodge = SafeGetStat(GetDodgeChance)
     local parry = SafeGetStat(GetParryChance)
     local block = SafeGetStat(GetBlockChance)
+    local staggerPercent = 0
+    local _, classTag = UnitClass(unit)
+    local isBrewmaster = false
+
+    if classTag == "MONK" and unit == "player" and GetSpecialization and GetSpecializationInfo then
+        local specIndex = GetSpecialization()
+        if specIndex then
+            local specID = select(1, GetSpecializationInfo(specIndex))
+            isBrewmaster = (specID == 268)
+        end
+    end
+
+    if isBrewmaster then
+        if C_PaperDollInfo and C_PaperDollInfo.GetStaggerPercentage then
+            staggerPercent = SafeGetStat(C_PaperDollInfo.GetStaggerPercentage, unit)
+        elseif GetStaggerPercentage then
+            staggerPercent = SafeGetStat(GetStaggerPercentage, unit)
+        elseif UnitStagger then
+            local staggerAmount = SafeGetStat(UnitStagger, unit)
+            local maxHealth = SafeGetStat(UnitHealthMax, unit)
+            if maxHealth > 0 then
+                staggerPercent = (staggerAmount / maxHealth) * 100
+            end
+        end
+    end
 
     local defenseStats = {
         { label = "Armor", value = FormatNumber(effectiveArmor or 0), statKey = "ARMOR" },
@@ -2201,6 +2226,10 @@ local function UpdateStatsPanel(panel, unit)
         { label = "Parry", value = FormatPercent(parry), statKey = "PARRY" },
         { label = "Block", value = FormatPercent(block), statKey = "BLOCK" },
     }
+
+    if isBrewmaster then
+        tinsert(defenseStats, { label = "Stagger", value = FormatPercent(staggerPercent), statKey = "STAGGER" })
+    end
 
     for _, stat in ipairs(defenseStats) do
         row = CreateStatRow(scrollChild, y)
@@ -2242,6 +2271,10 @@ local function UpdateStatsPanel(panel, unit)
                     end
                 end
             end
+        elseif stat.statKey == "STAGGER" then
+            local staggerLabel = _G.STAT_STAGGER or "Stagger"
+            row.tooltip = HIGHLIGHT_FONT_COLOR_CODE .. format(PAPERDOLLFRAME_TOOLTIP_FORMAT, staggerLabel) .. " " .. format("%.2F%%", staggerPercent) .. FONT_COLOR_CODE_CLOSE
+            row.tooltip2 = _G.STAT_STAGGER_TOOLTIP or "Percentage of incoming Physical damage delayed by Stagger."
         end
         
         y = y - ROW_HEIGHT
@@ -2255,8 +2288,15 @@ local function UpdateStatsPanel(panel, unit)
 
     local leech = SafeGetStat(GetLifesteal)
     local speed = SafeGetStat(GetSpeed)
+    local avoidance = 0
+    if GetAvoidance then
+        avoidance = SafeGetStat(GetAvoidance)
+    elseif GetCombatRatingBonus and CR_AVOIDANCE then
+        avoidance = SafeGetStat(GetCombatRatingBonus, CR_AVOIDANCE)
+    end
 
     local generalStats = {
+        { label = "Avoidance", value = FormatPercent(avoidance), statKey = "AVOIDANCE" },
         { label = "Leech", value = FormatPercent(leech), statKey = "LIFESTEAL" },
         { label = "Speed", value = FormatPercent(speed), statKey = "SPEED" },
     }
@@ -2267,7 +2307,25 @@ local function UpdateStatsPanel(panel, unit)
         row.value:SetText(stat.value)
         
         -- Set tooltips (Blizzard format)
-        if stat.statKey == "LIFESTEAL" then
+        if stat.statKey == "AVOIDANCE" then
+            local avoidanceValue = 0
+            if GetAvoidance then
+                avoidanceValue = GetAvoidance() or 0
+            elseif GetCombatRatingBonus and CR_AVOIDANCE then
+                avoidanceValue = GetCombatRatingBonus(CR_AVOIDANCE) or 0
+            end
+
+            local avoidanceLabel = _G.STAT_AVOIDANCE or "Avoidance"
+            row.tooltip = HIGHLIGHT_FONT_COLOR_CODE .. format(PAPERDOLLFRAME_TOOLTIP_FORMAT, avoidanceLabel) .. " " .. format("%.2F%%", avoidanceValue) .. FONT_COLOR_CODE_CLOSE
+
+            local avoidanceRating = (GetCombatRating and CR_AVOIDANCE) and (GetCombatRating(CR_AVOIDANCE) or 0) or 0
+            local avoidanceBonus = (GetCombatRatingBonus and CR_AVOIDANCE) and (GetCombatRatingBonus(CR_AVOIDANCE) or avoidanceValue) or avoidanceValue
+            if _G.CR_AVOIDANCE_TOOLTIP then
+                row.tooltip2 = format(CR_AVOIDANCE_TOOLTIP, BreakUpLargeNumbers(avoidanceRating), avoidanceBonus)
+            else
+                row.tooltip2 = format("Reduces damage taken from area effects by %.2F%%.", avoidanceBonus)
+            end
+        elseif stat.statKey == "LIFESTEAL" then
             local lifesteal = GetLifesteal()
             row.tooltip = HIGHLIGHT_FONT_COLOR_CODE .. format(PAPERDOLLFRAME_TOOLTIP_FORMAT, STAT_LIFESTEAL) .. " " .. format("%.2F%%", lifesteal) .. FONT_COLOR_CODE_CLOSE
             row.tooltip2 = format(CR_LIFESTEAL_TOOLTIP, BreakUpLargeNumbers(GetCombatRating(CR_LIFESTEAL)), GetCombatRatingBonus(CR_LIFESTEAL))
