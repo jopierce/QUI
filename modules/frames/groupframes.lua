@@ -150,6 +150,7 @@ end
 
 -- Pending combat-deferred operations
 local pendingResize = false
+local pendingResizeForce = false
 local pendingVisibilityUpdate = false
 local pendingRegisterClicks = false
 
@@ -2105,10 +2106,17 @@ end
 local function UpdateAnchorRoot(key, mainHeader, selfHeader, isRaid)
     local root = EnsureAnchorFrame(key)
     local grow, leadEdge = GetHeaderLeadEdge(isRaid)
-    local gap = 4
+    local rootGrow = grow
 
     local mainVisible = mainHeader and mainHeader:IsShown()
     local selfVisible = selfHeader and selfHeader:IsShown()
+    local gap = (isRaid and selfVisible) and 0 or 4
+
+    -- Horizontal raid growth plus a dedicated self header can look like an
+    -- extra detached column. Stack self above main in this case.
+    if isRaid and selfVisible and (grow == "LEFT" or grow == "RIGHT") then
+        rootGrow = "DOWN"
+    end
 
     if not mainVisible and not selfVisible then
         root:Hide()
@@ -2121,7 +2129,7 @@ local function UpdateAnchorRoot(key, mainHeader, selfHeader, isRaid)
     local selfH = selfVisible and Helpers.SafeValue(selfHeader:GetHeight(), 1) or 0
 
     local totalW, totalH
-    if grow == "LEFT" or grow == "RIGHT" then
+    if rootGrow == "LEFT" or rootGrow == "RIGHT" then
         totalW = math.max(1, mainW + (mainVisible and selfVisible and gap or 0) + selfW)
         totalH = math.max(1, math.max(mainH, selfH))
     else
@@ -2132,11 +2140,11 @@ local function UpdateAnchorRoot(key, mainHeader, selfHeader, isRaid)
     root:SetSize(totalW, totalH)
 
     if selfVisible then
-        AnchorHeaderToRoot(root, selfHeader, grow, leadEdge, nil, 0, true)
+        AnchorHeaderToRoot(root, selfHeader, rootGrow, leadEdge, nil, 0, true)
     end
 
     if mainVisible then
-        AnchorHeaderToRoot(root, mainHeader, grow, leadEdge, selfVisible and selfHeader or nil, selfVisible and gap or 0, false)
+        AnchorHeaderToRoot(root, mainHeader, rootGrow, leadEdge, selfVisible and selfHeader or nil, selfVisible and gap or 0, false)
     end
 
     root:Show()
@@ -2256,14 +2264,90 @@ local function ConfigurePartyHeader(header)
     header:SetAttribute("_initialAttribute-unit-height", h)
 end
 
+local function BuildRaidNameListForSelfFirst(layout)
+    if not IsInRaid() then return nil end
+    local sortMethod = layout and layout.sortMethod or "INDEX"
+    local useRolePriority = layout and (layout.groupBy == "ROLE" or layout.sortByRole)
+    local entries = {}
+    local playerEntry = nil
+    local count = GetNumGroupMembers() or 0
+    for i = 1, count do
+        local unit = "raid" .. i
+        if UnitExists(unit) then
+            local fullName = GetUnitName(unit, true)
+            if fullName and fullName ~= "" then
+                local shortName = GetUnitName(unit, false) or fullName
+                local role = UnitGroupRolesAssigned(unit) or "NONE"
+                local entry = {
+                    name = fullName,
+                    sortName = string.lower(shortName),
+                    sortNameFull = string.lower(fullName),
+                    roleOrder = ROLE_SORT_ORDER[role] or ROLE_SORT_ORDER.NONE,
+                    index = i,
+                }
+                if UnitIsUnit(unit, "player") then
+                    playerEntry = entry
+                else
+                    entries[#entries + 1] = entry
+                end
+            end
+        end
+    end
+
+    table.sort(entries, function(a, b)
+        if useRolePriority and a.roleOrder ~= b.roleOrder then
+            return a.roleOrder < b.roleOrder
+        end
+        if sortMethod == "NAME" then
+            if a.sortName ~= b.sortName then
+                return a.sortName < b.sortName
+            end
+            if a.sortNameFull ~= b.sortNameFull then
+                return a.sortNameFull < b.sortNameFull
+            end
+        end
+        return a.index < b.index
+    end)
+
+    local names = {}
+    if playerEntry then
+        names[#names + 1] = playerEntry.name
+    end
+    for i = 1, #entries do
+        names[#names + 1] = entries[i].name
+    end
+    if #names == 0 then return nil end
+    return table.concat(names, ",")
+end
+
 local function ConfigureRaidHeader(header)
     local layout = GetLayoutSettings(true)
     if not layout then return end
+    local db = GetSettings()
+    local selfFirst = db and db.selfFirst
+    local raidSelfFirst = selfFirst and IsInRaid()
 
     header:SetAttribute("showRaid", true)
     header:SetAttribute("showParty", false)
-    header:SetAttribute("showPlayer", false)
+    header:SetAttribute("showPlayer", raidSelfFirst and true or false)
     header:SetAttribute("showSolo", false)
+
+    -- Keep self-first inside a single raid grid by switching to NAMELIST mode.
+    -- ASSIGNEDROLE/NAME sorting can reorder units away from an explicit
+    -- "player first" intent, while NAMELIST preserves the order we generate.
+    local activeNameList = nil
+    if raidSelfFirst then
+        activeNameList = BuildRaidNameListForSelfFirst(layout)
+        header:SetAttribute("groupBy", nil)
+        header:SetAttribute("groupingOrder", nil)
+        header:SetAttribute("groupFilter", nil)
+        header:SetAttribute("nameList", activeNameList or "")
+        header:SetAttribute("strictFiltering", activeNameList and true or false)
+        header:SetAttribute("sortMethod", "NAMELIST")
+    else
+        header:SetAttribute("nameList", nil)
+        header:SetAttribute("strictFiltering", false)
+    end
 
     local mode = GetGroupMode()
     local w, h = GetFrameDimensions(mode)
@@ -2320,28 +2404,32 @@ local function ConfigureRaidHeader(header)
     end
 
     -- Group filtering
-    if groupBy == "NONE" then
-        header:SetAttribute("groupBy", nil)
-        header:SetAttribute("groupFilter", nil)
-        header:SetAttribute("groupingOrder", nil)
-    elseif groupBy == "GROUP" then
-        header:SetAttribute("groupBy", "GROUP")
-        header:SetAttribute("groupFilter", "1,2,3,4,5,6,7,8")
-        header:SetAttribute("groupingOrder", "1,2,3,4,5,6,7,8")
-    elseif groupBy == "ROLE" then
-        header:SetAttribute("groupBy", "ASSIGNEDROLE")
-        header:SetAttribute("groupingOrder", "TANK,HEALER,DAMAGER,NONE")
-    elseif groupBy == "CLASS" then
-        header:SetAttribute("groupBy", "CLASS")
-        header:SetAttribute("groupingOrder", "WARRIOR,DEATHKNIGHT,PALADIN,MONK,PRIEST,SHAMAN,DRUID,ROGUE,MAGE,WARLOCK,HUNTER,DEMONHUNTER,EVOKER")
-    end
+    if not raidSelfFirst then
+        if groupBy == "NONE" then
+            header:SetAttribute("groupFilter", nil)
+            header:SetAttribute("groupingOrder", nil)
+            header:SetAttribute("groupBy", nil)
+        elseif groupBy == "GROUP" then
+            header:SetAttribute("groupingOrder", "1,2,3,4,5,6,7,8")
+            header:SetAttribute("groupFilter", "1,2,3,4,5,6,7,8")
+            header:SetAttribute("groupBy", "GROUP")
+        elseif groupBy == "ROLE" then
+            header:SetAttribute("groupFilter", nil)
+            header:SetAttribute("groupingOrder", "TANK,HEALER,DAMAGER,NONE")
+            header:SetAttribute("groupBy", "ASSIGNEDROLE")
+        elseif groupBy == "CLASS" then
+            header:SetAttribute("groupFilter", nil)
+            header:SetAttribute("groupingOrder", "WARRIOR,DEATHKNIGHT,PALADIN,MONK,PRIEST,SHAMAN,DRUID,ROGUE,MAGE,WARLOCK,HUNTER,DEMONHUNTER,EVOKER")
+            header:SetAttribute("groupBy", "CLASS")
+        end
 
-    -- Sorting
-    if layout.sortByRole and groupBy ~= "ROLE" then
-        -- Role sort within groups
-        header:SetAttribute("sortMethod", "NAME")
-    else
-        header:SetAttribute("sortMethod", layout.sortMethod or "INDEX")
+        -- Sorting
+        if layout.sortByRole and groupBy ~= "ROLE" then
+            -- Role sort within groups
+            header:SetAttribute("sortMethod", "NAME")
+        else
+            header:SetAttribute("sortMethod", layout.sortMethod or "INDEX")
+        end
     end
 
     -- Frame size via initial config
@@ -2522,9 +2610,15 @@ local function UpdateHeaderSizes()
     -- Self header uses party dimensions; root layout handles ordering.
     local selfHdr = QUI_GF.headers.self
     if selfHdr then
-        local partyDims = db.party and db.party.dimensions
-        local sw = partyDims and partyDims.partyWidth or 200
-        local sh = partyDims and partyDims.partyHeight or 40
+        local sw, sh
+        if IsInRaid() then
+            local mode = GetGroupMode()
+            sw, sh = GetFrameDimensions(mode)
+        else
+            local partyDims = db.party and db.party.dimensions
+            sw = partyDims and partyDims.partyWidth or 200
+            sh = partyDims and partyDims.partyHeight or 40
+        end
         selfHdr:SetAttribute("_initialAttribute-unit-width", sw)
         selfHdr:SetAttribute("_initialAttribute-unit-height", sh)
         selfHdr:SetSize(sw, sh)
@@ -2592,9 +2686,9 @@ local function UpdateHeaderVisibility()
     if IsInRaid() then
         if QUI_GF.headers.party then QUI_GF.headers.party:Hide() end
         if QUI_GF.headers.raid then QUI_GF.headers.raid:Show() end
-        -- Self header in raid: show above raid frames when selfFirst is on
+        -- Raid self-first is integrated into raid header ordering.
         if selfHeader then
-            if selfFirst then selfHeader:Show() else selfHeader:Hide() end
+            selfHeader:Hide()
         end
     elseif IsInGroup() then
         if QUI_GF.headers.raid then QUI_GF.headers.raid:Hide() end
@@ -2640,14 +2734,17 @@ end
 local lastMode = nil
 
 local function UpdateFrameScaling(forceUpdate)
+    forceUpdate = forceUpdate and true or false
     local mode = GetGroupMode()
-    if not forceUpdate and mode == lastMode then return end
-    lastMode = mode
 
     if InCombatLockdown() then
         pendingResize = true
+        pendingResizeForce = pendingResizeForce or forceUpdate
         return
     end
+
+    if not forceUpdate and mode == lastMode then return end
+    lastMode = mode
 
     local w, h = GetFrameDimensions(mode)
 
@@ -3136,8 +3233,10 @@ local function OnEvent(self, event, arg1, ...)
 
         -- Process deferred operations
         if pendingResize then
+            local forceResize = pendingResizeForce
             pendingResize = false
-            UpdateFrameScaling()
+            pendingResizeForce = false
+            UpdateFrameScaling(forceResize)
         end
         if pendingVisibilityUpdate then
             pendingVisibilityUpdate = false
@@ -3276,6 +3375,7 @@ function QUI_GF:RefreshSettings()
 
     if InCombatLockdown() then
         pendingResize = true
+        pendingResizeForce = true
         return
     end
 

@@ -3955,6 +3955,8 @@ function QUICore:OnInitialize()
                 for k, v in pairs(src) do copy[k] = deepCopyDims(v) end
                 return copy
             end
+            if not gf.party then gf.party = {} end
+            if not gf.raid then gf.raid = {} end
             if not gf.party.dimensions then gf.party.dimensions = deepCopyDims(gf.dimensions) end
             if not gf.raid.dimensions then gf.raid.dimensions = deepCopyDims(gf.dimensions) end
             gf.dimensions = nil
@@ -3965,6 +3967,25 @@ function QUICore:OnInitialize()
             if not gf.raid.spotlight then gf.raid.spotlight = gf.spotlight end
             gf.spotlight = nil
         end
+
+        -- Backfill missing dimension keys so runtime scaling never falls back to
+        -- mixed implicit defaults after older migrations or copy operations.
+        if not gf.party then gf.party = {} end
+        if not gf.raid then gf.raid = {} end
+        if type(gf.party.dimensions) ~= "table" then gf.party.dimensions = {} end
+        if type(gf.raid.dimensions) ~= "table" then gf.raid.dimensions = {} end
+
+        local partyDims = gf.party.dimensions
+        if partyDims.partyWidth == nil then partyDims.partyWidth = 200 end
+        if partyDims.partyHeight == nil then partyDims.partyHeight = 40 end
+
+        local raidDims = gf.raid.dimensions
+        if raidDims.smallRaidWidth == nil then raidDims.smallRaidWidth = 180 end
+        if raidDims.smallRaidHeight == nil then raidDims.smallRaidHeight = 36 end
+        if raidDims.mediumRaidWidth == nil then raidDims.mediumRaidWidth = 160 end
+        if raidDims.mediumRaidHeight == nil then raidDims.mediumRaidHeight = 30 end
+        if raidDims.largeRaidWidth == nil then raidDims.largeRaidWidth = 140 end
+        if raidDims.largeRaidHeight == nil then raidDims.largeRaidHeight = 24 end
     end
 
     -- Migrate tooltip engine: "owned" engine removed, force to "classic"
