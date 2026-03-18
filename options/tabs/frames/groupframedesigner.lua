@@ -2614,6 +2614,7 @@ local function BuildContextSettings(content, gfdb, onChange)
         roleSortCheck:SetPoint("TOPLEFT", PAD, y)
         roleSortCheck:SetPoint("RIGHT", content, "RIGHT", -PAD, 0)
         y = y - FORM_ROW
+
     end
 
     -- Sorting (raid only)
@@ -2643,6 +2644,13 @@ local function BuildContextSettings(content, gfdb, onChange)
         local roleSortCheck = GUI:CreateFormCheckbox(content, "Sort by Role (Tank > Healer > DPS)", "sortByRole", layout, onChange)
         roleSortCheck:SetPoint("TOPLEFT", PAD, y)
         roleSortCheck:SetPoint("RIGHT", content, "RIGHT", -PAD, 0)
+        y = y - FORM_ROW
+
+        -- Self-first is a shared setting (stored at top-level), exposed in raid
+        -- sorting for discoverability/parity with party options.
+        local selfFirstCheck = GUI:CreateFormCheckbox(content, "Always Show Self First", "selfFirst", gfdb, onChange)
+        selfFirstCheck:SetPoint("TOPLEFT", PAD, y)
+        selfFirstCheck:SetPoint("RIGHT", content, "RIGHT", -PAD, 0)
         y = y - FORM_ROW
     end
 
@@ -2838,8 +2846,29 @@ local function BuildContextSettings(content, gfdb, onChange)
                     for k, v in pairs(s) do copy[k] = deepCopy(v) end
                     return copy
                 end
+                local function mergeDimensions(srcDims, dstDims)
+                    local merged = deepCopy(dstDims or {})
+                    if type(srcDims) == "table" then
+                        for k, v in pairs(srcDims) do
+                            merged[k] = deepCopy(v)
+                        end
+                    end
+                    -- Keep all tier keys populated to avoid fallback-driven jumps
+                    -- after party/raid copy operations.
+                    if merged.partyWidth == nil then merged.partyWidth = 200 end
+                    if merged.partyHeight == nil then merged.partyHeight = 40 end
+                    if merged.smallRaidWidth == nil then merged.smallRaidWidth = 180 end
+                    if merged.smallRaidHeight == nil then merged.smallRaidHeight = 36 end
+                    if merged.mediumRaidWidth == nil then merged.mediumRaidWidth = 160 end
+                    if merged.mediumRaidHeight == nil then merged.mediumRaidHeight = 30 end
+                    if merged.largeRaidWidth == nil then merged.largeRaidWidth = 140 end
+                    if merged.largeRaidHeight == nil then merged.largeRaidHeight = 24 end
+                    return merged
+                end
                 for key in pairs(VISUAL_DB_KEYS) do
-                    if src[key] then
+                    if key == "dimensions" then
+                        dst[key] = mergeDimensions(src[key], dst[key])
+                    elseif src[key] then
                         dst[key] = deepCopy(src[key])
                     end
                 end
