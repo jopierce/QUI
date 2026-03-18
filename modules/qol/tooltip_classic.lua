@@ -109,6 +109,15 @@ local function RefreshTooltipLayout(tooltip)
     if type(tooltip.UpdateTooltipSize) == "function" then
         pcall(tooltip.UpdateTooltipSize, tooltip)
     end
+    -- Re-showing GameTooltip can re-enter widget setup (GameTooltip_AddWidgetSet).
+    -- If another addon tainted the widget container, that path can hard-error on
+    -- secret metric values. Keep our extra lines, but skip only when taint is
+    -- detected and let normal widget tooltips continue to refresh as usual.
+    if tooltip == GameTooltip then
+        if Helpers.HasTaintedWidgetContainer and Helpers.HasTaintedWidgetContainer(tooltip) then
+            return
+        end
+    end
     pcall(tooltip.Show, tooltip)
 end
 
@@ -147,6 +156,18 @@ local function ResolveTooltipUnit(tooltip)
     end
 
     return unit
+end
+
+local function AreUnitsEquivalent(unitA, unitB)
+    if not unitA or not unitB then return false end
+    if Helpers.IsSecretValue(unitA) or Helpers.IsSecretValue(unitB) then return false end
+
+    local okUnitIsUnit, matches = pcall(UnitIsUnit, unitA, unitB)
+    if okUnitIsUnit and not Helpers.IsSecretValue(matches) and matches == true then
+        return true
+    end
+
+    return Helpers.SafeCompare(unitA, unitB) == true
 end
 
 local function GetPlayerItemLevelColor(itemLevel)
@@ -1172,13 +1193,7 @@ local function OnUnitTargetChanged(changedUnit)
     local unit = ResolveTooltipUnit(GameTooltip)
     if not unit then return end
 
-    local isSameUnit = false
-    local okUnitIsUnit, matches = pcall(UnitIsUnit, unit, changedUnit)
-    if okUnitIsUnit and matches then
-        isSameUnit = true
-    elseif unit == changedUnit then
-        isSameUnit = true
-    end
+    local isSameUnit = AreUnitsEquivalent(unit, changedUnit)
 
     if not isSameUnit then return end
 
@@ -1204,13 +1219,7 @@ local function OnUnitAuraChanged(changedUnit)
     local unit = ResolveTooltipUnit(GameTooltip)
     if not unit then return end
 
-    local isSameUnit = false
-    local okUnitIsUnit, matches = pcall(UnitIsUnit, unit, changedUnit)
-    if okUnitIsUnit and matches then
-        isSameUnit = true
-    elseif unit == changedUnit then
-        isSameUnit = true
-    end
+    local isSameUnit = AreUnitsEquivalent(unit, changedUnit)
 
     if not isSameUnit then return end
 
