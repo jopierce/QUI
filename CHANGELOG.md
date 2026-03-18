@@ -90,6 +90,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
 
+
+## v2.53.1 - 2026-03-19
+
+### Added
+- added option for spec-specific custom CDM entries
+- added "always show me first" option for raid frames
+
+### Fixed
+- fixed dungeon difficulty icon anchoring
+- fixed raid frames randomly resizing
+- fixed raid frame sorting
+- fixed several tooltip taint vectors
 ## v2.53.0 - 2026-03-18
 
 ### Added
