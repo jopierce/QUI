@@ -93,6 +93,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
 
+
+## v2.53.4 - 2026-03-23
+
+### Added
+- added itemIDs in tooltips
+- added PvP iLvl display when hovering iLvl on character sheet
 ## v2.53.3 - 2026-03-21
 
 ### Fixed
