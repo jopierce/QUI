@@ -91,7 +91,10 @@ local _eventUpdateThrottle = 0.1  -- Minimum interval between event-driven DoUpd
 local _lastEventUpdate = 0
 
 -- Performance: hoisted pcall wrapper functions (avoids anonymous closure allocation per call)
-local function SafeSetCooldown(cd, start, dur) cd:SetCooldown(start, dur) end
+local function SafeSetCooldown(cd, start, dur)
+    if IsSecretValue and (IsSecretValue(start) or IsSecretValue(dur)) then return end
+    cd:SetCooldown(start, dur)
+end
 local function SafeSetReverse(cd, val) cd:SetReverse(val) end
 local function SafeSetSwipeColor(cd, r, g, b, a) cd:SetSwipeColor(r, g, b, a) end
 local function SafeSetDrawSwipe(cd, val) cd:SetDrawSwipe(val) end
