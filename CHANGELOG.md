@@ -95,6 +95,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
 
+
+## v2.54.1 - 2026-03-24
+
+### Fixed
+- fixed datatext placeholders showing when 'no label' is selected
+- fixed moneyframe tooltip taint
 ## v2.54.0 - 2026-03-23
 
 ### Added
