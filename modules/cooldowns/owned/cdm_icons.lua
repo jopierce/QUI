@@ -1366,18 +1366,67 @@ local function UpdateIconCooldown(icon)
         local hookDuration = info and SafeValue(info.duration, nil) or nil
         local spellID = GetIconCooldownIdentifier(icon)
         local startTime, duration, durObj = nil, nil, nil
+        local childAuraInstID = child and child.auraInstanceID or nil
+        local auraUnit = (child and child.auraDataUnit) or ((entry.viewerType == "buff") and "player" or "target")
+        local isActiveAura = (entry.viewerType == "buff") or hookWasAura
         if spellID then
             startTime, duration, durObj = GetBestSpellCooldown(spellID)
         end
 
-        icon._auraActive = (entry.viewerType == "buff") or hookWasAura
+        if not InCombatLockdown() then
+            if not isActiveAura and spellID and C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
+                local ok, auraData = pcall(C_UnitAuras.GetPlayerAuraBySpellID, spellID)
+                if ok and auraData and auraData.auraInstanceID then
+                    isActiveAura = true
+                    childAuraInstID = auraData.auraInstanceID
+                    auraUnit = "player"
+                end
+            end
+        else
+            if hookDurObj or (IsSafeNumeric(hookStart) and IsSafeNumeric(hookDuration) and hookDuration > 0) then
+                isActiveAura = true
+            end
+        end
+
+        if not isActiveAura and entry.name and entry.name ~= "" and C_UnitAuras and C_UnitAuras.GetAuraDataBySpellName then
+            for _, lookup in ipairs({
+                { unit = "player", filter = "HELPFUL" },
+                { unit = "pet", filter = "HELPFUL" },
+                { unit = "target", filter = "HARMFUL" },
+                { unit = "target", filter = "HELPFUL" },
+            }) do
+                local ok, auraData = pcall(C_UnitAuras.GetAuraDataBySpellName, lookup.unit, entry.name, lookup.filter)
+                if ok and auraData and auraData.auraInstanceID then
+                    isActiveAura = true
+                    childAuraInstID = auraData.auraInstanceID
+                    auraUnit = lookup.unit
+                    break
+                end
+            end
+        end
+
+        if not isActiveAura and childAuraInstID and C_UnitAuras and C_UnitAuras.GetAuraDataByAuraInstanceID then
+            local ok, auraData = pcall(C_UnitAuras.GetAuraDataByAuraInstanceID, auraUnit, childAuraInstID)
+            if ok and auraData then
+                isActiveAura = true
+            end
+        end
+
+        icon._auraActive = isActiveAura
         RefreshIconGCDState(icon)
 
         if icon.Cooldown then
             local cdApplied = false
             local reverse = icon._auraActive and true or false
 
-            if hookDurObj and icon.Cooldown.SetCooldownFromDurationObject then
+            if icon._auraActive and childAuraInstID and C_UnitAuras and C_UnitAuras.GetAuraDuration
+                and icon.Cooldown.SetCooldownFromDurationObject then
+                local okAuraDur, auraDurObj = pcall(C_UnitAuras.GetAuraDuration, auraUnit, childAuraInstID)
+                if okAuraDur and auraDurObj then
+                    cdApplied = pcall(icon.Cooldown.SetCooldownFromDurationObject, icon.Cooldown, auraDurObj, true)
+                end
+            end
+            if not cdApplied and hookDurObj and icon.Cooldown.SetCooldownFromDurationObject then
                 cdApplied = pcall(icon.Cooldown.SetCooldownFromDurationObject, icon.Cooldown, hookDurObj, reverse)
             end
             if not cdApplied and durObj and icon.Cooldown.SetCooldownFromDurationObject then
