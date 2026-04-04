@@ -1580,20 +1580,50 @@ local function BuildClickCastBindings(content, cc, refreshClickCast, startY, sta
         end)
     end
 
-    -- Refresh binding list when the player switches spec or talent loadout
-    local specListener = CreateFrame("Frame", nil, content)
-    specListener:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
-    specListener:RegisterEvent("TRAIT_CONFIG_UPDATED")
-    specListener:RegisterEvent("ACTIVE_COMBAT_CONFIG_CHANGED")
-    specListener:SetScript("OnEvent", function()
-        if content:IsShown() and RefreshBindingList then
-            C_Timer.After(0.5, function()
-                if content:IsShown() then
-                    RefreshBindingList()
-                end
-            end)
-        end
-    end)
+    -- Only listen while the bindings section is actually visible so hidden
+    -- search-index page builds do not leave background listeners behind.
+    local specListener = content._quiSpecChangeListener
+    if not specListener then
+        specListener = CreateFrame("Frame", nil, content)
+        specListener:SetScript("OnEvent", function(self)
+            local refreshFn = self._quiRefreshBindingList
+            if content:IsShown() and refreshFn then
+                C_Timer.After(0.5, function()
+                    if content:IsShown() and self._quiRefreshBindingList == refreshFn then
+                        refreshFn()
+                    end
+                end)
+            end
+        end)
+        content._quiSpecChangeListener = specListener
+    end
+    specListener._quiRefreshBindingList = RefreshBindingList
+
+    local function RegisterSpecListener()
+        if specListener._quiRegistered then return end
+        specListener:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+        specListener:RegisterEvent("TRAIT_CONFIG_UPDATED")
+        specListener:RegisterEvent("ACTIVE_COMBAT_CONFIG_CHANGED")
+        specListener._quiRegistered = true
+    end
+
+    local function UnregisterSpecListener()
+        if not specListener._quiRegistered then return end
+        specListener:UnregisterAllEvents()
+        specListener._quiRegistered = false
+    end
+
+    if not content._quiSpecChangeListenerHooks then
+        content._quiSpecChangeListenerHooks = true
+        content:HookScript("OnShow", RegisterSpecListener)
+        content:HookScript("OnHide", UnregisterSpecListener)
+    end
+
+    if content:IsShown() then
+        RegisterSpecListener()
+    else
+        UnregisterSpecListener()
+    end
 
     -- Export cleanup refs for OnHide handler
     if state then

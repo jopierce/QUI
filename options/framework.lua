@@ -648,6 +648,39 @@ GUI._searchIndexProgress = 0   -- Number of tabs indexed so far
 GUI._searchIndexTotal = 0      -- Total tabs to index
 GUI._searchIndexTicker = nil   -- Background ticker reference
 
+function GUI:CancelBackgroundIndexBuild()
+    if self._searchIndexTicker then
+        self._searchIndexTicker:Cancel()
+        self._searchIndexTicker = nil
+    end
+end
+
+function GUI:RefreshSearchIndexProgress()
+    local frame = self.MainFrame
+    if not frame or not frame.pages then
+        self._searchIndexProgress = 0
+        self._searchIndexTotal = 0
+        return 0, 0
+    end
+
+    local total = 0
+    local progress = 0
+    for tabIndex, page in pairs(frame.pages) do
+        if tabIndex ~= self._searchTabIndex and page and page.createFunc then
+            total = total + 1
+            if page.built then
+                progress = progress + 1
+            end
+        end
+    end
+
+    self._searchIndexTotal = total
+    self._searchIndexProgress = progress
+    self._searchIndexBuilt = total == 0 or progress >= total
+
+    return progress, total
+end
+
 -- Build a single tab's search index (creates hidden frame, runs builder).
 -- Returns true if a tab was built, false if nothing left to build.
 function GUI:BuildNextTabIndex()
@@ -704,29 +737,17 @@ function GUI:StartBackgroundIndexBuild()
     if self._searchIndexTicker then return end  -- Already running
 
     local frame = self.MainFrame
-    if not frame or not frame.pages then return end
+    if not frame or not frame.pages or not frame:IsShown() then return end
 
-    -- Count total tabs that need building
-    local total = 0
-    for tabIndex, page in pairs(frame.pages) do
-        if tabIndex ~= self._searchTabIndex and page and page.createFunc and not page.built then
-            total = total + 1
-        end
-    end
-    self._searchIndexTotal = total
-    self._searchIndexProgress = 0
-
-    if total == 0 then
-        self._searchIndexBuilt = true
-        return
-    end
+    self:RefreshSearchIndexProgress()
+    if self._searchIndexBuilt then return end
 
     -- Build one tab per tick using chained C_Timer.NewTimer(0) so each
     -- handle is cancellable and only one tab builds per frame.
     local function BuildNextTick()
-        -- Abort if panel was destroyed/rebuilt
-        if not self.MainFrame or self.MainFrame ~= frame then
-            self._searchIndexTicker = nil
+        -- Abort if panel was destroyed, rebuilt, or hidden.
+        if not self.MainFrame or self.MainFrame ~= frame or not frame:IsShown() then
+            self:CancelBackgroundIndexBuild()
             return
         end
 
@@ -736,7 +757,7 @@ function GUI:StartBackgroundIndexBuild()
             self._searchIndexTicker = C_Timer.NewTimer(0, BuildNextTick)
         else
             -- All done
-            self._searchIndexBuilt = true
+            self:RefreshSearchIndexProgress()
             self._searchIndexTicker = nil
         end
     end
@@ -749,10 +770,7 @@ end
 -- Only called as a fallback if user opens Search before background build finishes.
 function GUI:ForceLoadAllTabs()
     -- Cancel background builder if running
-    if self._searchIndexTicker then
-        self._searchIndexTicker:Cancel()
-        self._searchIndexTicker = nil
-    end
+    self:CancelBackgroundIndexBuild()
 
     local frame = self.MainFrame
     if not frame or not frame.pages then return end
@@ -761,7 +779,7 @@ function GUI:ForceLoadAllTabs()
 
     while self:BuildNextTabIndex() do end  -- Build all remaining
 
-    self._searchIndexBuilt = true
+    self:RefreshSearchIndexProgress()
 end
 
 ---------------------------------------------------------------------------
@@ -7318,6 +7336,9 @@ function GUI:Show()
         self:InitializeOptions()
     end
     self.MainFrame:Show()
+    if self._allTabsAdded and not self._searchIndexBuilt then
+        self:StartBackgroundIndexBuild()
+    end
 end
 
 ---------------------------------------------------------------------------
@@ -7325,6 +7346,7 @@ end
 ---------------------------------------------------------------------------
 function GUI:Hide()
     if self.MainFrame then
+        self:CancelBackgroundIndexBuild()
         self.MainFrame:Hide()
     end
 end
@@ -7341,6 +7363,8 @@ function GUI:RefreshAccentColor()
     -- Save current position so the window doesn't jump back to center
     local point, _, relPoint, xOfs, yOfs = self.MainFrame:GetPoint()
 
+    self:CancelBackgroundIndexBuild()
+
     -- Tear down old frame
     self.MainFrame:Hide()
     self.MainFrame:SetParent(nil)
@@ -7348,6 +7372,8 @@ function GUI:RefreshAccentColor()
 
     -- Reset search index state (will be rebuilt from dedup keys)
     self._searchIndexBuilt = false
+    self._searchIndexProgress = 0
+    self._searchIndexTotal = 0
     self._allTabsAdded = false
     self.SettingsRegistry = {}
     self.SettingsRegistryKeys = {}
