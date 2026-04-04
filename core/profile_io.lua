@@ -378,47 +378,6 @@ local function SanitizeProfilePayload(core, profileData)
     return false, working, stripped, "Too many incompatible settings; try a fresh export from QUI."
 end
 
-local function DeserializeProfileImportPayload(str)
-    if not AceSerializer or not LibDeflate then
-        return false, nil, nil, "Import requires AceSerializer-3.0 and LibDeflate."
-    end
-    if not str or str == "" then
-        return false, nil, nil, "No data provided."
-    end
-
-    str = str:gsub("%s+", "")
-    if str == "" then
-        return false, nil, nil, "No data provided."
-    end
-
-    local prefix = DetectProfileImportPrefix(str)
-    if prefix then
-        if not SUPPORTED_PROFILE_IMPORT_PREFIXES[prefix] then
-            return false, nil, nil, ("This doesn't appear to be a QUI profile string (%s)."):format(prefix)
-        end
-        str = str:sub(#prefix + 2)
-    else
-        prefix = "QUI1"
-    end
-
-    local compressed = LibDeflate:DecodeForPrint(str)
-    if not compressed then
-        return false, nil, prefix, "Could not decode string (maybe corrupted)."
-    end
-
-    local serialized = LibDeflate:DecompressDeflate(compressed)
-    if not serialized then
-        return false, nil, prefix, "Could not decompress data."
-    end
-
-    local ok, payload = AceSerializer:Deserialize(serialized)
-    if not ok or type(payload) ~= "table" then
-        return false, nil, prefix, "Could not deserialize profile."
-    end
-
-    return true, payload, prefix, nil
-end
-
 local function ValidateTrackerBarPayload(data, multi)
     local ok, issue = ValidateImportTree(data, "trackers")
     if not ok then
@@ -1318,6 +1277,47 @@ local function DetectProfileImportPrefix(str)
         return nil
     end
     return str:match("^([A-Z][A-Z0-9]*%d):")
+end
+
+local function DeserializeProfileImportPayload(str)
+    if not AceSerializer or not LibDeflate then
+        return false, nil, nil, "Import requires AceSerializer-3.0 and LibDeflate."
+    end
+    if not str or str == "" then
+        return false, nil, nil, "No data provided."
+    end
+
+    str = str:gsub("%s+", "")
+    if str == "" then
+        return false, nil, nil, "No data provided."
+    end
+
+    local prefix = DetectProfileImportPrefix(str)
+    if prefix then
+        if not SUPPORTED_PROFILE_IMPORT_PREFIXES[prefix] then
+            return false, nil, nil, ("This doesn't appear to be a QUI profile string (%s)."):format(prefix)
+        end
+        str = str:sub(#prefix + 2)
+    else
+        prefix = "QUI1"
+    end
+
+    local compressed = LibDeflate:DecodeForPrint(str)
+    if not compressed then
+        return false, nil, prefix, "Could not decode string (maybe corrupted)."
+    end
+
+    local serialized = LibDeflate:DecompressDeflate(compressed)
+    if not serialized then
+        return false, nil, prefix, "Could not decompress data."
+    end
+
+    local ok, payload = AceSerializer:Deserialize(serialized)
+    if not ok or type(payload) ~= "table" then
+        return false, nil, prefix, "Could not deserialize profile."
+    end
+
+    return true, payload, prefix, nil
 end
 
 local function ParseProfileImportString(core, str)
