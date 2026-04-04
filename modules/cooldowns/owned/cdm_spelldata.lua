@@ -1217,6 +1217,46 @@ local function IsSpellKnownByPlayer(spellID)
     if WoW_IsSpellKnown and WoW_IsSpellKnown(spellID) then return true end
     -- IsPlayerSpell covers talent-granted spells
     if WoW_IsPlayerSpell and WoW_IsPlayerSpell(spellID) then return true end
+    -- Some talent/hero talent spells aren't recognized by the base APIs
+    -- but have an override mapping. Check the override spell — if IT is
+    -- known, the base spell is effectively available.
+    if C_Spell and C_Spell.GetOverrideSpell then
+        local ok, overrideID = pcall(C_Spell.GetOverrideSpell, spellID)
+        if ok and overrideID and overrideID ~= spellID then
+            if WoW_IsSpellKnown and WoW_IsSpellKnown(overrideID) then return true end
+            if WoW_IsPlayerSpell and WoW_IsPlayerSpell(overrideID) then return true end
+        end
+    end
+    -- Final fallback: if C_Spell.GetSpellInfo returns valid data AND the
+    -- spell exists in Blizzard's CDM viewer, treat it as known. This
+    -- handles edge cases where talent spells are castable but neither
+    -- IsSpellKnown nor IsPlayerSpell recognizes the stored ID.
+    if C_Spell and C_Spell.GetSpellInfo then
+        local ok, info = pcall(C_Spell.GetSpellInfo, spellID)
+        if ok and info and info.name then
+            -- Spell has valid info — check if it's in the CDM viewer
+            -- (Blizzard only lists spells that belong to the current spec)
+            if C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCategorySet then
+                for cat = 0, 1 do
+                    local okCat, cdIDs = pcall(C_CooldownViewer.GetCooldownViewerCategorySet, cat)
+                    if okCat and cdIDs then
+                        for _, cdID in ipairs(cdIDs) do
+                            if C_CooldownViewer.GetCooldownViewerCooldownInfo then
+                                local okI, cdInfo = pcall(C_CooldownViewer.GetCooldownViewerCooldownInfo, cdID)
+                                if okI and cdInfo then
+                                    local sid = Helpers.SafeValue(cdInfo.spellID, nil)
+                                    local ov = Helpers.SafeValue(cdInfo.overrideSpellID, nil)
+                                    if sid == spellID or ov == spellID then
+                                        return true
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
     return false
 end
 
@@ -1395,8 +1435,9 @@ local function ResolveOwnedEntry(entry, containerKey, index)
         end
 
     elseif entry.type == "item" then
-        resolved.spellID = entry.id  -- item ID stored as spellID for keying
-        resolved.overrideSpellID = entry.id
+        -- Item IDs must NOT be stored as spellID — they are different ID spaces.
+        -- spellID/overrideSpellID stay nil; item-specific code paths use entry.id.
+        resolved.id = entry.id
         local ok, itemName = pcall(C_Item.GetItemNameByID, entry.id)
         if ok and itemName then
             resolved.name = itemName
@@ -1406,8 +1447,8 @@ local function ResolveOwnedEntry(entry, containerKey, index)
         resolved.id = entry.id
         local itemID = GetInventoryItemID("player", entry.id)
         if itemID then
-            resolved.spellID = itemID
-            resolved.overrideSpellID = itemID
+            -- Store resolved item ID for texture/tooltip but NOT as spellID
+            resolved.itemID = itemID
             local ok, itemName = pcall(C_Item.GetItemNameByID, itemID)
             if ok and itemName then
                 resolved.name = itemName
@@ -1778,7 +1819,7 @@ end
 -- Phase 1: Move unlearned spells from ownedSpells → dormantSpells, saving slot index.
 -- Phase 2: Re-insert returning dormant spells at their saved position.
 -- Phase 3: Clean obsolete dormant entries for spells removed from game.
--- dormantSpells is a map: { [spellID] = originalSlotIndex }
+-- dormantSpells is a map: { [spellID] = { slot = originalSlotIndex, row = rowNum } }
 function CDMSpellData:CheckDormantSpells(containerKey)
     local db = GetContainerDB(containerKey)
     if not db or type(db.ownedSpells) ~= "table" then
@@ -1829,29 +1870,32 @@ function CDMSpellData:CheckDormantSpells(containerKey)
     local toRemove = {}  -- indices to remove (descending order)
     for i, entry in ipairs(ownedSpells) do
         if entry and entry.id and entry.type == "spell" then
-            if not IsSpellKnownByPlayer(entry.id) then
-                db.dormantSpells[entry.id] = i  -- save slot position
+            local known = IsSpellKnownByPlayer(entry.id)
+            if not known then
+                -- Save slot position AND row assignment so both are restored
+                db.dormantSpells[entry.id] = { slot = i, row = entry.row }
                 toRemove[#toRemove + 1] = i
             end
         end
     end
     -- Remove from ownedSpells in reverse order to preserve indices
-    if #toRemove > 0 then
-        for _, idx in ipairs(toRemove) do
-            local entry = db.ownedSpells[idx]
-            if entry then
-            end
-        end
-    end
     for j = #toRemove, 1, -1 do
         table.remove(db.ownedSpells, toRemove[j])
     end
 
     -- Phase 2: Re-insert returning dormant spells at saved positions
     local returning = {}
-    for sid, savedSlot in pairs(db.dormantSpells) do
+    for sid, savedData in pairs(db.dormantSpells) do
         if IsSpellKnownByPlayer(sid) then
-            returning[#returning + 1] = { id = sid, slot = savedSlot }
+            -- Support both legacy (number) and new (table) dormant format
+            local savedSlot, savedRow
+            if type(savedData) == "table" then
+                savedSlot = savedData.slot or 9999
+                savedRow = savedData.row
+            else
+                savedSlot = savedData or 9999
+            end
+            returning[#returning + 1] = { id = sid, slot = savedSlot, row = savedRow }
         end
     end
     -- Sort by saved slot (lowest first) so insertions maintain order
@@ -1861,7 +1905,7 @@ function CDMSpellData:CheckDormantSpells(containerKey)
     for _, info in ipairs(returning) do
         db.dormantSpells[info.id] = nil  -- remove from dormant
         local insertAt = math.min(info.slot, #db.ownedSpells + 1)
-        table.insert(db.ownedSpells, insertAt, { type = "spell", id = info.id })
+        table.insert(db.ownedSpells, insertAt, { type = "spell", id = info.id, row = info.row })
     end
 
     -- Phase 3: Clean obsolete dormant spells no longer in the CDM system
@@ -2211,7 +2255,7 @@ function CDMSpellData:ReconcileAllContainers()
                 end
             end
             if type(db.dormantSpells) == "table" then
-                -- dormantSpells is a map: { [spellID] = savedSlotIndex }
+                -- dormantSpells is a map: { [spellID] = { slot, row } }
                 for sid, _ in pairs(db.dormantSpells) do
                     if type(sid) == "number" then
                         globalTracked["spell:" .. sid] = true
@@ -2256,6 +2300,11 @@ end
 FireChangeCallback = function()
     if _G.QUI_OnSpellDataChanged then
         _G.QUI_OnSpellDataChanged()
+    end
+    -- Keep spec profile in sync so /reload or spec-switch never
+    -- overwrites Composer edits with a stale _specProfiles copy.
+    if ns.CDMContainers and ns.CDMContainers.SaveActiveSpecProfile then
+        ns.CDMContainers.SaveActiveSpecProfile()
     end
 end
 
@@ -2384,12 +2433,20 @@ function CDMSpellData:RestoreDormantEntry(containerKey, spellID)
     local db = GetContainerDB(containerKey)
     if not db then return false end
     if type(db.dormantSpells) ~= "table" then return false end
-    local savedSlot = db.dormantSpells[spellID]
-    if not savedSlot then return false end
+    local savedData = db.dormantSpells[spellID]
+    if not savedData then return false end
     db.dormantSpells[spellID] = nil
     if db.ownedSpells == nil then db.ownedSpells = {} end
+    -- Support both legacy (number) and new (table) dormant format
+    local savedSlot, savedRow
+    if type(savedData) == "table" then
+        savedSlot = savedData.slot or 9999
+        savedRow = savedData.row
+    else
+        savedSlot = savedData or 9999
+    end
     local insertAt = math.min(savedSlot, #db.ownedSpells + 1)
-    table.insert(db.ownedSpells, insertAt, { type = "spell", id = spellID })
+    table.insert(db.ownedSpells, insertAt, { type = "spell", id = spellID, row = savedRow })
     FireChangeCallback()
     return true
 end

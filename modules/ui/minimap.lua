@@ -49,6 +49,23 @@ local externalHudActive = false
 local quiUpdatingMinimap = false
 local hudDetectedCount = 0
 local HUD_DEBOUNCE_THRESHOLD = 2  -- require consecutive detections before hiding
+local HUD_CHECK_SUPPRESS_DURATION = 0.5
+local MINIMAP_RENDER_ZOOM_NUDGE_ENABLED = false -- temporary diagnostic guard
+local suppressHudChecksUntil = 0
+local externalHudHooksInstalled = false
+local externalHudTicker = nil
+local externalHudCheckPending = false
+local minimapDebugStats = {
+    lastFlush = 0,
+    refresh = 0,
+    size = 0,
+    datatextPanel = 0,
+    datatextSlots = 0,
+    hud = 0,
+    hudDefer = 0,
+    hideDecor = 0,
+    zoomNudge = 0,
+}
 
 ---=================================================================================
 --- BLIZZARD LAYOUT NO-OPS
@@ -82,6 +99,104 @@ end
 
 local function InvalidateSettingsCache()
     cachedSettings = nil
+end
+
+local function SuppressExternalHudChecks(duration)
+    local now = (type(GetTime) == "function") and GetTime() or 0
+    suppressHudChecksUntil = math.max(suppressHudChecksUntil or 0, now + (duration or HUD_CHECK_SUPPRESS_DURATION))
+end
+
+local function BeginQUIControlledMinimapUpdate(duration)
+    quiUpdatingMinimap = true
+    SuppressExternalHudChecks(duration)
+end
+
+local function EndQUIControlledMinimapUpdate(duration)
+    SuppressExternalHudChecks(duration)
+    quiUpdatingMinimap = false
+end
+
+local function IsExternalHudCheckSuppressed()
+    if quiUpdatingMinimap then
+        return true
+    end
+
+    local now = (type(GetTime) == "function") and GetTime() or 0
+    return now < (suppressHudChecksUntil or 0)
+end
+
+local function IsMinimapDebugEnabled()
+    local addon = _G.QUI
+    return addon and addon.DEBUG_MODE and type(addon.DebugPrint) == "function"
+end
+
+local function MinimapDebugPrint(...)
+    local addon = _G.QUI
+    if addon and type(addon.DebugPrint) == "function" then
+        addon:DebugPrint("|cff8be9fd[MinimapDbg]|r", ...)
+    end
+end
+
+local function FlushMinimapDebugStats(force)
+    if not IsMinimapDebugEnabled() then return end
+
+    local stats = minimapDebugStats
+    local total = (stats.refresh or 0)
+        + (stats.size or 0)
+        + (stats.datatextPanel or 0)
+        + (stats.datatextSlots or 0)
+        + (stats.hud or 0)
+        + (stats.hudDefer or 0)
+        + (stats.hideDecor or 0)
+        + (stats.zoomNudge or 0)
+    if total == 0 and not force then return end
+
+    local now = (type(GetTime) == "function") and GetTime() or 0
+    if not force and (now - (stats.lastFlush or 0)) < 1 then
+        return
+    end
+
+    stats.lastFlush = now
+    MinimapDebugPrint(format(
+        "1s refresh=%d size=%d dtPanel=%d dtSlots=%d hud=%d hudDefer=%d hide=%d zoomNudge=%d externalHud=%s",
+        stats.refresh or 0,
+        stats.size or 0,
+        stats.datatextPanel or 0,
+        stats.datatextSlots or 0,
+        stats.hud or 0,
+        stats.hudDefer or 0,
+        stats.hideDecor or 0,
+        stats.zoomNudge or 0,
+        externalHudActive and "on" or "off"
+    ))
+
+    stats.refresh = 0
+    stats.size = 0
+    stats.datatextPanel = 0
+    stats.datatextSlots = 0
+    stats.hud = 0
+    stats.hudDefer = 0
+    stats.hideDecor = 0
+    stats.zoomNudge = 0
+end
+
+local function CountMinimapDebug(key)
+    if not IsMinimapDebugEnabled() then return end
+    minimapDebugStats[key] = (minimapDebugStats[key] or 0) + 1
+    FlushMinimapDebugStats(false)
+end
+
+local function LogExternalHudTransition(state, reason, scale, alpha, width, parent)
+    if not IsMinimapDebugEnabled() then return end
+    MinimapDebugPrint(format(
+        "externalHud=%s reason=%s scale=%.2f alpha=%.2f width=%.1f parent=%s",
+        state and "on" or "off",
+        tostring(reason or "unknown"),
+        tonumber(scale) or 0,
+        tonumber(alpha) or 0,
+        tonumber(width) or 0,
+        tostring(parent or "nil")
+    ))
 end
 
 local function GetClassColor()
@@ -531,6 +646,7 @@ end
 local function RefreshDatatextSlots()
     if not datatextFrame or not datatextFrame.slots then return end
     if not QUICore or not QUICore.Datatexts then return end
+    CountMinimapDebug("datatextSlots")
 
     local dtSettings = GetDatatextSettings()
     if not dtSettings then return end
@@ -606,6 +722,7 @@ end
 local function UpdateDatatextPanel()
     local minimapSettings = GetSettings()
     local dtSettings = GetDatatextSettings()
+    CountMinimapDebug("datatextPanel")
 
     if not minimapSettings or not minimapSettings.enabled then return end
     if not dtSettings or not dtSettings.enabled then
@@ -1710,6 +1827,7 @@ local function RestoreDungeonEye()
     if not btn then return end
 
     -- Restore original UpdatePosition so Blizzard can manage the button again
+    local hadOverride = dungeonEyeOriginalUpdatePosition ~= nil
     if dungeonEyeOriginalUpdatePosition then
         btn.UpdatePosition = dungeonEyeOriginalUpdatePosition
         dungeonEyeOriginalUpdatePosition = nil
@@ -1721,7 +1839,10 @@ local function RestoreDungeonEye()
     end
 
     -- Let Blizzard re-anchor via its own method now that it's restored
-    if btn.UpdatePosition then
+    -- Only call UpdatePosition if we previously suppressed it; calling it
+    -- during initial load (before Blizzard fully initialises the button)
+    -- causes SetPoint errors.
+    if hadOverride and btn.UpdatePosition then
         btn:UpdatePosition()
     elseif dungeonEyeOriginalPoint then
         btn:ClearAllPoints()
@@ -2851,23 +2972,27 @@ local function UpdateMinimapSize()
     end
     local settings = GetSettings()
     if not settings or not settings.enabled then return end
+    CountMinimapDebug("size")
     
-    -- Set minimap size (guard flag prevents external HUD false positives)
-    quiUpdatingMinimap = true
+    -- Set minimap size inside the HUD suppression window so our own geometry
+    -- updates do not look like an external overlay taking over the minimap.
+    BeginQUIControlledMinimapUpdate()
     Minimap:SetSize(settings.size, settings.size)
     Minimap:SetScale(settings.scale or 1.0)
-    quiUpdatingMinimap = false
+    EndQUIControlledMinimapUpdate()
 
-    -- Force render update by toggling zoom.
-    -- Use SetZoom API instead of ZoomIn/ZoomOut:Click() — clicking protected
-    -- Blizzard buttons from addon code spreads taint into the secure context.
-    local z = Minimap:GetZoom()
-    if z < 5 then
-        Minimap:SetZoom(z + 1)
-        Minimap:SetZoom(z)
-    else
-        Minimap:SetZoom(z - 1)
-        Minimap:SetZoom(z)
+    -- Temporary diagnostic: disable the forced render nudge that toggles
+    -- minimap zoom so we can see whether it is the source of the zoom/CVar storm.
+    if MINIMAP_RENDER_ZOOM_NUDGE_ENABLED then
+        CountMinimapDebug("zoomNudge")
+        local z = Minimap:GetZoom()
+        if z < 5 then
+            Minimap:SetZoom(z + 1)
+            Minimap:SetZoom(z)
+        else
+            Minimap:SetZoom(z - 1)
+            Minimap:SetZoom(z)
+        end
     end
     
     -- Update LibDBIcon button radius for square minimap
@@ -2974,6 +3099,7 @@ end
 ---=================================================================================
 
 local function HideAllDecorations()
+    CountMinimapDebug("hideDecor")
     if backdropFrame then backdropFrame:Hide() end
     if clockFrame then clockFrame:Hide() end
     if coordsFrame then coordsFrame:Hide() end
@@ -2986,7 +3112,8 @@ local function HideAllDecorations()
 end
 
 local function CheckExternalHud()
-    if quiUpdatingMinimap then return end
+    if IsExternalHudCheckSuppressed() then return end
+    CountMinimapDebug("hud")
 
     -- Layout mode reparents Minimap to a handle — don't treat that as a HUD
     local um = ns.QUI_LayoutMode
@@ -3031,15 +3158,27 @@ local function CheckExternalHud()
         hudDetectedCount = hudDetectedCount + 1
         if hudDetectedCount >= HUD_DEBOUNCE_THRESHOLD and not externalHudActive then
             externalHudActive = true
+            LogExternalHudTransition(true, "detected", currentScale, currentAlpha, currentWidth, Minimap:GetParent() and (Minimap:GetParent():GetName() or tostring(Minimap:GetParent())) or "nil")
             HideAllDecorations()
         end
     else
         hudDetectedCount = 0
         if externalHudActive then
             externalHudActive = false
+            LogExternalHudTransition(false, "cleared", currentScale, currentAlpha, currentWidth, Minimap:GetParent() and (Minimap:GetParent():GetName() or tostring(Minimap:GetParent())) or "nil")
             Minimap_Module:Refresh()
         end
     end
+end
+
+local function DeferCheckExternalHud()
+    if externalHudCheckPending or IsExternalHudCheckSuppressed() then return end
+    CountMinimapDebug("hudDefer")
+    externalHudCheckPending = true
+    C_Timer.After(0, function()
+        externalHudCheckPending = false
+        CheckExternalHud()
+    end)
 end
 
 ---=================================================================================
@@ -3244,6 +3383,7 @@ function Minimap_Module:Initialize()
     -- InCombatLockdown() returns true during a combat /reload. Set flag
     -- so sub-functions skip their combat guards during initialization.
     inInitSafeWindow = true
+    BeginQUIControlledMinimapUpdate(1.0)
 
     -- Set shape first (affects other elements)
     SetMinimapShape(settings.shape)
@@ -3279,28 +3419,24 @@ function Minimap_Module:Initialize()
     SetupMiddleClickMenu()
     SetupAutoZoom()
 
-    -- Detect external HUD overlays that scale up / fade out / resize the Minimap
-    local hudCheckPending = false
-    local function DeferCheckExternalHud()
-        if hudCheckPending then return end
-        hudCheckPending = true
-        C_Timer.After(0, function()
-            hudCheckPending = false
-            CheckExternalHud()
-        end)
+    -- Detect external HUD overlays that scale up / fade out / resize the Minimap.
+    -- Install the hooks once so repeated module refreshes do not stack callbacks.
+    if not externalHudHooksInstalled then
+        externalHudHooksInstalled = true
+        hooksecurefunc(Minimap, "SetScale", function() DeferCheckExternalHud() end)
+        hooksecurefunc(Minimap, "SetAlpha", function() DeferCheckExternalHud() end)
+        hooksecurefunc(Minimap, "SetSize", function() DeferCheckExternalHud() end)
+        hooksecurefunc(Minimap, "SetParent", function() DeferCheckExternalHud() end)
+        hooksecurefunc(Minimap, "SetWidth", function() DeferCheckExternalHud() end)
+        hooksecurefunc(Minimap, "SetHeight", function() DeferCheckExternalHud() end)
+        hooksecurefunc(Minimap, "SetPoint", function() DeferCheckExternalHud() end)
     end
 
-    hooksecurefunc(Minimap, "SetScale", function() DeferCheckExternalHud() end)
-    hooksecurefunc(Minimap, "SetAlpha", function() DeferCheckExternalHud() end)
-    hooksecurefunc(Minimap, "SetSize", function() DeferCheckExternalHud() end)
-    hooksecurefunc(Minimap, "SetParent", function() DeferCheckExternalHud() end)
-    hooksecurefunc(Minimap, "SetWidth", function() DeferCheckExternalHud() end)
-    hooksecurefunc(Minimap, "SetHeight", function() DeferCheckExternalHud() end)
-    hooksecurefunc(Minimap, "SetPoint", function() DeferCheckExternalHud() end)
-
     -- Periodic fallback: some HUD addons use metatable manipulation that bypasses
-    -- hooksecurefunc. Check every 5 seconds as a safety net.
-    C_Timer.NewTicker(5, CheckExternalHud)
+    -- hooksecurefunc. Keep a single ticker alive as a safety net.
+    if not externalHudTicker then
+        externalHudTicker = C_Timer.NewTicker(5, CheckExternalHud)
+    end
 
     -- Start performance-optimized ticker updates
     StartUpdateTickers()
@@ -3369,6 +3505,7 @@ function Minimap_Module:Initialize()
     end
 
     inInitSafeWindow = false
+    EndQUIControlledMinimapUpdate(1.0)
 end
 
 function Minimap_Module:Refresh()
@@ -3376,6 +3513,7 @@ function Minimap_Module:Refresh()
         pendingMinimapRefresh = true
         return
     end
+    CountMinimapDebug("refresh")
 
     -- Invalidate cached settings so we get fresh values
     InvalidateSettingsCache()
@@ -3409,6 +3547,8 @@ function Minimap_Module:Refresh()
         return
     end
 
+    BeginQUIControlledMinimapUpdate(0.75)
+
     -- Restart tickers with potentially new intervals
     StartUpdateTickers()
 
@@ -3439,6 +3579,9 @@ function Minimap_Module:Refresh()
             Minimap:SetPoint(settings.position[1], UIParent, settings.position[2], settings.position[3] or 0, settings.position[4] or 0)
         end
     end
+
+    EndQUIControlledMinimapUpdate(0.75)
+    FlushMinimapDebugStats(false)
 end
 
 
@@ -3601,7 +3744,7 @@ do
             label = "Datatext Panel",
             group = "Display",
             order = 2,
-            isOwned = false,  -- proxy mover (frame strata too low for child overlay)
+            isOwned = true,
             getFrame = function()
                 -- Ensure the frame exists (it's lazily created)
                 if not datatextFrame then

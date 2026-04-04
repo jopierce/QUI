@@ -127,6 +127,16 @@ function QUI_LayoutMode_UI:Show()
         self._toolbar:Show()
     end
 
+    -- Auto-expand panel + drawer on layout mode entry
+    if self._expandToolbar then
+        self._expandToolbar()
+    end
+    C_Timer.After(0.2, function()
+        if self._drawer and not self._drawer:IsShown() then
+            self:ToggleFramesDrawer()
+        end
+    end)
+
     if self._nudgeFrame then
         self._nudgeFrame:Show()
         -- Always capture keyboard for Escape; arrow nudging checks selection internally
@@ -135,6 +145,11 @@ function QUI_LayoutMode_UI:Show()
 end
 
 function QUI_LayoutMode_UI:Hide()
+    -- Reset expanded state so Expand() works on re-entry
+    if self._resetToolbarState then
+        self._resetToolbarState()
+    end
+
     if self._overlay then
         self._overlay:Hide()
     end
@@ -891,9 +906,11 @@ end
 ---------------------------------------------------------------------------
 
 CreateToolbar = function(ui)
+    local LCG = LibStub("LibCustomGlow-1.0", true)
+
     local PANEL_WIDTH = 140
-    local TAB_WIDTH = 24
-    local TAB_HEIGHT = 80
+    local TAB_WIDTH = 26
+    local TAB_HEIGHT = 160
     local BTN_HEIGHT = 28
     local BTN_SPACING = 4
     local PANEL_PAD = 8
@@ -916,10 +933,38 @@ CreateToolbar = function(ui)
     tabBorder:SetWidth(1)
     tabBorder:SetColorTexture(ACCENT_R, ACCENT_G, ACCENT_B, 0.6)
 
+    -- Accent glow stripe (bright inner edge)
+    local tabGlow = tab:CreateTexture(nil, "ARTWORK")
+    tabGlow:SetPoint("TOPLEFT", tabBorder, "TOPLEFT", 0, 0)
+    tabGlow:SetPoint("BOTTOMLEFT", tabBorder, "BOTTOMLEFT", 0, 0)
+    tabGlow:SetWidth(6)
+    tabGlow:SetColorTexture(ACCENT_R, ACCENT_G, ACCENT_B, 0.25)
+
     local tabChevron = tab:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    tabChevron:SetPoint("CENTER", 0, 0)
+    tabChevron:SetPoint("BOTTOM", tab, "BOTTOM", 0, 8)
     tabChevron:SetText("\194\171") -- «
     tabChevron:SetTextColor(ACCENT_R, ACCENT_G, ACCENT_B, 1)
+
+    -- "Edit Mode" label on the tab (rotated look via vertical stacking)
+    local tabLabel = tab:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    tabLabel:SetPoint("TOP", tab, "TOP", 0, -8)
+    tabLabel:SetText("E\nD\nI\nT\n \nM\nO\nD\nE")
+    tabLabel:SetTextColor(ACCENT_R, ACCENT_G, ACCENT_B, 0.7)
+    tabLabel:SetJustifyH("CENTER")
+    tabLabel:SetSpacing(0)
+
+    -- Pulse animation on the glow stripe + border
+    local pulseState = { elapsed = 0, min = 0.15, max = 0.45 }
+    local pulseFrame = CreateFrame("Frame")
+    pulseFrame:Hide()
+    pulseFrame:SetScript("OnUpdate", function(self, dt)
+        pulseState.elapsed = pulseState.elapsed + dt
+        -- 2-second cycle
+        local t = (math.sin(pulseState.elapsed * math.pi) + 1) / 2
+        local alpha = pulseState.min + (pulseState.max - pulseState.min) * t
+        tabGlow:SetAlpha(alpha)
+        tabBorder:SetColorTexture(ACCENT_R, ACCENT_G, ACCENT_B, 0.4 + 0.5 * t)
+    end)
 
     -- Slide-out panel (hidden by default, appears to left of tab)
     local panel = CreateFrame("Frame", "QUI_LayoutMode_Toolbar", UIParent)
@@ -1095,6 +1140,7 @@ CreateToolbar = function(ui)
         tab:ClearAllPoints()
         panel:ClearAllPoints()
         tabBorder:ClearAllPoints()
+        tabGlow:ClearAllPoints()
         tabChevron:ClearAllPoints()
 
         if docked == "LEFT" then
@@ -1102,13 +1148,17 @@ CreateToolbar = function(ui)
             panel:SetPoint("TOPLEFT", tab, "TOPRIGHT", 0, 0)
             tabBorder:SetPoint("TOPRIGHT", tab, "TOPRIGHT", 0, 0)
             tabBorder:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", 0, 0)
+            tabGlow:SetPoint("TOPRIGHT", tabBorder, "TOPLEFT", 0, 0)
+            tabGlow:SetPoint("BOTTOMRIGHT", tabBorder, "BOTTOMLEFT", 0, 0)
         else
             tab:SetPoint("RIGHT", UIParent, "RIGHT", 0, offsetY)
             panel:SetPoint("TOPRIGHT", tab, "TOPLEFT", 0, 0)
             tabBorder:SetPoint("TOPLEFT", tab, "TOPLEFT", 0, 0)
             tabBorder:SetPoint("BOTTOMLEFT", tab, "BOTTOMLEFT", 0, 0)
+            tabGlow:SetPoint("TOPLEFT", tabBorder, "TOPRIGHT", 0, 0)
+            tabGlow:SetPoint("BOTTOMLEFT", tabBorder, "BOTTOMRIGHT", 0, 0)
         end
-        tabChevron:SetPoint("CENTER", 0, 0)
+        tabChevron:SetPoint("BOTTOM", tab, "BOTTOM", 0, 8)
 
         -- Show border on the screen-facing side of panel
         if docked == "LEFT" then
@@ -1133,7 +1183,6 @@ CreateToolbar = function(ui)
 
     -- Slide-out state
     local expanded = false
-    local collapseTimer = nil
     local ANIM_DURATION = 0.18
 
     -- Animation state
@@ -1186,8 +1235,6 @@ CreateToolbar = function(ui)
         if expanded then return end
         expanded = true
         UpdateChevron(true)
-        if collapseTimer then collapseTimer:Cancel(); collapseTimer = nil end
-
         -- Start slide-in animation
         panel:SetWidth(2)
         panel:SetAlpha(0)
@@ -1202,15 +1249,14 @@ CreateToolbar = function(ui)
         animFrame:Show()
     end
 
-    local function Collapse(force)
+    local function Collapse()
         if not expanded then return end
-        -- Don't auto-collapse if mouse is over panel, tab, or drawer (skip check if forced)
-        if not force then
-            if panel:IsMouseOver() or tab:IsMouseOver() then return end
-            if ui._drawer and ui._drawer:IsShown() and ui._drawer:IsMouseOver() then return end
-        end
         expanded = false
         UpdateChevron(false)
+
+        -- Hide settings panel when toolbar collapses
+        local settings = ns.QUI_LayoutMode_Settings
+        if settings and settings.Hide then settings:Hide() end
 
         -- Start slide-out animation
         animState = {
@@ -1223,18 +1269,6 @@ CreateToolbar = function(ui)
         animFrame:Show()
     end
 
-    local function StartCollapseTimer()
-        if collapseTimer then collapseTimer:Cancel() end
-        collapseTimer = C_Timer.NewTimer(0.4, function()
-            collapseTimer = nil
-            Collapse()
-        end)
-    end
-
-    local function CancelCollapseTimer()
-        if collapseTimer then collapseTimer:Cancel(); collapseTimer = nil end
-    end
-
     -- Tab dragging (vertical slide + side switching)
     local isDragging = false
     local dragStartY = 0
@@ -1245,7 +1279,6 @@ CreateToolbar = function(ui)
     tab:SetScript("OnDragStart", function(self)
         isDragging = true
         tab._wasDragged = true
-        CancelCollapseTimer()
         local _, cursorY = GetCursorPosition()
         local scale = UIParent:GetEffectiveScale()
         dragStartY = cursorY / scale
@@ -1293,51 +1326,50 @@ CreateToolbar = function(ui)
         ApplyTabPosition()
     end)
 
-    -- Tab: click to toggle, hover to expand (only if not dragging)
-    local clickCollapsed = false  -- suppress hover re-expand after click-collapse
-
+    -- Tab: click to toggle (no hover expand/collapse)
     tab:SetScript("OnClick", function()
         if isDragging then return end
         if tab._wasDragged then tab._wasDragged = nil; return end
         if expanded then
-            CancelCollapseTimer()
-            Collapse(true)
-            clickCollapsed = true
+            Collapse()
         else
             Expand()
         end
     end)
     tab:SetScript("OnEnter", function()
         if isDragging then return end
-        if clickCollapsed then return end
-        CancelCollapseTimer()
-        Expand()
         tabBg:SetColorTexture(0.12, 0.12, 0.15, 0.95)
+        tabLabel:SetAlpha(1)
     end)
     tab:SetScript("OnLeave", function()
-        clickCollapsed = false  -- reset after mouse leaves
         tabBg:SetColorTexture(0.08, 0.08, 0.10, 0.85)
-        if not isDragging then
-            StartCollapseTimer()
+        tabLabel:SetAlpha(0.7)
+    end)
+
+    -- No-ops for backward compatibility (drawer references these)
+    ui._cancelCollapseTimer = function() end
+    ui._startCollapseTimer = function() end
+
+    -- Start/stop glow and pulse when tab is shown/hidden
+    tab:SetScript("OnShow", function()
+        pulseFrame:Show()
+        if LCG then
+            LCG.PixelGlow_Start(tab, {ACCENT_R, ACCENT_G, ACCENT_B, 0.7}, 12, 0.4, nil, 2, 0, 0, false, "_QUILayoutTab")
         end
     end)
-
-    -- Panel: keep open while hovered
-    panel:SetScript("OnEnter", function()
-        CancelCollapseTimer()
+    tab:SetScript("OnHide", function()
+        pulseFrame:Hide()
+        if LCG then
+            LCG.PixelGlow_Stop(tab, "_QUILayoutTab")
+        end
     end)
-    panel:SetScript("OnLeave", function()
-        StartCollapseTimer()
-    end)
-
-    -- Expose for drawer hover coordination
-    ui._cancelCollapseTimer = CancelCollapseTimer
-    ui._startCollapseTimer = StartCollapseTimer
 
     -- Store references (toolbar = tab for show/hide, panel for anchoring)
     ui._toolbar = tab
     ui._toolbarPanel = panel
     ui._tabDocked = function() return docked end
+    ui._expandToolbar = Expand
+    ui._resetToolbarState = function() expanded = false end
     ui:ApplyConfigPanelScale(panel)
 end
 
@@ -2076,7 +2108,7 @@ function QUI_LayoutMode_UI:_RebuildDrawer()
                         label = newConfig.name,
                         group = "Display",
                         order = 10 + #dtDB.panels,
-                        isOwned = false,
+                        isOwned = true,
                         getFrame = function() return Datapanels and Datapanels.activePanels[newID] end,
                         isEnabled = function()
                             -- Check config enabled, not IsShown (panel hides when no slots assigned)
@@ -2094,6 +2126,11 @@ function QUI_LayoutMode_UI:_RebuildDrawer()
                             for _, pc in ipairs(dtDB.panels) do
                                 if pc.id == newID then pc.enabled = val; break end
                             end
+                        end,
+                        setGameplayHidden = function(hide)
+                            local p = Datapanels and Datapanels.activePanels[newID]
+                            if not p then return end
+                            if hide then p:Hide() else p:Show() end
                         end,
                     })
 

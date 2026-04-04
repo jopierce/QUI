@@ -213,6 +213,8 @@ end
 -- Register a widget instance for sync tracking
 local function RegisterWidgetInstance(widget, dbTable, dbKey)
     local widgetKey = GetWidgetKey(dbTable, dbKey)
+    widget._syncDBTable = dbTable
+    widget._syncDBKey = dbKey
     if not widgetKey then return end
     GUI.WidgetInstances[widgetKey] = GUI.WidgetInstances[widgetKey] or {}
     table.insert(GUI.WidgetInstances[widgetKey], widget)
@@ -246,6 +248,88 @@ local function BroadcastToSiblings(widget, val)
             sibling.UpdateVisual(val)
         end
     end
+end
+
+local function GetProviderSyncContext(frame)
+    local current = frame
+    local depth = 0
+    while current and depth < 50 do
+        if current._quiProviderSync then
+            return current._quiProviderSync
+        end
+        if not current.GetParent then
+            break
+        end
+        current = current:GetParent()
+        depth = depth + 1
+    end
+end
+
+local function ApplyWidgetSyncContext(widget, dbTable, dbKey)
+    if not widget then return end
+    widget._syncDBTable = dbTable
+    widget._syncDBKey = dbKey
+    if not widget._providerSyncContext then
+        widget._providerSyncContext = GetProviderSyncContext(widget)
+    end
+end
+
+local function NotifyProviderChangedForWidget(widget, options)
+    if not widget then return end
+    local context = widget._providerSyncContext or GetProviderSyncContext(widget)
+    if not context or not context.providerKey then return end
+
+    local builders = ns.SettingsBuilders
+    if not builders or type(builders.NotifyProviderChanged) ~= "function" then return end
+
+    local providerOptions = widget._providerSyncOptions or {}
+    local structural = options and options.structural
+    if structural == nil then
+        if providerOptions.structural ~= nil then
+            structural = providerOptions.structural == true
+        else
+            structural = not (widget._syncDBTable and widget._syncDBKey)
+        end
+    end
+
+    builders.NotifyProviderChanged(context.providerKey, {
+        sourceSurfaceId = context.surfaceId,
+        structural = structural == true,
+    })
+end
+
+local function MaybeAutoNotifyProviderSync(widget, options)
+    if not widget then return end
+    local context = widget._providerSyncContext or GetProviderSyncContext(widget)
+    if not context then return end
+
+    local providerOptions = widget._providerSyncOptions or {}
+    local auto = providerOptions.auto
+    if auto == nil then
+        auto = not (widget._syncDBTable and widget._syncDBKey)
+    end
+    if not auto then return end
+
+    NotifyProviderChangedForWidget(widget, options)
+end
+
+function GUI:SetWidgetProviderSyncOptions(widget, options)
+    if not widget then return nil end
+    widget._providerSyncOptions = options or {}
+    ApplyWidgetSyncContext(widget, widget._syncDBTable, widget._syncDBKey)
+    return widget
+end
+
+function GUI:NotifyProviderChangedForWidget(widget, options)
+    NotifyProviderChangedForWidget(widget, options)
+end
+
+function GUI:CleanupWidgetTree(root)
+    if not root then return end
+    for _, child in ipairs({root:GetChildren()}) do
+        self:CleanupWidgetTree(child)
+    end
+    UnregisterWidgetInstance(root)
 end
 
 -- Set search context for auto-registration (call at start of page builder)
@@ -564,6 +648,39 @@ GUI._searchIndexProgress = 0   -- Number of tabs indexed so far
 GUI._searchIndexTotal = 0      -- Total tabs to index
 GUI._searchIndexTicker = nil   -- Background ticker reference
 
+function GUI:CancelBackgroundIndexBuild()
+    if self._searchIndexTicker then
+        self._searchIndexTicker:Cancel()
+        self._searchIndexTicker = nil
+    end
+end
+
+function GUI:RefreshSearchIndexProgress()
+    local frame = self.MainFrame
+    if not frame or not frame.pages then
+        self._searchIndexProgress = 0
+        self._searchIndexTotal = 0
+        return 0, 0
+    end
+
+    local total = 0
+    local progress = 0
+    for tabIndex, page in pairs(frame.pages) do
+        if tabIndex ~= self._searchTabIndex and page and page.createFunc then
+            total = total + 1
+            if page.built then
+                progress = progress + 1
+            end
+        end
+    end
+
+    self._searchIndexTotal = total
+    self._searchIndexProgress = progress
+    self._searchIndexBuilt = total == 0 or progress >= total
+
+    return progress, total
+end
+
 -- Build a single tab's search index (creates hidden frame, runs builder).
 -- Returns true if a tab was built, false if nothing left to build.
 function GUI:BuildNextTabIndex()
@@ -620,29 +737,17 @@ function GUI:StartBackgroundIndexBuild()
     if self._searchIndexTicker then return end  -- Already running
 
     local frame = self.MainFrame
-    if not frame or not frame.pages then return end
+    if not frame or not frame.pages or not frame:IsShown() then return end
 
-    -- Count total tabs that need building
-    local total = 0
-    for tabIndex, page in pairs(frame.pages) do
-        if tabIndex ~= self._searchTabIndex and page and page.createFunc and not page.built then
-            total = total + 1
-        end
-    end
-    self._searchIndexTotal = total
-    self._searchIndexProgress = 0
-
-    if total == 0 then
-        self._searchIndexBuilt = true
-        return
-    end
+    self:RefreshSearchIndexProgress()
+    if self._searchIndexBuilt then return end
 
     -- Build one tab per tick using chained C_Timer.NewTimer(0) so each
     -- handle is cancellable and only one tab builds per frame.
     local function BuildNextTick()
-        -- Abort if panel was destroyed/rebuilt
-        if not self.MainFrame or self.MainFrame ~= frame then
-            self._searchIndexTicker = nil
+        -- Abort if panel was destroyed, rebuilt, or hidden.
+        if not self.MainFrame or self.MainFrame ~= frame or not frame:IsShown() then
+            self:CancelBackgroundIndexBuild()
             return
         end
 
@@ -652,7 +757,7 @@ function GUI:StartBackgroundIndexBuild()
             self._searchIndexTicker = C_Timer.NewTimer(0, BuildNextTick)
         else
             -- All done
-            self._searchIndexBuilt = true
+            self:RefreshSearchIndexProgress()
             self._searchIndexTicker = nil
         end
     end
@@ -665,10 +770,7 @@ end
 -- Only called as a fallback if user opens Search before background build finishes.
 function GUI:ForceLoadAllTabs()
     -- Cancel background builder if running
-    if self._searchIndexTicker then
-        self._searchIndexTicker:Cancel()
-        self._searchIndexTicker = nil
-    end
+    self:CancelBackgroundIndexBuild()
 
     local frame = self.MainFrame
     if not frame or not frame.pages then return end
@@ -677,7 +779,7 @@ function GUI:ForceLoadAllTabs()
 
     while self:BuildNextTabIndex() do end  -- Build all remaining
 
-    self._searchIndexBuilt = true
+    self:RefreshSearchIndexProgress()
 end
 
 ---------------------------------------------------------------------------
@@ -3108,6 +3210,7 @@ function GUI:CreateFormToggle(parent, label, dbKey, dbTable, onChange, registryI
     local container = CreateFrame("Frame", nil, parent)
     container:SetHeight(FORM_ROW_HEIGHT)
     local UIKit = ns.UIKit
+    ApplyWidgetSyncContext(container, dbTable, dbKey)
 
     -- Label on left (off-white text, constrained to not overlap toggle)
     local text = container:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -3207,6 +3310,9 @@ function GUI:CreateFormToggle(parent, label, dbKey, dbTable, onChange, registryI
         if dbTable and dbKey then dbTable[dbKey] = val end
         BroadcastToSiblings(container, val)
         if onChange and not skipCallback then onChange(val) end
+        if not skipCallback then
+            MaybeAutoNotifyProviderSync(container)
+        end
     end
 
     container.GetValue = GetValue
@@ -3293,6 +3399,7 @@ function GUI:CreateFormToggleInverted(parent, label, dbKey, dbTable, onChange)
     local container = CreateFrame("Frame", nil, parent)
     container:SetHeight(FORM_ROW_HEIGHT)
     local UIKit = ns.UIKit
+    ApplyWidgetSyncContext(container, dbTable, dbKey)
 
     -- Label on left (off-white text, constrained to not overlap toggle)
     local text = container:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -3396,6 +3503,9 @@ function GUI:CreateFormToggleInverted(parent, label, dbKey, dbTable, onChange)
         if dbTable and dbKey then dbTable[dbKey] = dbVal end
         BroadcastToSiblings(container, isOn)
         if onChange and not skipCallback then onChange(dbVal) end
+        if not skipCallback then
+            MaybeAutoNotifyProviderSync(container)
+        end
     end
 
     container.GetValue = IsOn
@@ -3462,6 +3572,7 @@ function GUI:CreateFormCheckboxOriginal(parent, label, dbKey, dbTable, onChange)
     if parent._hasContent ~= nil then parent._hasContent = true end
     local container = CreateFrame("Frame", nil, parent)
     container:SetHeight(FORM_ROW_HEIGHT)
+    ApplyWidgetSyncContext(container, dbTable, dbKey)
 
     -- Label on left (off-white text, constrained to not overlap checkbox)
     local text = container:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -3520,6 +3631,9 @@ function GUI:CreateFormCheckboxOriginal(parent, label, dbKey, dbTable, onChange)
         if dbTable and dbKey then dbTable[dbKey] = val end
         BroadcastToSiblings(container, val)
         if onChange and not skipCallback then onChange(val) end
+        if not skipCallback then
+            MaybeAutoNotifyProviderSync(container)
+        end
     end
 
     container.GetValue = GetValue
@@ -3557,6 +3671,7 @@ function GUI:CreateFormEditBox(parent, label, dbKey, dbTable, onChange, options,
 
     local container = CreateFrame("Frame", nil, parent)
     container:SetHeight(FORM_ROW_HEIGHT)
+    ApplyWidgetSyncContext(container, dbTable, dbKey)
 
     local text = container:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     SetFont(text, 12, "", C.text)
@@ -3699,6 +3814,9 @@ function GUI:CreateFormEditBox(parent, label, dbKey, dbTable, onChange, options,
         if onChange and not skipOnChange then
             onChange(nextVal)
         end
+        if not skipOnChange then
+            MaybeAutoNotifyProviderSync(container)
+        end
     end
 
     container.GetValue = GetValue
@@ -3800,11 +3918,13 @@ function GUI:CreateFormSlider(parent, label, min, max, step, dbKey, dbTable, onC
 
     options = options or {}
     local UIKit = ns.UIKit
+    ApplyWidgetSyncContext(container, dbTable, dbKey)
     local useUIKitBorders = UIKit
         and UIKit.CreateBackground
         and UIKit.CreateBorderLines
         and UIKit.UpdateBorderLines
     local deferOnDrag = options.deferOnDrag or false
+    local onDragPreview = options.onDragPreview
     local precision = options.precision
     local formatStr = precision and string.format("%%.%df", precision) or (step < 1 and "%.2f" or "%d")
 
@@ -3826,7 +3946,7 @@ function GUI:CreateFormSlider(parent, label, min, max, step, dbKey, dbTable, onC
     local trackContainer = CreateFrame("Frame", nil, container)
     trackContainer:SetHeight(6)  -- Thicker track (was 14, now 6 for cleaner look)
     trackContainer:SetPoint("LEFT", container, "LEFT", 180, 0)
-    trackContainer:SetPoint("RIGHT", container, "RIGHT", -70, 0)
+    trackContainer:SetPoint("RIGHT", container, "RIGHT", -86, 0)
 
     -- Unfilled track (background) - rounded appearance via backdrop
     local trackBg = CreateFrame("Frame", nil, trackContainer, useUIKitBorders and nil or "BackdropTemplate")
@@ -3900,10 +4020,32 @@ function GUI:CreateFormSlider(parent, label, min, max, step, dbKey, dbTable, onC
     thumb:SetSize(14, 14)
     thumb:SetAlpha(0)  -- Hide the actual thumb, we use thumbFrame instead
 
-    -- Editbox for value (far right)
+    -- Nudge button (decrement) — left of editbox
+    local nudgeMinus = CreateFrame("Button", nil, container, useUIKitBorders and nil or "BackdropTemplate")
+    nudgeMinus:SetSize(16, 22)
+    nudgeMinus:SetPoint("RIGHT", container, "RIGHT", -64, 0)
+    if useUIKitBorders then
+        nudgeMinus.bg = UIKit.CreateBackground(nudgeMinus, 0.08, 0.08, 0.08, 1)
+        UIKit.CreateBorderLines(nudgeMinus)
+        UIKit.UpdateBorderLines(nudgeMinus, 1, 0.25, 0.25, 0.25, 1, false)
+    else
+        nudgeMinus:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8x8",
+            edgeFile = "Interface\\Buttons\\WHITE8x8",
+            edgeSize = px,
+        })
+        nudgeMinus:SetBackdropColor(0.08, 0.08, 0.08, 1)
+        nudgeMinus:SetBackdropBorderColor(0.25, 0.25, 0.25, 1)
+    end
+    local nudgeMinusText = nudgeMinus:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    SetFont(nudgeMinusText, 11, "", C.text)
+    nudgeMinusText:SetText("-")
+    nudgeMinusText:SetPoint("CENTER", 0, 0)
+
+    -- Editbox for value (between nudge buttons)
     local editBox = CreateFrame("EditBox", nil, container, useUIKitBorders and nil or "BackdropTemplate")
-    editBox:SetSize(60, 22)
-    editBox:SetPoint("RIGHT", 0, 0)
+    editBox:SetSize(46, 22)
+    editBox:SetPoint("LEFT", nudgeMinus, "RIGHT", 1, 0)
     if useUIKitBorders then
         editBox.bg = UIKit.CreateBackground(editBox, 0.08, 0.08, 0.08, 1)
         UIKit.CreateBorderLines(editBox)
@@ -3921,6 +4063,28 @@ function GUI:CreateFormSlider(parent, label, min, max, step, dbKey, dbTable, onC
     editBox:SetTextColor(C_text_r, C_text_g, C_text_b, C_text_a)
     editBox:SetJustifyH("CENTER")
     editBox:SetAutoFocus(false)
+
+    -- Nudge button (increment) — right of editbox
+    local nudgePlus = CreateFrame("Button", nil, container, useUIKitBorders and nil or "BackdropTemplate")
+    nudgePlus:SetSize(16, 22)
+    nudgePlus:SetPoint("LEFT", editBox, "RIGHT", 1, 0)
+    if useUIKitBorders then
+        nudgePlus.bg = UIKit.CreateBackground(nudgePlus, 0.08, 0.08, 0.08, 1)
+        UIKit.CreateBorderLines(nudgePlus)
+        UIKit.UpdateBorderLines(nudgePlus, 1, 0.25, 0.25, 0.25, 1, false)
+    else
+        nudgePlus:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8x8",
+            edgeFile = "Interface\\Buttons\\WHITE8x8",
+            edgeSize = px,
+        })
+        nudgePlus:SetBackdropColor(0.08, 0.08, 0.08, 1)
+        nudgePlus:SetBackdropBorderColor(0.25, 0.25, 0.25, 1)
+    end
+    local nudgePlusText = nudgePlus:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    SetFont(nudgePlusText, 11, "", C.text)
+    nudgePlusText:SetText("+")
+    nudgePlusText:SetPoint("CENTER", 0, 0)
 
     local function SetThumbBorderColor(r, g, b, a)
         if useUIKitBorders then
@@ -3998,11 +4162,47 @@ function GUI:CreateFormSlider(parent, label, min, max, step, dbKey, dbTable, onC
         if dbTable and dbKey then dbTable[dbKey] = val end
         BroadcastToSiblings(container, val)
         if not skipOnChange and onChange then onChange(val) end
+        if not skipOnChange then
+            MaybeAutoNotifyProviderSync(container)
+        end
     end
 
     container.GetValue = GetValue
     container.SetValue = BindWidgetMethod(container, SetValue)
     container.UpdateVisual = UpdateVisual
+
+    -- Nudge button click handlers
+    nudgeMinus:SetScript("OnClick", function()
+        if container.isEnabled == false then return end
+        local cur = GetValue()
+        SetValue(cur - container.step)
+    end)
+    nudgePlus:SetScript("OnClick", function()
+        if container.isEnabled == false then return end
+        local cur = GetValue()
+        SetValue(cur + container.step)
+    end)
+
+    -- Nudge button hover effects
+    local function SetNudgeBorderColor(btn, r, g, b, a)
+        if useUIKitBorders then
+            UIKit.UpdateBorderLines(btn, 1, r, g, b, a or 1, false)
+        else
+            btn:SetBackdropBorderColor(r, g, b, a or 1)
+        end
+    end
+    nudgeMinus:SetScript("OnEnter", function(self)
+        SetNudgeBorderColor(self, C.accent[1], C.accent[2], C.accent[3], 1)
+    end)
+    nudgeMinus:SetScript("OnLeave", function(self)
+        SetNudgeBorderColor(self, 0.25, 0.25, 0.25, 1)
+    end)
+    nudgePlus:SetScript("OnEnter", function(self)
+        SetNudgeBorderColor(self, C.accent[1], C.accent[2], C.accent[3], 1)
+    end)
+    nudgePlus:SetScript("OnLeave", function(self)
+        SetNudgeBorderColor(self, 0.25, 0.25, 0.25, 1)
+    end)
 
     -- Register for cross-widget sync
     RegisterWidgetInstance(container, dbTable, dbKey)
@@ -4017,8 +4217,12 @@ function GUI:CreateFormSlider(parent, label, min, max, step, dbKey, dbTable, onC
         if dbTable and dbKey then dbTable[dbKey] = value end
         if userInput then
             BroadcastToSiblings(container, value)
-            if deferOnDrag and isDragging then return end
+            if deferOnDrag and isDragging then
+                if onDragPreview then onDragPreview(value) end
+                return
+            end
             if onChange then onChange(value) end
+            MaybeAutoNotifyProviderSync(container)
         end
     end)
 
@@ -4027,6 +4231,7 @@ function GUI:CreateFormSlider(parent, label, min, max, step, dbKey, dbTable, onC
         if isDragging and deferOnDrag then
             isDragging = false
             if onChange then onChange(slider:GetValue()) end
+            MaybeAutoNotifyProviderSync(container)
         end
         isDragging = false
     end)
@@ -4095,6 +4300,8 @@ function GUI:CreateFormSlider(parent, label, min, max, step, dbKey, dbTable, onC
         slider:EnableMouse(enabled)
         editBox:EnableMouse(enabled)
         editBox:SetEnabled(enabled)
+        nudgeMinus:EnableMouse(enabled)
+        nudgePlus:EnableMouse(enabled)
 
         -- Store state for scripts to check
         container.isEnabled = enabled
@@ -4142,6 +4349,7 @@ function GUI:CreateFormDropdown(parent, label, options, dbKey, dbTable, onChange
         and UIKit.UpdateBorderLines
     local container = CreateFrame("Frame", nil, parent)
     container:SetHeight(FORM_ROW_HEIGHT)
+    ApplyWidgetSyncContext(container, dbTable, dbKey)
 
     -- Label on left (off-white text)
     local text = container:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -4350,6 +4558,9 @@ function GUI:CreateFormDropdown(parent, label, options, dbKey, dbTable, onChange
         UpdateVisual(val)
         BroadcastToSiblings(container, val)
         if not skipOnChange and onChange then onChange(val) end
+        if not skipOnChange then
+            MaybeAutoNotifyProviderSync(container)
+        end
     end
 
     local function UpdateScrollInset()
@@ -4726,6 +4937,7 @@ function GUI:CreateFormColorPicker(parent, label, dbKey, dbTable, onChange, opti
     if parent._hasContent ~= nil then parent._hasContent = true end
     local container = CreateFrame("Frame", nil, parent)
     container:SetHeight(FORM_ROW_HEIGHT)
+    ApplyWidgetSyncContext(container, dbTable, dbKey)
 
     -- Label on left (off-white text)
     local text = container:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -4791,10 +5003,24 @@ function GUI:CreateFormColorPicker(parent, label, dbKey, dbTable, onChange, opti
             dbTable[dbKey] = {r, g, b, finalAlpha}
         end
         if onChange then onChange(r, g, b, finalAlpha) end
+        BroadcastToSiblings(container, {r, g, b, finalAlpha})
+        MaybeAutoNotifyProviderSync(container)
+    end
+
+    local function UpdateVisual(val)
+        if type(val) == "table" then
+            SetSwatchColor(val[1] or 1, val[2] or 1, val[3] or 1, val[4] or 1)
+            return
+        end
+        local r, g, b, a = GetColor()
+        SetSwatchColor(r, g, b, a)
     end
 
     container.GetColor = GetColor
     container.SetColor = SetColor
+    container.UpdateVisual = UpdateVisual
+
+    RegisterWidgetInstance(container, dbTable, dbKey)
 
     local r, g, b, a = GetColor()
     SetSwatchColor(r, g, b, a)
@@ -7193,6 +7419,9 @@ function GUI:Show()
         self:InitializeOptions()
     end
     self.MainFrame:Show()
+    if self._allTabsAdded and not self._searchIndexBuilt then
+        self:StartBackgroundIndexBuild()
+    end
 end
 
 ---------------------------------------------------------------------------
@@ -7200,6 +7429,7 @@ end
 ---------------------------------------------------------------------------
 function GUI:Hide()
     if self.MainFrame then
+        self:CancelBackgroundIndexBuild()
         self.MainFrame:Hide()
     end
 end
@@ -7216,6 +7446,8 @@ function GUI:RefreshAccentColor()
     -- Save current position so the window doesn't jump back to center
     local point, _, relPoint, xOfs, yOfs = self.MainFrame:GetPoint()
 
+    self:CancelBackgroundIndexBuild()
+
     -- Tear down old frame
     self.MainFrame:Hide()
     self.MainFrame:SetParent(nil)
@@ -7223,6 +7455,8 @@ function GUI:RefreshAccentColor()
 
     -- Reset search index state (will be rebuilt from dedup keys)
     self._searchIndexBuilt = false
+    self._searchIndexProgress = 0
+    self._searchIndexTotal = 0
     self._allTabsAdded = false
     self.SettingsRegistry = {}
     self.SettingsRegistryKeys = {}

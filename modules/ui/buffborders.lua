@@ -265,19 +265,8 @@ local function CreateAuraIcon(parent)
         if InCombatLockdown() then return end
         if not self._auraInstanceID or self._auraInstanceID <= 0 then return end
         if self._filter ~= "HELPFUL" then return end
-        if not AuraUtil or not AuraUtil.ForEachAura then return end
-        if not CancelUnitBuff then return end
 
-        -- Find the buff slot index matching this auraInstanceID at click-time
-        local targetID = self._auraInstanceID
-        local slot = 0
-        AuraUtil.ForEachAura("player", "HELPFUL", nil, function(auraData)
-            slot = slot + 1
-            if auraData and auraData.auraInstanceID == targetID then
-                pcall(CancelUnitBuff, "player", slot, "HELPFUL")
-                return true
-            end
-        end, true)
+        pcall(C_UnitAuras.CancelAuraByAuraInstanceID, self._auraInstanceID)
     end)
 
     icon:Hide()
@@ -720,25 +709,25 @@ local function UpdateAuraIcons(container, activeIcons, sortedList, filter, isBuf
             pcall(icon.Cooldown.SetReverse, icon.Cooldown, targetReverse)
         end
 
-        -- Cooldown swipe: prefer DurationObject (secret-safe via C-side)
+        -- Cooldown swipe: prefer numeric path (correct remaining-time display),
+        -- fall back to DurationObject only when values are secret (combat).
         if expirationTime and duration then
-            local applied = false
-            -- DurationObject path: fully secret-safe, C-side handles everything
-            if icon._auraInstanceID and C_UnitAuras and C_UnitAuras.GetAuraDuration
-               and icon.Cooldown.SetCooldownFromDurationObject then
+            if not IsSecretValue(expirationTime) and not IsSecretValue(duration) then
+                -- Non-secret: SetCooldown with computed start time — always
+                -- shows correct remaining time for long-duration auras.
+                local startTime = expirationTime - duration
+                pcall(icon.Cooldown.SetCooldown, icon.Cooldown, startTime, duration)
+            elseif icon._auraInstanceID and C_UnitAuras and C_UnitAuras.GetAuraDuration
+                   and icon.Cooldown.SetCooldownFromDurationObject then
+                -- Combat (secret values): DurationObject is C-side safe
                 local ok, durObj = pcall(C_UnitAuras.GetAuraDuration, "player", icon._auraInstanceID)
                 if ok and durObj then
                     pcall(icon.Cooldown.SetCooldownFromDurationObject, icon.Cooldown, durObj, true)
-                    applied = true
-                end
-            end
-            -- Fallback: only use expiration time when values are readable in Lua
-            if not applied then
-                if not IsSecretValue(expirationTime) and not IsSecretValue(duration) then
-                    pcall(icon.Cooldown.SetCooldownFromExpirationTime, icon.Cooldown, expirationTime, duration)
                 else
                     icon.Cooldown:Clear()
                 end
+            else
+                icon.Cooldown:Clear()
             end
         else
             icon.Cooldown:Clear()

@@ -450,7 +450,10 @@ local function CreateCDMSetupPage(parent)
     ---------------------------------------------------------------------------
     local function TeardownTabContent(tabContent)
         for _, child in pairs({tabContent:GetChildren()}) do
-            if child.Release then
+            if child == tabContent._quiCustomEntriesSpecListener then
+                child:UnregisterAllEvents()
+                child:Hide()
+            elseif child.Release then
                 child:Release()
             elseif child.Recycle then
                 child:Recycle()
@@ -788,15 +791,45 @@ local function CreateCDMSetupPage(parent)
             BuildCustomEntriesTab(tabContent)
         end
 
-        -- Keep context + entry list in sync when swapping specs while this tab is open.
-        local specChangeListener = CreateFrame("Frame", nil, tabContent)
-        specChangeListener:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
-        specChangeListener:RegisterEvent("ACTIVE_PLAYER_SPECIALIZATION_CHANGED")
-        specChangeListener:SetScript("OnEvent", function()
-            if tabContent:IsShown() then
-                rebuildCustomEntries()
-            end
-        end)
+        -- Keep context + entry list in sync only while this sub-tab is visible
+        -- so hidden search-index page builds do not leave background listeners active.
+        local specChangeListener = tabContent._quiCustomEntriesSpecListener
+        if not specChangeListener then
+            specChangeListener = CreateFrame("Frame", nil, tabContent)
+            specChangeListener:Hide()
+            specChangeListener:SetScript("OnEvent", function(self)
+                if tabContent:IsShown() and type(self._quiRefreshHandler) == "function" then
+                    self._quiRefreshHandler()
+                end
+            end)
+            tabContent._quiCustomEntriesSpecListener = specChangeListener
+        end
+        specChangeListener._quiRefreshHandler = rebuildCustomEntries
+
+        local function RegisterSpecChangeListener()
+            if specChangeListener._quiRegistered then return end
+            specChangeListener:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+            specChangeListener:RegisterEvent("ACTIVE_PLAYER_SPECIALIZATION_CHANGED")
+            specChangeListener._quiRegistered = true
+        end
+
+        local function UnregisterSpecChangeListener()
+            if not specChangeListener._quiRegistered then return end
+            specChangeListener:UnregisterAllEvents()
+            specChangeListener._quiRegistered = false
+        end
+
+        if not tabContent._quiCustomEntriesSpecListenerHooks then
+            tabContent._quiCustomEntriesSpecListenerHooks = true
+            tabContent:HookScript("OnShow", RegisterSpecChangeListener)
+            tabContent:HookScript("OnHide", UnregisterSpecChangeListener)
+        end
+
+        if tabContent:IsShown() then
+            RegisterSpecChangeListener()
+        else
+            UnregisterSpecChangeListener()
+        end
 
         local essCustom = GetCharCustomEntries("essential")
         local utilCustom = GetCharCustomEntries("utility")

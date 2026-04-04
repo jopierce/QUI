@@ -25,6 +25,11 @@ local function RegisterAllProviders()
 
     local P = U.PlaceRow
     local FORM_ROW = U.FORM_ROW
+    local function NotifyProviderFor(widget, opts)
+        if GUI and GUI.NotifyProviderChangedForWidget then
+            GUI:NotifyProviderChangedForWidget(widget, opts)
+        end
+    end
 
     local anchorOptions = {
         {value = "TOPLEFT", text = "Top Left"},
@@ -643,7 +648,7 @@ local function RegisterAllProviders()
             local s1dd = GUI:CreateFormDropdown(body, "Slot 1 (Left)", dtOptions, nil, nil, function(val)
                 dt.slots[1] = val; Refresh()
             end)
-            if s1dd.SetValue then s1dd:SetValue(dt.slots[1] or "") end
+            if s1dd.SetValue then s1dd:SetValue(dt.slots[1] or "", true) end
             sy = P(s1dd, body, sy)
             sy = P(GUI:CreateFormCheckbox(body, "Slot 1 Short Label", "shortLabel", dt.slot1, Refresh), body, sy)
             sy = P(GUI:CreateFormCheckbox(body, "Slot 1 No Label", "noLabel", dt.slot1, Refresh), body, sy)
@@ -654,7 +659,7 @@ local function RegisterAllProviders()
             local s2dd = GUI:CreateFormDropdown(body, "Slot 2 (Center)", dtOptions, nil, nil, function(val)
                 dt.slots[2] = val; Refresh()
             end)
-            if s2dd.SetValue then s2dd:SetValue(dt.slots[2] or "") end
+            if s2dd.SetValue then s2dd:SetValue(dt.slots[2] or "", true) end
             sy = P(s2dd, body, sy)
             sy = P(GUI:CreateFormCheckbox(body, "Slot 2 Short Label", "shortLabel", dt.slot2, Refresh), body, sy)
             sy = P(GUI:CreateFormCheckbox(body, "Slot 2 No Label", "noLabel", dt.slot2, Refresh), body, sy)
@@ -665,7 +670,7 @@ local function RegisterAllProviders()
             local s3dd = GUI:CreateFormDropdown(body, "Slot 3 (Right)", dtOptions, nil, nil, function(val)
                 dt.slots[3] = val; Refresh()
             end)
-            if s3dd.SetValue then s3dd:SetValue(dt.slots[3] or "") end
+            if s3dd.SetValue then s3dd:SetValue(dt.slots[3] or "", true) end
             sy = P(s3dd, body, sy)
             sy = P(GUI:CreateFormCheckbox(body, "Slot 3 Short Label", "shortLabel", dt.slot3, Refresh), body, sy)
             sy = P(GUI:CreateFormCheckbox(body, "Slot 3 No Label", "noLabel", dt.slot3, Refresh), body, sy)
@@ -861,6 +866,7 @@ local function RegisterAllProviders()
                             row._cb:SetScript("OnClick", function(self)
                                 dt.currencyEnabled[cid] = self:GetChecked()
                                 Refresh()
+                                NotifyProviderFor(row._cb, { structural = true })
                             end)
 
                             -- Up button
@@ -871,6 +877,7 @@ local function RegisterAllProviders()
                                     o[capturedIdx], o[capturedIdx - 1] = o[capturedIdx - 1], o[capturedIdx]
                                     RebuildCurrencyRows()
                                     Refresh()
+                                    NotifyProviderFor(row._upBtn, { structural = true })
                                 end
                             end)
                             row._upBtn:SetAlpha(idx > 1 and 1 or 0.3)
@@ -882,6 +889,7 @@ local function RegisterAllProviders()
                                     o[capturedIdx], o[capturedIdx + 1] = o[capturedIdx + 1], o[capturedIdx]
                                     RebuildCurrencyRows()
                                     Refresh()
+                                    NotifyProviderFor(row._downBtn, { structural = true })
                                 end
                             end)
                             row._downBtn:SetAlpha(idx < #dt.currencyOrder and 1 or 0.3)
@@ -1179,6 +1187,7 @@ local function RegisterAllProviders()
                                 local btnText2 = self:GetFontString()
                                 if btnText2 then btnText2:SetText(opt.text) end
                                 RefreshPreview()
+                                NotifyProviderFor(colorModeDropdown)
                             end,
                         })
                     end
@@ -1368,6 +1377,18 @@ local function RegisterAllProviders()
                 if _G.QUI_RefreshCastbar then _G.QUI_RefreshCastbar(unitKey) end
             end
 
+            -- Lightweight preview: resize the existing castbar frame from DB
+            -- values without a full destroy+recreate. The full Refresh fires on
+            -- mouse release to rebuild properly.
+            local function PreviewSize()
+                local QUI_Castbar = ns.QUI_Castbar
+                local cb = QUI_Castbar and QUI_Castbar.castbars and QUI_Castbar.castbars[unitKey]
+                if not cb then return end
+                local w = castDB.width or 200
+                local h = castDB.height or 25
+                cb:SetSize(w, h)
+            end
+
             -- Standalone Mode (player only) — keeps castbar when UF is disabled
             if unitKey == "player" then
                 local standaloneRow = CreateFrame("Frame", nil, content)
@@ -1384,6 +1405,9 @@ local function RegisterAllProviders()
             local generalRows = 5
             if unitKey == "player" then generalRows = generalRows + 1 end  -- class color
             if unitKey == "target" or unitKey == "focus" then generalRows = generalRows + 1 end  -- uninterruptible color
+            local DEFER = { deferOnDrag = true }
+            local DEFER_SIZE = { deferOnDrag = true, onDragPreview = PreviewSize }
+
             U.CreateCollapsible(content, "General", generalRows * FORM_ROW + 8, function(body)
                 local sy = -4
                 sy = P(GUI:CreateFormCheckbox(body, "Show Spell Icon", "showIcon", castDB, Refresh), body, sy)
@@ -1396,7 +1420,7 @@ local function RegisterAllProviders()
                     sy = P(GUI:CreateFormColorPicker(body, "Uninterruptible Color", "notInterruptibleColor", castDB, Refresh), body, sy)
                 end
                 sy = P(GUI:CreateFormDropdown(body, "Bar Texture", U.GetTextureList(), "texture", castDB, Refresh), body, sy)
-                P(GUI:CreateFormSlider(body, "Border Size", 0, 5, 1, "borderSize", castDB, Refresh), body, sy)
+                P(GUI:CreateFormSlider(body, "Border Size", 0, 5, 1, "borderSize", castDB, Refresh, DEFER), body, sy)
             end, sections, relayout)
 
             -- GCD (player only)
@@ -1421,10 +1445,10 @@ local function RegisterAllProviders()
             if castDB.widthAdjustment == nil then castDB.widthAdjustment = 0 end
             U.CreateCollapsible(content, "Size", 5 * FORM_ROW + 8, function(body)
                 local sy = -4
-                sy = P(GUI:CreateFormSlider(body, "Width", 50, 2000, 1, "width", castDB, Refresh), body, sy)
-                sy = P(GUI:CreateFormSlider(body, "Width Adjustment (Anchor)", -50, 50, 1, "widthAdjustment", castDB, Refresh), body, sy)
-                sy = P(GUI:CreateFormSlider(body, "Bar Height", 4, 60, 1, "height", castDB, Refresh), body, sy)
-                sy = P(GUI:CreateFormSlider(body, "Icon Size", 8, 80, 1, "iconSize", castDB, Refresh), body, sy)
+                sy = P(GUI:CreateFormSlider(body, "Width", 50, 2000, 1, "width", castDB, Refresh, DEFER_SIZE), body, sy)
+                sy = P(GUI:CreateFormSlider(body, "Width Adjustment (Anchor)", -50, 50, 1, "widthAdjustment", castDB, Refresh, DEFER_SIZE), body, sy)
+                sy = P(GUI:CreateFormSlider(body, "Bar Height", 4, 60, 1, "height", castDB, Refresh, DEFER_SIZE), body, sy)
+                sy = P(GUI:CreateFormSlider(body, "Icon Size", 8, 80, 1, "iconSize", castDB, Refresh, DEFER_SIZE), body, sy)
                 P(GUI:CreateFormCheckbox(body, "Channel Fill Forward", "channelFillForward", castDB, Refresh), body, sy)
             end, sections, relayout)
 
@@ -1433,7 +1457,7 @@ local function RegisterAllProviders()
             U.CreateCollapsible(content, "Channel Ticks", 4 * FORM_ROW + 8, function(body)
                 local sy = -4
                 sy = P(GUI:CreateFormCheckbox(body, "Show Channel Tick Markers", "showChannelTicks", castDB, Refresh), body, sy)
-                sy = P(GUI:CreateFormSlider(body, "Tick Thickness", 1, 5, 0.5, "channelTickThickness", castDB, Refresh), body, sy)
+                sy = P(GUI:CreateFormSlider(body, "Tick Thickness", 1, 5, 0.5, "channelTickThickness", castDB, Refresh, DEFER), body, sy)
                 sy = P(GUI:CreateFormColorPicker(body, "Tick Color", "channelTickColor", castDB, Refresh), body, sy)
                 local tickSourceOptions = {
                     {value = "auto", text = "Auto (Static then Runtime)"},
@@ -1447,8 +1471,8 @@ local function RegisterAllProviders()
             -- Text & Display
             U.CreateCollapsible(content, "Text & Display", 2 * FORM_ROW + 8, function(body)
                 local sy = -4
-                sy = P(GUI:CreateFormSlider(body, "Font Size", 8, 24, 1, "fontSize", castDB, Refresh), body, sy)
-                P(GUI:CreateFormSlider(body, "Max Length (0=none)", 0, 30, 1, "maxLength", castDB, Refresh), body, sy)
+                sy = P(GUI:CreateFormSlider(body, "Font Size", 8, 24, 1, "fontSize", castDB, Refresh, DEFER), body, sy)
+                P(GUI:CreateFormSlider(body, "Max Length (0=none)", 0, 30, 1, "maxLength", castDB, Refresh, DEFER), body, sy)
             end, sections, relayout)
 
             -- Element Positioning
@@ -1469,25 +1493,25 @@ local function RegisterAllProviders()
                 local sy = -4
                 sy = P(GUI:CreateFormDropdown(body, "Icon Anchor", NINE_POINT, "iconAnchor", castDB, Refresh), body, sy)
                 sy = P(GUI:CreateFormToggle(body, "Show Icon", "showIcon", castDB, Refresh), body, sy)
-                sy = P(GUI:CreateFormSlider(body, "Icon Spacing", -50, 50, 1, "iconSpacing", castDB, Refresh), body, sy)
-                sy = P(GUI:CreateFormSlider(body, "Icon Border Size", 0, 5, 0.1, "iconBorderSize", castDB, Refresh, { precision = 1 }), body, sy)
-                P(GUI:CreateFormSlider(body, "Icon Scale", 0.5, 2.0, 0.1, "iconScale", castDB, Refresh, { precision = 1 }), body, sy)
+                sy = P(GUI:CreateFormSlider(body, "Icon Spacing", -50, 50, 1, "iconSpacing", castDB, Refresh, DEFER), body, sy)
+                sy = P(GUI:CreateFormSlider(body, "Icon Border Size", 0, 5, 0.1, "iconBorderSize", castDB, Refresh, { precision = 1, deferOnDrag = true }), body, sy)
+                P(GUI:CreateFormSlider(body, "Icon Scale", 0.5, 2.0, 0.1, "iconScale", castDB, Refresh, { precision = 1, deferOnDrag = true }), body, sy)
             end, sections, relayout)
 
             U.CreateCollapsible(content, "Spell Text", 4 * FORM_ROW + 8, function(body)
                 local sy = -4
                 sy = P(GUI:CreateFormToggle(body, "Show Spell Text", "showSpellText", castDB, Refresh), body, sy)
                 sy = P(GUI:CreateFormDropdown(body, "Spell Text Anchor", NINE_POINT, "spellTextAnchor", castDB, Refresh), body, sy)
-                sy = P(GUI:CreateFormSlider(body, "X Offset", -200, 200, 1, "spellTextOffsetX", castDB, Refresh), body, sy)
-                P(GUI:CreateFormSlider(body, "Y Offset", -200, 200, 1, "spellTextOffsetY", castDB, Refresh), body, sy)
+                sy = P(GUI:CreateFormSlider(body, "X Offset", -200, 200, 1, "spellTextOffsetX", castDB, Refresh, DEFER), body, sy)
+                P(GUI:CreateFormSlider(body, "Y Offset", -200, 200, 1, "spellTextOffsetY", castDB, Refresh, DEFER), body, sy)
             end, sections, relayout)
 
             U.CreateCollapsible(content, "Time Text", 4 * FORM_ROW + 8, function(body)
                 local sy = -4
                 sy = P(GUI:CreateFormToggle(body, "Show Time Text", "showTimeText", castDB, Refresh), body, sy)
                 sy = P(GUI:CreateFormDropdown(body, "Time Text Anchor", NINE_POINT, "timeTextAnchor", castDB, Refresh), body, sy)
-                sy = P(GUI:CreateFormSlider(body, "X Offset", -200, 200, 1, "timeTextOffsetX", castDB, Refresh), body, sy)
-                P(GUI:CreateFormSlider(body, "Y Offset", -200, 200, 1, "timeTextOffsetY", castDB, Refresh), body, sy)
+                sy = P(GUI:CreateFormSlider(body, "X Offset", -200, 200, 1, "timeTextOffsetX", castDB, Refresh, DEFER), body, sy)
+                P(GUI:CreateFormSlider(body, "Y Offset", -200, 200, 1, "timeTextOffsetY", castDB, Refresh, DEFER), body, sy)
             end, sections, relayout)
 
             -- Empowered (player only)
@@ -1503,7 +1527,7 @@ local function RegisterAllProviders()
                     sy = P(GUI:CreateFormToggle(body, "Hide Time Text on Empowered", "hideTimeTextOnEmpowered", castDB, Refresh), body, sy)
                     sy = P(GUI:CreateFormToggle(body, "Show Empowered Level", "showEmpoweredLevel", castDB, Refresh), body, sy)
                     sy = P(GUI:CreateFormDropdown(body, "Level Text Anchor", NINE_POINT, "empoweredLevelTextAnchor", castDB, Refresh), body, sy)
-                    P(GUI:CreateFormSlider(body, "Level Text X Offset", -200, 200, 1, "empoweredLevelTextOffsetX", castDB, Refresh), body, sy)
+                    P(GUI:CreateFormSlider(body, "Level Text X Offset", -200, 200, 1, "empoweredLevelTextOffsetX", castDB, Refresh, DEFER), body, sy)
                 end, sections, relayout)
             end
 
@@ -2375,6 +2399,9 @@ local function RegisterAllProviders()
                         RebuildSoundEntries()
                     end
                     local channelDropdown = GUI:CreateFormDropdown(row, "Channel", channelOpts, "channel", entry, OnChannelChange)
+                    if GUI.SetWidgetProviderSyncOptions then
+                        GUI:SetWidgetProviderSyncOptions(channelDropdown, { auto = true, structural = true })
+                    end
                     channelDropdown:SetPoint("TOPLEFT", 0, 0)
                     channelDropdown:SetPoint("RIGHT", row, "RIGHT", -80, 0)
 
@@ -2387,6 +2414,7 @@ local function RegisterAllProviders()
                         table.remove(entries, i)
                         RebuildSoundEntries()
                         Refresh()
+                        NotifyProviderFor(removeBtn, { structural = true })
                     end)
                     removeBtn:SetPoint("RIGHT", row, "RIGHT", 0, -FORM_ROW/2)
 
@@ -2415,6 +2443,7 @@ local function RegisterAllProviders()
                         table.insert(chat.newMessageSound.entries, { channel = channel, sound = "None" })
                         RebuildSoundEntries()
                         Refresh()
+                        NotifyProviderFor(addBtn, { structural = true })
                     end)
                     addBtn:SetPoint("TOPLEFT", 0, -rowY - 4)
                     rowY = rowY + 28

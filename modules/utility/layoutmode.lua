@@ -180,6 +180,7 @@ QUI_LayoutMode._movers = QUI_LayoutMode._handles
 ---   onLiveMove (function) — callback during/after drag
 ---   loadPosition (function) — custom position loader (overrides frameAnchoring)
 ---   savePosition (function) — custom position saver (overrides frameAnchoring)
+---   usesCustomPositionPersistence (boolean) — skip generic frameAnchoring DB writes/lock handling
 function QUI_LayoutMode:RegisterElement(def)
     if not def or not def.key then return end
 
@@ -392,7 +393,16 @@ function QUI_LayoutMode:Open()
     self.isActive = true
 
     self._hasChanges = false
+
+    -- Clear previous selection and stop any lingering pixel glow
+    if self._selectedKey and self._handles[self._selectedKey] then
+        local prev = self._handles[self._selectedKey]
+        prev._selected = false
+        local LCG = LibStub("LibCustomGlow-1.0", true)
+        if LCG then LCG.PixelGlow_Stop(prev, "_QUILayoutSelect") end
+    end
     self._selectedKey = nil
+    self._prevSelectedKey = nil
 
     -- Snapshot current positions for revert
     SnapshotPositions()
@@ -678,6 +688,16 @@ function QUI_LayoutMode:Close(skipSaveCheck)
     end
     self._savedMovableState = {}
 
+    -- Clear selection and stop pixel glow before hiding handles
+    if self._selectedKey and self._handles[self._selectedKey] then
+        local prev = self._handles[self._selectedKey]
+        prev._selected = false
+        local LCG = LibStub("LibCustomGlow-1.0", true)
+        if LCG then LCG.PixelGlow_Stop(prev, "_QUILayoutSelect") end
+    end
+    self._selectedKey = nil
+    self._prevSelectedKey = nil
+
     -- Hide UI
     local ui = ns.QUI_LayoutMode_UI
     if ui then
@@ -817,12 +837,15 @@ function QUI_LayoutMode:ActivateElement(key)
 end
 
 function QUI_LayoutMode:SelectMover(key)
+    local LCG = LibStub("LibCustomGlow-1.0", true)
+
     -- Deselect previous
     if self._selectedKey and self._handles[self._selectedKey] then
         local prev = self._handles[self._selectedKey]
         if prev._border then
             prev._border:SetColor(ACCENT_R, ACCENT_G, ACCENT_B, 1)
         end
+        if LCG then LCG.PixelGlow_Stop(prev, "_QUILayoutSelect") end
         prev._selected = false
     end
 
@@ -831,8 +854,8 @@ function QUI_LayoutMode:SelectMover(key)
     if key and self._handles[key] then
         local handle = self._handles[key]
         handle._selected = true
-        if handle._border then
-            handle._border:SetColor(1, 1, 1, 1)
+        if LCG then
+            LCG.PixelGlow_Start(handle, {1, 1, 1, 0.7}, 12, 0.4, nil, 2, 0, 0, false, "_QUILayoutSelect")
         end
     end
 
@@ -900,6 +923,13 @@ end
 --- Save a pending position for a key.
 --- anchorTarget, anchorPointSelf, anchorPointTarget are optional (nil = absolute/screen).
 local function SavePendingPosition(key, point, relPoint, offsetX, offsetY, anchorTarget, anchorPointSelf, anchorPointTarget)
+    local def = QUI_LayoutMode._elements[key]
+    if def and def.usesCustomPositionPersistence then
+        anchorTarget = nil
+        anchorPointSelf = nil
+        anchorPointTarget = nil
+    end
+
     QUI_LayoutMode._pendingPositions[key] = {
         point = point,
         relPoint = relPoint,
@@ -914,7 +944,7 @@ local function SavePendingPosition(key, point, relPoint, offsetX, offsetY, ancho
     -- Write anchor data to DB immediately so settings panel widgets reflect
     -- the pending state. The snapshot system handles revert on discard.
     local fa = GetFrameAnchoring()
-    if fa then
+    if fa and not (def and def.usesCustomPositionPersistence) then
         if not fa[key] then fa[key] = {} end
         if anchorTarget then
             -- Compute relative offset from anchor parent.
@@ -1323,28 +1353,88 @@ AddHandleScripts = function(handle, def)
         if not self._dragging then
             self._bg:SetAlpha(HANDLE_HOVER_ALPHA)
         end
+        -- Show hint tooltip
+        GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(def.label or self._barKey, 1, 1, 1)
+        GameTooltip:AddLine("Drag to move", 0.7, 0.7, 0.7)
+        GameTooltip:AddLine("Right-click for settings", 0.7, 0.7, 0.7)
+        -- Show unanchor hint if frame is anchored
+        local fa = GetFrameAnchoring()
+        local entry = fa and fa[self._barKey]
+        if entry and type(entry) == "table" and entry.parent and entry.parent ~= "disabled" then
+            GameTooltip:AddLine("Middle-click to unanchor", 0.9, 0.6, 0.3)
+        end
+        GameTooltip:Show()
     end)
 
     handle:SetScript("OnLeave", function(self)
         if not self._dragging then
             self._bg:SetAlpha(HANDLE_BG_ALPHA)
         end
+        GameTooltip:Hide()
     end)
 
-    handle:SetScript("OnClick", function(self)
-        QUI_LayoutMode:SelectMover(self._barKey)
+    handle:SetScript("OnClick", nil)
+    handle:SetScript("OnMouseUp", function(self, button)
+        if button == "RightButton" then
+            QUI_LayoutMode:SelectMover(self._barKey)
+        elseif button == "MiddleButton" then
+            local def = QUI_LayoutMode._elements[self._barKey]
+            if def and def.usesCustomPositionPersistence then
+                return
+            end
+
+            -- Middle-click: unanchor the frame
+            local fa = GetFrameAnchoring()
+            local entry = fa and fa[self._barKey]
+            if entry and type(entry) == "table" and entry.parent and entry.parent ~= "disabled" then
+                entry.parent = "disabled"
+                entry.point = nil
+                entry.relative = nil
+                QUI_LayoutMode._hasChanges = true
+                -- Update handle visuals (remove anchored state)
+                if self._isAnchored then
+                    self._isAnchored = false
+                    if self._border and self._border.SetLineSize then
+                        self._border:SetLineSize(HANDLE_BORDER_SIZE)
+                    end
+                end
+                -- Flash green to confirm
+                if self._border and self._border.SetColor then
+                    self._border:SetColor(0.2, 1, 0.4, 1)
+                    C_Timer.After(0.3, function()
+                        self._border:SetColor(ACCENT_R, ACCENT_G, ACCENT_B, 1)
+                    end)
+                end
+                -- Refresh settings panel to show updated anchor state
+                local settings = ns.QUI_LayoutMode_Settings
+                if settings and settings.Refresh then settings:Refresh() end
+                -- Fire anchor changed message for UI sync
+                local QUI = _G.QUI
+                if QUI and QUI.SendMessage then
+                    QUI:SendMessage("QUI_FRAME_ANCHOR_CHANGED", self._barKey)
+                end
+            end
+        end
     end)
 
     handle:SetScript("OnDragStart", function(self)
         if InCombatLockdown() then return end
+        GameTooltip:Hide()
+
+        local def = QUI_LayoutMode._elements[self._barKey]
+        local usesCustomPersistence = def and def.usesCustomPositionPersistence
 
         -- Check if frame has an active anchor (position controlled by anchoring system).
         -- If so, block dragging unless Shift is held (Shift = re-anchor/detach intent).
         local hasActiveAnchor = false
-        local fa = GetFrameAnchoring()
-        if fa and fa[self._barKey] and type(fa[self._barKey]) == "table" then
-            local parent = fa[self._barKey].parent
-            hasActiveAnchor = parent and parent ~= "disabled"
+        if not usesCustomPersistence then
+            local fa = GetFrameAnchoring()
+            if fa and fa[self._barKey] and type(fa[self._barKey]) == "table" then
+                local parent = fa[self._barKey].parent
+                hasActiveAnchor = parent and parent ~= "disabled"
+            end
         end
 
         if hasActiveAnchor and not IsShiftKeyDown() then
@@ -1352,11 +1442,7 @@ AddHandleScripts = function(handle, def)
             if self._border and self._border.SetColor then
                 self._border:SetColor(1, 0.3, 0.3, 1)
                 C_Timer.After(0.3, function()
-                    if self._selected then
-                        self._border:SetColor(1, 1, 1, 1)
-                    else
-                        self._border:SetColor(ACCENT_R, ACCENT_G, ACCENT_B, 1)
-                    end
+                    self._border:SetColor(ACCENT_R, ACCENT_G, ACCENT_B, 1)
                 end)
             end
             return
@@ -1400,6 +1486,9 @@ AddHandleScripts = function(handle, def)
 
             if self._shiftDragStart then
                 -- Shift-drag: this frame is the root (detaching from its parent)
+                anchorRoot = myKey
+            elseif usesCustomPersistence then
+                -- Custom-persisted elements should not inherit stale generic anchors.
                 anchorRoot = myKey
             else
                 -- Normal drag: walk up to find the root of the anchor chain
@@ -1538,14 +1627,22 @@ AddHandleScripts = function(handle, def)
                 if def2 then
                     local targetFrame = def2.getFrame and def2.getFrame()
                     if targetFrame then
-                        local frameOx, frameOy = postSnapOx, postSnapOy
-                        if def2.getCenterOffset then
-                            local cdx, cdy = def2.getCenterOffset(frame:GetSize())
-                            frameOx = frameOx - cdx
-                            frameOy = frameOy - cdy
-                        end
                         pcall(targetFrame.ClearAllPoints, targetFrame)
-                        pcall(targetFrame.SetPoint, targetFrame, "CENTER", UIParent, "CENTER", frameOx, frameOy)
+                        -- Boss frames: keep boss1 at TOPLEFT of handle.
+                        -- Boss1 is a child of the handle so it moves with it;
+                        -- setting CENTER/UIParent would fight the anchor point.
+                        if key == "bossFrames" then
+                            pcall(targetFrame.SetPoint, targetFrame, "TOPLEFT", frame, "TOPLEFT", 0, 0)
+                            pcall(targetFrame.SetPoint, targetFrame, "TOPRIGHT", frame, "TOPRIGHT", 0, 0)
+                        else
+                            local frameOx, frameOy = postSnapOx, postSnapOy
+                            if def2.getCenterOffset then
+                                local cdx, cdy = def2.getCenterOffset(frame:GetSize())
+                                frameOx = frameOx - cdx
+                                frameOy = frameOy - cdy
+                            end
+                            pcall(targetFrame.SetPoint, targetFrame, "CENTER", UIParent, "CENTER", frameOx, frameOy)
+                        end
                     end
                 end
             end
@@ -1581,8 +1678,6 @@ AddHandleScripts = function(handle, def)
             -- Update coordinate display
             frame._coords:SetText(string.format("X: %d  Y: %d", postSnapOx, postSnapOy))
         end)
-
-        QUI_LayoutMode:SelectMover(self._barKey)
     end)
 
     handle:SetScript("OnDragStop", function(self)
@@ -1592,16 +1687,25 @@ AddHandleScripts = function(handle, def)
         -- Remove drag OnUpdate
         self:SetScript("OnUpdate", nil)
 
+        local def = QUI_LayoutMode._elements[self._barKey]
+
         -- Store pending position (with anchor data if Shift+snap was active)
         local ox, oy = HandleToOffsets(self)
         local anchorKey = self._snapAnchorKey
         local anchorPtSelf = self._snapAnchorPointSelf
         local anchorPtTarget = self._snapAnchorPointTarget
 
+        if def and def.usesCustomPositionPersistence then
+            anchorKey = nil
+            anchorPtSelf = nil
+            anchorPtTarget = nil
+        end
+
         -- If frame was anchored and dragged without Shift, preserve existing anchor
         -- Use _shiftDragStart (captured at drag start) — if user started with Shift,
         -- they intend to re-anchor or detach, so don't preserve the old anchor.
-        if not anchorKey and self._wasAnchoredOnDragStart and not self._shiftDragStart then
+        if not (def and def.usesCustomPositionPersistence)
+           and not anchorKey and self._wasAnchoredOnDragStart and not self._shiftDragStart then
             local pending = QUI_LayoutMode._pendingPositions[self._barKey]
             if pending and pending.anchorTarget then
                 anchorKey = pending.anchorTarget
@@ -1624,7 +1728,8 @@ AddHandleScripts = function(handle, def)
 
         -- Explicit detach: Shift+drag with no new anchor target — set to disabled
         -- so the frame is freely positionable via layout mode dragging
-        if not anchorKey and self._shiftDragStart and self._wasAnchoredOnDragStart then
+        if not (def and def.usesCustomPositionPersistence)
+           and not anchorKey and self._shiftDragStart and self._wasAnchoredOnDragStart then
             local fa = GetFrameAnchoring()
             if fa and fa[self._barKey] then
                 fa[self._barKey].parent = "disabled"
@@ -1713,11 +1818,7 @@ AddHandleScripts = function(handle, def)
 
         -- Restore border color on dragging handle (may still be gold from anchor preview)
         if self._border and self._border.SetColor then
-            if self._selected then
-                self._border:SetColor(1, 1, 1, 1)
-            else
-                self._border:SetColor(ACCENT_R, ACCENT_G, ACCENT_B, 1)
-            end
+            self._border:SetColor(ACCENT_R, ACCENT_G, ACCENT_B, 1)
         end
 
         -- Restore border on previously highlighted anchor target
@@ -1728,11 +1829,7 @@ AddHandleScripts = function(handle, def)
                     prevTarget._border:SetLineSize(prevTarget._isAnchored and HANDLE_BORDER_SIZE_ANCHORED or HANDLE_BORDER_SIZE)
                 end
                 if prevTarget._border.SetColor then
-                    if prevTarget._selected then
-                        prevTarget._border:SetColor(1, 1, 1, 1)
-                    else
-                        prevTarget._border:SetColor(ACCENT_R, ACCENT_G, ACCENT_B, 1)
-                    end
+                    prevTarget._border:SetColor(ACCENT_R, ACCENT_G, ACCENT_B, 1)
                 end
             end
             self._anchorHighlightTarget = nil
@@ -1749,8 +1846,8 @@ AddHandleScripts = function(handle, def)
             ui:ClearSnapGuides()
         end
 
-        -- Re-show settings panel after drag, rebuilding to pick up position/anchor changes.
-        -- Collapsible expanded states are preserved across rebuilds.
+        -- Refresh settings panel after drag to pick up position/anchor changes.
+        -- Only re-show if it was visible before the drag started (don't open it fresh).
         if self._settingsWasShown then
             self._settingsWasShown = nil
             local settingsPanel = ns.QUI_LayoutMode_Settings
@@ -2066,15 +2163,17 @@ SyncHandle = function(key)
 
     -- Check for existing anchor relationship (from DB or pending)
     local existingAnchorKey = nil
-    local pending = QUI_LayoutMode._pendingPositions[key]
-    if pending and pending.anchorTarget then
-        existingAnchorKey = pending.anchorTarget
-    else
-        local fa = GetFrameAnchoring()
-        if fa and fa[key] and type(fa[key]) == "table" then
-            local parent = fa[key].parent
-            if parent and parent ~= "disabled" then
-                existingAnchorKey = parent
+    if not (def and def.usesCustomPositionPersistence) then
+        local pending = QUI_LayoutMode._pendingPositions[key]
+        if pending and pending.anchorTarget then
+            existingAnchorKey = pending.anchorTarget
+        else
+            local fa = GetFrameAnchoring()
+            if fa and fa[key] and type(fa[key]) == "table" then
+                local parent = fa[key].parent
+                if parent and parent ~= "disabled" then
+                    existingAnchorKey = parent
+                end
             end
         end
     end
@@ -2410,7 +2509,7 @@ do
         local QOL_ELEMENTS = {
             {
                 key = "buffFrame", label = "Buff Frame", group = "Display", order = 3,
-                frame = "QUI_BuffIconContainer",
+                frame = "QUI_BuffIconContainer", isOwned = true,
                 dbKey = "buffBorders", enabledField = "enableBuffs",
                 refresh = "QUI_RefreshBuffBorders",
                 previewOn  = function() if _G.QUI_BuffBordersShowPreview then _G.QUI_BuffBordersShowPreview() end end,
@@ -2418,7 +2517,7 @@ do
             },
             {
                 key = "debuffFrame", label = "Debuff Frame", group = "Display", order = 4,
-                frame = "QUI_DebuffIconContainer",
+                frame = "QUI_DebuffIconContainer", isOwned = true,
                 dbKey = "buffBorders", enabledField = "enableDebuffs",
                 refresh = "QUI_RefreshBuffBorders",
                 previewOn  = function() if _G.QUI_BuffBordersShowPreview then _G.QUI_BuffBordersShowPreview() end end,
@@ -3471,6 +3570,7 @@ end
 
 -- Hook globals that exist at file-load time
 HookRefreshForLayoutSync("QUI_RefreshUnitFrames")
+HookRefreshForLayoutSync("QUI_RefreshCastbar")
 HookRefreshForLayoutSync("QUI_RefreshCastbars")
 
 -- Hook globals that are defined by later-loading modules

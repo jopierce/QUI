@@ -52,13 +52,28 @@ local function RebuildSpellCache()
                     end
                     if not isPassive and not info.isOffSpec then
                         -- Only include spells the player currently knows for active spec
+                        -- Override spells (e.g. Sacred Weapon overriding Divine Toll) may fail IsPlayerSpell on the override ID — check the base spell too
                         local isKnown = IsPlayerSpell and IsPlayerSpell(info.spellID)
+                        if not isKnown and C_Spell.GetBaseSpell then
+                            local baseCheck = C_Spell.GetBaseSpell(info.spellID)
+                            if baseCheck and baseCheck ~= info.spellID then
+                                isKnown = IsPlayerSpell(baseCheck)
+                            end
+                        end
+
                         if isKnown then
                             local name = C_Spell.GetSpellName(info.spellID)
                             if name then
                                 local spellInfo = C_Spell.GetSpellInfo(info.spellID)
                                 local icon = spellInfo and spellInfo.iconID
-                                table.insert(spellCache, { spellID = info.spellID, name = name, icon = icon, tab = sli.name or "General" })
+                                -- Resolve base spell so override transforms (e.g. Holy Bulwark → Sacred Weapon) are searchable by either name
+                                local baseID = C_Spell.GetBaseSpell and C_Spell.GetBaseSpell(info.spellID)
+                                local baseName
+                                if baseID and baseID ~= info.spellID then
+                                    baseName = C_Spell.GetSpellName(baseID)
+                                    if baseName == name then baseName = nil end
+                                end
+                                table.insert(spellCache, { spellID = info.spellID, name = name, baseName = baseName, icon = icon, tab = sli.name or "General" })
                             end
                         end
                     end
@@ -651,10 +666,29 @@ local function BuildClickCastBindings(content, cc, refreshClickCast, startY, sta
                     local labelText = "Editing bindings for: " .. specName
                     if cc.perLoadout and C_ClassTalents then
                         local configID = C_ClassTalents.GetActiveConfigID()
-                        if configID and C_Traits and C_Traits.GetConfigInfo then
-                            local configInfo = C_Traits.GetConfigInfo(configID)
-                            if configInfo and configInfo.name then
-                                labelText = labelText .. " \226\128\148 " .. configInfo.name
+                        if configID then
+                            local specID = GetSpecializationInfo(specIndex)
+                            -- The active configID is an ephemeral staging copy;
+                            -- match it to the saved loadout via GetLastSelectedSavedConfigID
+                            local savedID = specID and C_ClassTalents.GetLastSelectedSavedConfigID and C_ClassTalents.GetLastSelectedSavedConfigID(specID)
+                            local builds = specID and C_ClassTalents.GetConfigIDsBySpecID(specID)
+                            local ordinal
+                            local lookupID = savedID or configID
+                            if builds then
+                                for idx, cid in ipairs(builds) do
+                                    if cid == lookupID then
+                                        ordinal = idx
+                                        break
+                                    end
+                                end
+                            end
+                            local configInfo = C_Traits and C_Traits.GetConfigInfo and C_Traits.GetConfigInfo(lookupID)
+                            local customName = configInfo and configInfo.name
+                            -- Use custom name if it differs from the spec name, otherwise just "Loadout N"
+                            if customName and customName ~= specName then
+                                labelText = labelText .. " \226\128\148 " .. customName
+                            elseif ordinal then
+                                labelText = labelText .. " \226\128\148 Loadout " .. ordinal
                             end
                         end
                     end
@@ -987,7 +1021,7 @@ local function BuildClickCastBindings(content, cc, refreshClickCast, startY, sta
         local lower = searchText:lower()
         local matches = {}
         for _, entry in ipairs(spells) do
-            if entry.name:lower():find(lower, 1, true) then
+            if entry.name:lower():find(lower, 1, true) or (entry.baseName and entry.baseName:lower():find(lower, 1, true)) then
                 matches[#matches + 1] = entry
                 if #matches >= MAX_AC_ROWS then break end
             end
@@ -998,7 +1032,8 @@ local function BuildClickCastBindings(content, cc, refreshClickCast, startY, sta
             local m = matches[ri]
             if m then
                 row.icon:SetTexture(m.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
-                row.text:SetText(m.name)
+                local display = m.baseName and (m.name .. "  |cFF888888(" .. m.baseName .. ")|r") or m.name
+                row.text:SetText(display)
                 row.spellName = m.name
                 row:Show()
             else
@@ -1236,7 +1271,7 @@ local function BuildClickCastBindings(content, cc, refreshClickCast, startY, sta
         local ignoreCollapse = lower ~= nil
 
         for _, entry in ipairs(spells) do
-            if not lower or entry.name:lower():find(lower, 1, true) then
+            if not lower or entry.name:lower():find(lower, 1, true) or (entry.baseName and entry.baseName:lower():find(lower, 1, true)) then
                 -- Tab header
                 if entry.tab ~= currentTab then
                     currentTab = entry.tab
@@ -1263,7 +1298,8 @@ local function BuildClickCastBindings(content, cc, refreshClickCast, startY, sta
                     row:SetPoint("TOPLEFT", 0, by)
                     row:SetPoint("RIGHT", browseScrollChild, "RIGHT", 0, 0)
                     row.icon:SetTexture(entry.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
-                    row.text:SetText(entry.name)
+                    local display = entry.baseName and (entry.name .. "  |cFF888888(" .. entry.baseName .. ")|r") or entry.name
+                    row.text:SetText(display)
                     row.text:SetTextColor(C.text[1], C.text[2], C.text[3], 1)
                     row.spellName = entry.name
                     by = by - BROWSE_ROW_H
@@ -1514,6 +1550,25 @@ local function BuildClickCastBindings(content, cc, refreshClickCast, startY, sta
         local fixedTop = math.abs(y)
         local totalHeight = fixedTop + listHeight + 10 + addContainer:GetHeight() + 30
         content:SetHeight(totalHeight)
+
+        -- Propagate new height to the collapsible section so it resizes.
+        -- The section's bodyClip (ScrollFrame) clips content to the old
+        -- height, so we must grow it — plus update the outer scroll
+        -- content so the scroll range covers the new total.
+        local section = content._logicalSection
+        if section and section._expanded and section._bodyClip then
+            section._contentHeight = totalHeight
+            section._bodyClip:SetHeight(totalHeight)
+            local sectionH = 24 + totalHeight -- 24 = COLLAPSIBLE_HEADER_HEIGHT
+            local prevH = section:GetHeight() or 0
+            section:SetHeight(sectionH)
+            -- Grow the outer scroll content by the delta
+            local scrollContent = section:GetParent()
+            if scrollContent and scrollContent.SetHeight and prevH > 0 then
+                local outerH = scrollContent:GetHeight() or 0
+                scrollContent:SetHeight(outerH + (sectionH - prevH))
+            end
+        end
     end
 
     RefreshBindingList()
@@ -1523,6 +1578,51 @@ local function BuildClickCastBindings(content, cc, refreshClickCast, startY, sta
             RefreshClickCastPixelFrames()
             if RefreshBindingList then RefreshBindingList() end
         end)
+    end
+
+    -- Only listen while the bindings section is actually visible so hidden
+    -- search-index page builds do not leave background listeners behind.
+    local specListener = content._quiSpecChangeListener
+    if not specListener then
+        specListener = CreateFrame("Frame", nil, content)
+        specListener:SetScript("OnEvent", function(self)
+            local refreshFn = self._quiRefreshBindingList
+            if content:IsShown() and refreshFn then
+                C_Timer.After(0.5, function()
+                    if content:IsShown() and self._quiRefreshBindingList == refreshFn then
+                        refreshFn()
+                    end
+                end)
+            end
+        end)
+        content._quiSpecChangeListener = specListener
+    end
+    specListener._quiRefreshBindingList = RefreshBindingList
+
+    local function RegisterSpecListener()
+        if specListener._quiRegistered then return end
+        specListener:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+        specListener:RegisterEvent("TRAIT_CONFIG_UPDATED")
+        specListener:RegisterEvent("ACTIVE_COMBAT_CONFIG_CHANGED")
+        specListener._quiRegistered = true
+    end
+
+    local function UnregisterSpecListener()
+        if not specListener._quiRegistered then return end
+        specListener:UnregisterAllEvents()
+        specListener._quiRegistered = false
+    end
+
+    if not content._quiSpecChangeListenerHooks then
+        content._quiSpecChangeListenerHooks = true
+        content:HookScript("OnShow", RegisterSpecListener)
+        content:HookScript("OnHide", UnregisterSpecListener)
+    end
+
+    if content:IsShown() then
+        RegisterSpecListener()
+    else
+        UnregisterSpecListener()
     end
 
     -- Export cleanup refs for OnHide handler

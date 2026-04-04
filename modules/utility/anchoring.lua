@@ -1009,16 +1009,29 @@ local _anchorGuardedFrames = {}  -- [frame] = true, prevents double-hooking
 local _setPointGuardedFrames = {} -- [frame] = true, prevents double-hooking SetPoint guards
 
 -- Layer 1: Hook ApplySystemAnchor on a single Blizzard frame
+local DYNAMIC_REANCHOR_KEYS = { buffFrame = true, debuffFrame = true }
+
 local function InstallAnchorGuard(frame, key)
     if _anchorGuardedFrames[frame] then return end
     if not frame.ApplySystemAnchor then
         -- Frames without ApplySystemAnchor (e.g. UIWidget containers) get
         -- repositioned by Blizzard layout code via direct SetPoint calls.
         -- Hook SetPoint instead so QUI's anchor overrides stick.
+        -- Skip for dynamically re-anchored containers (buff/debuff/buffBar):
+        -- their layout code legitimately changes the anchor point to match
+        -- growth direction, and the guard would fight that re-anchor on
+        -- every aura update, resetting it back to the saved position.
+        if DYNAMIC_REANCHOR_KEYS[key] then return end
         if _setPointGuardedFrames[frame] then return end
         _setPointGuardedFrames[frame] = true
         hooksecurefunc(frame, "SetPoint", function()
             if _editModeReapplyGuard then return end
+            -- During layout mode, frames reparented to mover handles are
+            -- repositioned by the handle system (TOPLEFT for boss frames).
+            -- Without this guard, every SetPoint triggers a deferred
+            -- ApplyFrameAnchor that overrides the handle anchoring, creating
+            -- a feedback loop on every frame tick during drag.
+            if _G.QUI_IsLayoutModeActive and _G.QUI_IsLayoutModeActive() then return end
             C_Timer.After(0, function()
                 if InCombatLockdown() then
                     pendingAnchoredFrameUpdateAfterCombat = true
@@ -2213,6 +2226,14 @@ function QUI_Anchoring:ApplyFrameAnchor(key, settings)
 
     -- Boss frames: single setting applied to all with stacking Y offset
     if key == "bossFrames" and type(resolved) == "table" and not resolved.GetObjectType then
+        -- During layout mode, boss frames are reparented to the mover handle
+        -- and anchored TOPLEFT. Skip repositioning here — the handle system
+        -- manages their position. Without this guard, ApplyAllFrameAnchors
+        -- would re-anchor boss1 using ptSelf (CENTER/BOTTOM), overriding the
+        -- TOPLEFT anchoring that SyncHandle set.
+        if _G.QUI_IsLayoutModeActive and _G.QUI_IsLayoutModeActive() then
+            return
+        end
         for i, frame in ipairs(resolved) do
             local stackOffsetY = offsetY - ((i - 1) * 50)
             if useSizeStable then
