@@ -65,6 +65,34 @@ local function GetDandersAddon()
     return _G["DandersFrames"]
 end
 
+local DANDERS_LAYOUT_KEYS = {
+    party = "dandersParty",
+    raid = "dandersRaid",
+    pinned1 = "dandersPinned1",
+    pinned2 = "dandersPinned2",
+}
+
+local function GetFrameAnchoringDB()
+    if QUICore and QUICore.db and QUICore.db.profile and type(QUICore.db.profile.frameAnchoring) == "table" then
+        return QUICore.db.profile.frameAnchoring
+    end
+    return nil
+end
+
+local function ClearLegacyFrameAnchoringForContainer(containerKey)
+    local layoutKey = DANDERS_LAYOUT_KEYS[containerKey]
+    if not layoutKey then return end
+
+    local frameAnchoring = GetFrameAnchoringDB()
+    if frameAnchoring and frameAnchoring[layoutKey] ~= nil then
+        frameAnchoring[layoutKey] = nil
+    end
+
+    if _G.QUI_LayoutModeSyncHandle then
+        _G.QUI_LayoutModeSyncHandle(layoutKey)
+    end
+end
+
 local function GetPartyLiveContainer()
     local danders = GetDandersAddon()
     -- Header mode roots party layout in DF.container; partyContainer is SetAllPoints.
@@ -81,39 +109,57 @@ local function GetPartyLiveContainer()
     return nil
 end
 
-function QUI_DandersFrames:GetContainerFrames(containerKey)
+function QUI_DandersFrames:GetContainerFrameSets(containerKey)
     if not self:IsAvailable() then return nil end
 
-    local frames = {}
+    local frameSets = {
+        live = {},
+        preview = {},
+    }
     local seen = {}
     local danders = GetDandersAddon()
 
     if containerKey == "party" then
         -- Anchor the live party root container (not partyContainer) so we don't
         -- break Danders' internal SetAllPoints relationship.
-        AddUniqueFrame(frames, seen, GetPartyLiveContainer())
+        AddUniqueFrame(frameSets.live, seen, GetPartyLiveContainer())
         -- Danders test mode party preview container (non-secure)
-        AddUniqueFrame(frames, seen, _G["DandersTestPartyContainer"])
+        AddUniqueFrame(frameSets.preview, seen, _G["DandersTestPartyContainer"])
         if danders and danders.testPartyContainer then
-            AddUniqueFrame(frames, seen, danders.testPartyContainer)
+            AddUniqueFrame(frameSets.preview, seen, danders.testPartyContainer)
         end
     elseif containerKey == "raid" then
         if type(DandersFrames_GetRaidContainer) == "function" then
-            AddUniqueFrame(frames, seen, DandersFrames_GetRaidContainer())
+            AddUniqueFrame(frameSets.live, seen, DandersFrames_GetRaidContainer())
         end
         -- Danders test mode raid preview container (non-secure)
-        AddUniqueFrame(frames, seen, _G["DandersTestRaidContainer"])
+        AddUniqueFrame(frameSets.preview, seen, _G["DandersTestRaidContainer"])
         if danders and danders.testRaidContainer then
-            AddUniqueFrame(frames, seen, danders.testRaidContainer)
+            AddUniqueFrame(frameSets.preview, seen, danders.testRaidContainer)
         end
     elseif containerKey == "pinned1" and type(DandersFrames_GetPinnedContainer) == "function" then
-        AddUniqueFrame(frames, seen, DandersFrames_GetPinnedContainer(1))
+        AddUniqueFrame(frameSets.live, seen, DandersFrames_GetPinnedContainer(1))
     elseif containerKey == "pinned2" and type(DandersFrames_GetPinnedContainer) == "function" then
-        AddUniqueFrame(frames, seen, DandersFrames_GetPinnedContainer(2))
+        AddUniqueFrame(frameSets.live, seen, DandersFrames_GetPinnedContainer(2))
     end
 
-    if #frames == 0 then
+    if #frameSets.live == 0 and #frameSets.preview == 0 then
         return nil
+    end
+
+    return frameSets
+end
+
+function QUI_DandersFrames:GetContainerFrames(containerKey)
+    local frameSets = self:GetContainerFrameSets(containerKey)
+    if not frameSets then return nil end
+
+    local frames = {}
+    for _, frame in ipairs(frameSets.live) do
+        table.insert(frames, frame)
+    end
+    for _, frame in ipairs(frameSets.preview) do
+        table.insert(frames, frame)
     end
 
     return frames
@@ -188,15 +234,29 @@ end
 ---------------------------------------------------------------------------
 -- POSITIONING
 ---------------------------------------------------------------------------
+local function ApplyPositionToFrames(frames, applyFunc)
+    local shouldRetryAfterCombat = false
+
+    for _, container in ipairs(frames) do
+        local ok = pcall(applyFunc, container)
+        if not ok then
+            shouldRetryAfterCombat = true
+        end
+    end
+
+    return shouldRetryAfterCombat
+end
+
 function QUI_DandersFrames:ApplyPosition(containerKey)
     local db = GetDB()
     if not db or not db[containerKey] then return end
 
     local cfg = db[containerKey]
+    ClearLegacyFrameAnchoringForContainer(containerKey)
     if not cfg.enabled then return end
 
-    local containers = self:GetContainerFrames(containerKey)
-    if not containers then return end
+    local frameSets = self:GetContainerFrameSets(containerKey)
+    if not frameSets then return end
 
     local hasAnchor = cfg.anchorTo and cfg.anchorTo ~= "disabled"
     local hasAbsolute = type(cfg.absolutePoint) == "string"
@@ -211,38 +271,61 @@ function QUI_DandersFrames:ApplyPosition(containerKey)
     end
 
     local inCombat = InCombatLockdown()
-    local shouldRetryAfterCombat = false
+    local liveContainers = frameSets.live or {}
+    local previewContainers = frameSets.preview or {}
 
-    for _, container in ipairs(containers) do
-        -- Live DF containers are protected in combat; preview containers are not.
-        if inCombat and IsFrameProtected(container) then
-            shouldRetryAfterCombat = true
-        else
-            local ok = pcall(function()
-                container:ClearAllPoints()
-                if not hasAnchor then
-                    container:SetPoint(
-                        cfg.absolutePoint or "CENTER",
-                        UIParent,
-                        "CENTER",
-                        cfg.absoluteX or 0,
-                        cfg.absoluteY or 0
-                    )
-                else
-                    container:SetPoint(
-                        cfg.sourcePoint or "TOP",
-                        anchorFrame,
-                        cfg.targetPoint or "BOTTOM",
-                        cfg.offsetX or 0,
-                        cfg.offsetY or -5
-                    )
-                end
-            end)
-
-            if not ok then
-                shouldRetryAfterCombat = true
+    if inCombat then
+        for _, container in ipairs(liveContainers) do
+            if IsFrameProtected(container) then
+                pendingUpdate = true
+                return
             end
         end
+    end
+
+    local shouldRetryAfterCombat = ApplyPositionToFrames(liveContainers, function(container)
+        container:ClearAllPoints()
+        if not hasAnchor then
+            container:SetPoint(
+                cfg.absolutePoint or "CENTER",
+                UIParent,
+                "CENTER",
+                cfg.absoluteX or 0,
+                cfg.absoluteY or 0
+            )
+        else
+            container:SetPoint(
+                cfg.sourcePoint or "TOP",
+                anchorFrame,
+                cfg.targetPoint or "BOTTOM",
+                cfg.offsetX or 0,
+                cfg.offsetY or -5
+            )
+        end
+    end)
+
+    if #previewContainers > 0 then
+        local previewRetry = ApplyPositionToFrames(previewContainers, function(container)
+            container:ClearAllPoints()
+            if not hasAnchor then
+                container:SetPoint(
+                    cfg.absolutePoint or "CENTER",
+                    UIParent,
+                    "CENTER",
+                    cfg.absoluteX or 0,
+                    cfg.absoluteY or 0
+                )
+            else
+                container:SetPoint(
+                    cfg.sourcePoint or "TOP",
+                    anchorFrame,
+                    cfg.targetPoint or "BOTTOM",
+                    cfg.offsetX or 0,
+                    cfg.offsetY or -5
+                )
+            end
+        end)
+        shouldRetryAfterCombat = shouldRetryAfterCombat or previewRetry
     end
 
     if shouldRetryAfterCombat then
@@ -315,6 +398,10 @@ function QUI_DandersFrames:Initialize()
     if not self:IsAvailable() then return end
 
     initialized = true
+    ClearLegacyFrameAnchoringForContainer("party")
+    ClearLegacyFrameAnchoringForContainer("raid")
+    ClearLegacyFrameAnchoringForContainer("pinned1")
+    ClearLegacyFrameAnchoringForContainer("pinned2")
     self:ApplyAllPositions()
     RegisterLayoutModeElements()
 
@@ -414,6 +501,8 @@ local function SaveDandersPosition(containerKey, ox, oy)
     if not db or not db[containerKey] then return end
     local cfg = db[containerKey]
 
+    ClearLegacyFrameAnchoringForContainer(containerKey)
+
     if not cfg.enabled then return end
 
     local useAbsolute = (not cfg.anchorTo or cfg.anchorTo == "disabled")
@@ -503,6 +592,7 @@ RegisterLayoutModeElements = function()
             group = "3rd Party",
             order = info.order,
             isOwned = false,
+            usesCustomPositionPersistence = true,
 
             getFrame = GetPreferredFrame,
 

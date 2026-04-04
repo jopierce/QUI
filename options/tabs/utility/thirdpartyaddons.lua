@@ -153,7 +153,7 @@ local function BuildDandersSection(tabContent, y)
         return y - 24
     end
 
-    local info = GUI:CreateLabel(tabContent, "Anchor DandersFrames containers to QUI elements. When enabled, QUI controls container placement.", 11, C.textMuted)
+    local info = GUI:CreateLabel(tabContent, "Anchor DandersFrames containers to QUI elements. When enabled, QUI controls placement; move them with QUI Layout Mode rather than DandersFrames' own unlock.", 11, C.textMuted)
     info:SetPoint("TOPLEFT", PAD, y)
     info:SetPoint("RIGHT", tabContent, "RIGHT", -PAD, 0)
     info:SetJustifyH("LEFT")

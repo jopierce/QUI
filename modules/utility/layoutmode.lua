@@ -180,6 +180,7 @@ QUI_LayoutMode._movers = QUI_LayoutMode._handles
 ---   onLiveMove (function) — callback during/after drag
 ---   loadPosition (function) — custom position loader (overrides frameAnchoring)
 ---   savePosition (function) — custom position saver (overrides frameAnchoring)
+---   usesCustomPositionPersistence (boolean) — skip generic frameAnchoring DB writes/lock handling
 function QUI_LayoutMode:RegisterElement(def)
     if not def or not def.key then return end
 
@@ -922,6 +923,13 @@ end
 --- Save a pending position for a key.
 --- anchorTarget, anchorPointSelf, anchorPointTarget are optional (nil = absolute/screen).
 local function SavePendingPosition(key, point, relPoint, offsetX, offsetY, anchorTarget, anchorPointSelf, anchorPointTarget)
+    local def = QUI_LayoutMode._elements[key]
+    if def and def.usesCustomPositionPersistence then
+        anchorTarget = nil
+        anchorPointSelf = nil
+        anchorPointTarget = nil
+    end
+
     QUI_LayoutMode._pendingPositions[key] = {
         point = point,
         relPoint = relPoint,
@@ -936,7 +944,7 @@ local function SavePendingPosition(key, point, relPoint, offsetX, offsetY, ancho
     -- Write anchor data to DB immediately so settings panel widgets reflect
     -- the pending state. The snapshot system handles revert on discard.
     local fa = GetFrameAnchoring()
-    if fa then
+    if fa and not (def and def.usesCustomPositionPersistence) then
         if not fa[key] then fa[key] = {} end
         if anchorTarget then
             -- Compute relative offset from anchor parent.
@@ -1372,6 +1380,11 @@ AddHandleScripts = function(handle, def)
         if button == "RightButton" then
             QUI_LayoutMode:SelectMover(self._barKey)
         elseif button == "MiddleButton" then
+            local def = QUI_LayoutMode._elements[self._barKey]
+            if def and def.usesCustomPositionPersistence then
+                return
+            end
+
             -- Middle-click: unanchor the frame
             local fa = GetFrameAnchoring()
             local entry = fa and fa[self._barKey]
@@ -1410,13 +1423,18 @@ AddHandleScripts = function(handle, def)
         if InCombatLockdown() then return end
         GameTooltip:Hide()
 
+        local def = QUI_LayoutMode._elements[self._barKey]
+        local usesCustomPersistence = def and def.usesCustomPositionPersistence
+
         -- Check if frame has an active anchor (position controlled by anchoring system).
         -- If so, block dragging unless Shift is held (Shift = re-anchor/detach intent).
         local hasActiveAnchor = false
-        local fa = GetFrameAnchoring()
-        if fa and fa[self._barKey] and type(fa[self._barKey]) == "table" then
-            local parent = fa[self._barKey].parent
-            hasActiveAnchor = parent and parent ~= "disabled"
+        if not usesCustomPersistence then
+            local fa = GetFrameAnchoring()
+            if fa and fa[self._barKey] and type(fa[self._barKey]) == "table" then
+                local parent = fa[self._barKey].parent
+                hasActiveAnchor = parent and parent ~= "disabled"
+            end
         end
 
         if hasActiveAnchor and not IsShiftKeyDown() then
@@ -1468,6 +1486,9 @@ AddHandleScripts = function(handle, def)
 
             if self._shiftDragStart then
                 -- Shift-drag: this frame is the root (detaching from its parent)
+                anchorRoot = myKey
+            elseif usesCustomPersistence then
+                -- Custom-persisted elements should not inherit stale generic anchors.
                 anchorRoot = myKey
             else
                 -- Normal drag: walk up to find the root of the anchor chain
@@ -1666,16 +1687,25 @@ AddHandleScripts = function(handle, def)
         -- Remove drag OnUpdate
         self:SetScript("OnUpdate", nil)
 
+        local def = QUI_LayoutMode._elements[self._barKey]
+
         -- Store pending position (with anchor data if Shift+snap was active)
         local ox, oy = HandleToOffsets(self)
         local anchorKey = self._snapAnchorKey
         local anchorPtSelf = self._snapAnchorPointSelf
         local anchorPtTarget = self._snapAnchorPointTarget
 
+        if def and def.usesCustomPositionPersistence then
+            anchorKey = nil
+            anchorPtSelf = nil
+            anchorPtTarget = nil
+        end
+
         -- If frame was anchored and dragged without Shift, preserve existing anchor
         -- Use _shiftDragStart (captured at drag start) — if user started with Shift,
         -- they intend to re-anchor or detach, so don't preserve the old anchor.
-        if not anchorKey and self._wasAnchoredOnDragStart and not self._shiftDragStart then
+        if not (def and def.usesCustomPositionPersistence)
+           and not anchorKey and self._wasAnchoredOnDragStart and not self._shiftDragStart then
             local pending = QUI_LayoutMode._pendingPositions[self._barKey]
             if pending and pending.anchorTarget then
                 anchorKey = pending.anchorTarget
@@ -1698,7 +1728,8 @@ AddHandleScripts = function(handle, def)
 
         -- Explicit detach: Shift+drag with no new anchor target — set to disabled
         -- so the frame is freely positionable via layout mode dragging
-        if not anchorKey and self._shiftDragStart and self._wasAnchoredOnDragStart then
+        if not (def and def.usesCustomPositionPersistence)
+           and not anchorKey and self._shiftDragStart and self._wasAnchoredOnDragStart then
             local fa = GetFrameAnchoring()
             if fa and fa[self._barKey] then
                 fa[self._barKey].parent = "disabled"
@@ -2132,15 +2163,17 @@ SyncHandle = function(key)
 
     -- Check for existing anchor relationship (from DB or pending)
     local existingAnchorKey = nil
-    local pending = QUI_LayoutMode._pendingPositions[key]
-    if pending and pending.anchorTarget then
-        existingAnchorKey = pending.anchorTarget
-    else
-        local fa = GetFrameAnchoring()
-        if fa and fa[key] and type(fa[key]) == "table" then
-            local parent = fa[key].parent
-            if parent and parent ~= "disabled" then
-                existingAnchorKey = parent
+    if not (def and def.usesCustomPositionPersistence) then
+        local pending = QUI_LayoutMode._pendingPositions[key]
+        if pending and pending.anchorTarget then
+            existingAnchorKey = pending.anchorTarget
+        else
+            local fa = GetFrameAnchoring()
+            if fa and fa[key] and type(fa[key]) == "table" then
+                local parent = fa[key].parent
+                if parent and parent ~= "disabled" then
+                    existingAnchorKey = parent
+                end
             end
         end
     end

@@ -53,7 +53,7 @@ local function RegisterAllProviders()
                 end
             end
 
-            U.CreateCollapsible(content, "Anchoring", 6 * FORM_ROW + 8, function(body)
+            U.CreateCollapsible(content, "Anchoring (drag the mover to place)", 6 * FORM_ROW + 8, function(body)
                 local sy = -4
                 sy = P(GUI:CreateFormCheckbox(body, "Enable", "enabled", cfg, Refresh), body, sy)
                 sy = P(GUI:CreateFormDropdown(body, "Anchor To", DF:BuildAnchorOptions(), "anchorTo", cfg, Refresh), body, sy)
