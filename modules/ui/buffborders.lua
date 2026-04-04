@@ -265,19 +265,8 @@ local function CreateAuraIcon(parent)
         if InCombatLockdown() then return end
         if not self._auraInstanceID or self._auraInstanceID <= 0 then return end
         if self._filter ~= "HELPFUL" then return end
-        if not AuraUtil or not AuraUtil.ForEachAura then return end
-        if not CancelUnitBuff then return end
 
-        -- Find the buff slot index matching this auraInstanceID at click-time
-        local targetID = self._auraInstanceID
-        local slot = 0
-        AuraUtil.ForEachAura("player", "HELPFUL", nil, function(auraData)
-            slot = slot + 1
-            if auraData and auraData.auraInstanceID == targetID then
-                pcall(CancelUnitBuff, "player", slot, "HELPFUL")
-                return true
-            end
-        end, true)
+        pcall(C_UnitAuras.CancelAuraByAuraInstanceID, self._auraInstanceID)
     end)
 
     icon:Hide()
