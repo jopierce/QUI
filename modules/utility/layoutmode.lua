@@ -2476,7 +2476,7 @@ do
         local QOL_ELEMENTS = {
             {
                 key = "buffFrame", label = "Buff Frame", group = "Display", order = 3,
-                frame = "QUI_BuffIconContainer",
+                frame = "QUI_BuffIconContainer", isOwned = true,
                 dbKey = "buffBorders", enabledField = "enableBuffs",
                 refresh = "QUI_RefreshBuffBorders",
                 previewOn  = function() if _G.QUI_BuffBordersShowPreview then _G.QUI_BuffBordersShowPreview() end end,
@@ -2484,7 +2484,7 @@ do
             },
             {
                 key = "debuffFrame", label = "Debuff Frame", group = "Display", order = 4,
-                frame = "QUI_DebuffIconContainer",
+                frame = "QUI_DebuffIconContainer", isOwned = true,
                 dbKey = "buffBorders", enabledField = "enableDebuffs",
                 refresh = "QUI_RefreshBuffBorders",
                 previewOn  = function() if _G.QUI_BuffBordersShowPreview then _G.QUI_BuffBordersShowPreview() end end,

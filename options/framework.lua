@@ -3946,7 +3946,7 @@ function GUI:CreateFormSlider(parent, label, min, max, step, dbKey, dbTable, onC
     local trackContainer = CreateFrame("Frame", nil, container)
     trackContainer:SetHeight(6)  -- Thicker track (was 14, now 6 for cleaner look)
     trackContainer:SetPoint("LEFT", container, "LEFT", 180, 0)
-    trackContainer:SetPoint("RIGHT", container, "RIGHT", -70, 0)
+    trackContainer:SetPoint("RIGHT", container, "RIGHT", -86, 0)
 
     -- Unfilled track (background) - rounded appearance via backdrop
     local trackBg = CreateFrame("Frame", nil, trackContainer, useUIKitBorders and nil or "BackdropTemplate")
@@ -4020,10 +4020,32 @@ function GUI:CreateFormSlider(parent, label, min, max, step, dbKey, dbTable, onC
     thumb:SetSize(14, 14)
     thumb:SetAlpha(0)  -- Hide the actual thumb, we use thumbFrame instead
 
-    -- Editbox for value (far right)
+    -- Nudge button (decrement) — left of editbox
+    local nudgeMinus = CreateFrame("Button", nil, container, useUIKitBorders and nil or "BackdropTemplate")
+    nudgeMinus:SetSize(16, 22)
+    nudgeMinus:SetPoint("RIGHT", container, "RIGHT", -64, 0)
+    if useUIKitBorders then
+        nudgeMinus.bg = UIKit.CreateBackground(nudgeMinus, 0.08, 0.08, 0.08, 1)
+        UIKit.CreateBorderLines(nudgeMinus)
+        UIKit.UpdateBorderLines(nudgeMinus, 1, 0.25, 0.25, 0.25, 1, false)
+    else
+        nudgeMinus:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8x8",
+            edgeFile = "Interface\\Buttons\\WHITE8x8",
+            edgeSize = px,
+        })
+        nudgeMinus:SetBackdropColor(0.08, 0.08, 0.08, 1)
+        nudgeMinus:SetBackdropBorderColor(0.25, 0.25, 0.25, 1)
+    end
+    local nudgeMinusText = nudgeMinus:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    SetFont(nudgeMinusText, 11, "", C.text)
+    nudgeMinusText:SetText("-")
+    nudgeMinusText:SetPoint("CENTER", 0, 0)
+
+    -- Editbox for value (between nudge buttons)
     local editBox = CreateFrame("EditBox", nil, container, useUIKitBorders and nil or "BackdropTemplate")
-    editBox:SetSize(60, 22)
-    editBox:SetPoint("RIGHT", 0, 0)
+    editBox:SetSize(46, 22)
+    editBox:SetPoint("LEFT", nudgeMinus, "RIGHT", 1, 0)
     if useUIKitBorders then
         editBox.bg = UIKit.CreateBackground(editBox, 0.08, 0.08, 0.08, 1)
         UIKit.CreateBorderLines(editBox)
@@ -4041,6 +4063,28 @@ function GUI:CreateFormSlider(parent, label, min, max, step, dbKey, dbTable, onC
     editBox:SetTextColor(C_text_r, C_text_g, C_text_b, C_text_a)
     editBox:SetJustifyH("CENTER")
     editBox:SetAutoFocus(false)
+
+    -- Nudge button (increment) — right of editbox
+    local nudgePlus = CreateFrame("Button", nil, container, useUIKitBorders and nil or "BackdropTemplate")
+    nudgePlus:SetSize(16, 22)
+    nudgePlus:SetPoint("LEFT", editBox, "RIGHT", 1, 0)
+    if useUIKitBorders then
+        nudgePlus.bg = UIKit.CreateBackground(nudgePlus, 0.08, 0.08, 0.08, 1)
+        UIKit.CreateBorderLines(nudgePlus)
+        UIKit.UpdateBorderLines(nudgePlus, 1, 0.25, 0.25, 0.25, 1, false)
+    else
+        nudgePlus:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8x8",
+            edgeFile = "Interface\\Buttons\\WHITE8x8",
+            edgeSize = px,
+        })
+        nudgePlus:SetBackdropColor(0.08, 0.08, 0.08, 1)
+        nudgePlus:SetBackdropBorderColor(0.25, 0.25, 0.25, 1)
+    end
+    local nudgePlusText = nudgePlus:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    SetFont(nudgePlusText, 11, "", C.text)
+    nudgePlusText:SetText("+")
+    nudgePlusText:SetPoint("CENTER", 0, 0)
 
     local function SetThumbBorderColor(r, g, b, a)
         if useUIKitBorders then
@@ -4126,6 +4170,39 @@ function GUI:CreateFormSlider(parent, label, min, max, step, dbKey, dbTable, onC
     container.GetValue = GetValue
     container.SetValue = BindWidgetMethod(container, SetValue)
     container.UpdateVisual = UpdateVisual
+
+    -- Nudge button click handlers
+    nudgeMinus:SetScript("OnClick", function()
+        if container.isEnabled == false then return end
+        local cur = GetValue()
+        SetValue(cur - container.step)
+    end)
+    nudgePlus:SetScript("OnClick", function()
+        if container.isEnabled == false then return end
+        local cur = GetValue()
+        SetValue(cur + container.step)
+    end)
+
+    -- Nudge button hover effects
+    local function SetNudgeBorderColor(btn, r, g, b, a)
+        if useUIKitBorders then
+            UIKit.UpdateBorderLines(btn, 1, r, g, b, a or 1, false)
+        else
+            btn:SetBackdropBorderColor(r, g, b, a or 1)
+        end
+    end
+    nudgeMinus:SetScript("OnEnter", function(self)
+        SetNudgeBorderColor(self, C.accent[1], C.accent[2], C.accent[3], 1)
+    end)
+    nudgeMinus:SetScript("OnLeave", function(self)
+        SetNudgeBorderColor(self, 0.25, 0.25, 0.25, 1)
+    end)
+    nudgePlus:SetScript("OnEnter", function(self)
+        SetNudgeBorderColor(self, C.accent[1], C.accent[2], C.accent[3], 1)
+    end)
+    nudgePlus:SetScript("OnLeave", function(self)
+        SetNudgeBorderColor(self, 0.25, 0.25, 0.25, 1)
+    end)
 
     -- Register for cross-widget sync
     RegisterWidgetInstance(container, dbTable, dbKey)
@@ -4223,6 +4300,8 @@ function GUI:CreateFormSlider(parent, label, min, max, step, dbKey, dbTable, onC
         slider:EnableMouse(enabled)
         editBox:EnableMouse(enabled)
         editBox:SetEnabled(enabled)
+        nudgeMinus:EnableMouse(enabled)
+        nudgePlus:EnableMouse(enabled)
 
         -- Store state for scripts to check
         container.isEnabled = enabled
