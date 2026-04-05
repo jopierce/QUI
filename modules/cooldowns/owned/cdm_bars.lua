@@ -1239,15 +1239,19 @@ function CDMBars:LayoutBars(container, settings)
         effectiveBarHeight = barHeight
     end
 
-    -- Apply HUD layer priority
+    -- Apply HUD layer priority (skip during layout mode — the handle
+    -- system owns strata/level while frames are reparented to movers).
+    local layoutActive = Helpers.IsLayoutModeActive()
     local hudLayering = QUICore and QUICore.db and QUICore.db.profile and QUICore.db.profile.hudLayering
     local layerPriority = hudLayering and hudLayering.buffBar or 5
     local frameLevel = 200
     if QUICore and QUICore.GetHUDFrameLevel then
         frameLevel = QUICore:GetHUDFrameLevel(layerPriority)
     end
-    container:SetFrameStrata("MEDIUM")
-    container:SetFrameLevel(frameLevel)
+    if not layoutActive then
+        container:SetFrameStrata("MEDIUM")
+        container:SetFrameLevel(frameLevel)
+    end
 
     -- Configure and position each bar
     local editModeActive = Helpers.IsEditModeActive()
@@ -1263,6 +1267,19 @@ function CDMBars:LayoutBars(container, settings)
         + ((settings.barOpacity or 1) * 10000)
         + ((settings.useClassColor and 1 or 0) * 100003)
     for _, bar in ipairs(barPool) do
+        -- In edit/layout mode, force bar active BEFORE ConfigureBar so that
+        -- inactive styling (alpha=0 for "hide" mode) doesn't apply.
+        if editModeActive then
+            bar._active = true
+            if bar.StatusBar then
+                pcall(bar.StatusBar.SetMinMaxValues, bar.StatusBar, 0, 1)
+                pcall(bar.StatusBar.SetValue, bar.StatusBar, 0.65)
+            end
+            if bar.DurationText then
+                bar.DurationText:SetText("0:32")
+            end
+        end
+
         -- Apply styling (skip if settings unchanged and bar was already configured)
         if bar._cfgFingerprint ~= cfgFingerprint or bar._cfgActive ~= bar._active then
             bar._cfgFingerprint = cfgFingerprint
@@ -1286,18 +1303,6 @@ function CDMBars:LayoutBars(container, settings)
             if bar.IconContainer then
                 bar.IconContainer:SetFrameStrata("MEDIUM")
                 bar.IconContainer:SetFrameLevel(frameLevel + 1)
-            end
-        end
-
-        -- In edit/layout mode, force bar active with a visible fill for previewing
-        if editModeActive then
-            bar._active = true
-            if bar.StatusBar then
-                pcall(bar.StatusBar.SetMinMaxValues, bar.StatusBar, 0, 1)
-                pcall(bar.StatusBar.SetValue, bar.StatusBar, 0.65)
-            end
-            if bar.DurationText then
-                bar.DurationText:SetText("0:32")
             end
         end
 

@@ -413,7 +413,10 @@ function QUI_LayoutMode:Open()
     -- Snapshot current positions for revert
     SnapshotPositions()
 
-    -- Fire enter callbacks
+    -- Fire enter callbacks BEFORE handle creation — callbacks like
+    -- QUI_OnEditModeEnterCDM show/populate CDM containers so their frames
+    -- are visible when CreateHandle runs (enabling child overlays instead
+    -- of proxy mover fallbacks).
     for _, cb in ipairs(self._enterCallbacks) do
         pcall(cb)
     end
@@ -3536,11 +3539,12 @@ _G.QUI_IsLayoutModeActive = function()
     return QUI_LayoutMode.isActive
 end
 
--- Returns true if layout mode is active and owns a handle for this key.
--- Used by the anchoring system to skip repositioning frames that are
--- currently managed by layout mode handles.
+-- Returns true if layout mode is active and has a registered element for
+-- this key (element may or may not have a handle yet — handles are created
+-- after enter callbacks). Used by the anchoring system to skip
+-- repositioning frames managed by layout mode.
 _G.QUI_IsLayoutModeManaged = function(key)
-    return QUI_LayoutMode.isActive and QUI_LayoutMode._handles[key] ~= nil
+    return QUI_LayoutMode.isActive and QUI_LayoutMode._elements[key] ~= nil
 end
 
 -- Sync a mover handle to match current DB position (called from options panel)
