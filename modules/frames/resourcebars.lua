@@ -3455,14 +3455,7 @@ function QUICore:RefreshAll()
         oldRefreshAll(self)
     end
 
-    -- Refresh resource bars with new settings
-    for _, name in ipairs(self.viewers) do
-        local viewer = _G[name]
-        if viewer and viewer:IsShown() then
-            self:ApplyViewerSkin(viewer)
-        end
-    end
-
+    -- CDM viewer skinning now refreshes in the cooldown modules.
     self:UpdatePowerBar()
     self:UpdateSecondaryPowerBar()
 end
