@@ -1237,7 +1237,7 @@ local function IsSpellKnownByPlayer(spellID)
             -- Spell has valid info — check if it's in the CDM viewer
             -- (Blizzard only lists spells that belong to the current spec)
             if C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCategorySet then
-                for cat = 0, 1 do
+                for cat = 0, 3 do
                     local okCat, cdIDs = pcall(C_CooldownViewer.GetCooldownViewerCategorySet, cat)
                     if okCat and cdIDs then
                         for _, cdID in ipairs(cdIDs) do
@@ -3051,6 +3051,7 @@ function CDMSpellData:Initialize()
     end)
     -- Register runtime events
     local _spellsChangedToken = 0
+    local _inZoneTransition = false  -- suppress SPELLS_CHANGED dormant checks during zone loads
     local eventFrame = CreateFrame("Frame")
     eventFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
     eventFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
@@ -3076,6 +3077,16 @@ function CDMSpellData:Initialize()
             -- Talent/spell changes: update dormant spell lists and invalidate cache.
             -- Cache invalidation is immediate so stale data is never returned.
             InvalidateLearnedCooldownsCache()
+            -- Skip dormant checks during zone transitions — WoW APIs
+            -- (IsSpellKnown, IsPlayerSpell, CDM viewer) are temporarily
+            -- stale after PLAYER_ENTERING_WORLD, causing override spells
+            -- (e.g. Ice Cold 414658 replacing Ice Block 45438) to be
+            -- incorrectly marked dormant. Dedicated handlers for
+            -- CHALLENGE_MODE_START and PLAYER_ENTERING_WORLD already run
+            -- dormant checks with better timing once APIs stabilise.
+            if _inZoneTransition then
+                return
+            end
             -- Debounce dormant/reconcile — SPELLS_CHANGED fires multiple times
             -- during talent swaps; collapse into a single deferred rebuild.
             _spellsChangedToken = _spellsChangedToken + 1
@@ -3099,6 +3110,10 @@ function CDMSpellData:Initialize()
                 CDMSpellData:ReconcileAllContainers()
             end
         elseif event == "PLAYER_ENTERING_WORLD" then
+            -- Suppress SPELLS_CHANGED dormant checks during zone transitions.
+            -- APIs are stale for ~1-2s after entering a new zone/instance.
+            _inZoneTransition = true
+            C_Timer.After(2.0, function() _inZoneTransition = false end)
             -- Hide viewers immediately to prevent flash of unstyled icons
             HideBlizzardViewers()
             C_Timer.After(1.0, function()

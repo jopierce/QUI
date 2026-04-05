@@ -298,6 +298,9 @@ function QUI_LayoutMode:SetElementEnabled(key, enabled)
                     targetFrame:SetParent(handle)
                     targetFrame:SetFrameStrata("DIALOG")
                     targetFrame:SetFrameLevel(1)
+                    if _G.QUI_SetFrameLayoutOwned then
+                        _G.QUI_SetFrameLayoutOwned(targetFrame, def.key)
+                    end
                     targetFrame:ClearAllPoints()
                     -- Elements with getCenterOffset: offset the preview within the mover
                     if def.getCenterOffset then
@@ -321,6 +324,9 @@ function QUI_LayoutMode:SetElementEnabled(key, enabled)
                     pcall(targetFrame.SetParent, targetFrame, handle._savedTargetParent)
                     if handle._savedTargetStrata then
                         pcall(targetFrame.SetFrameStrata, targetFrame, handle._savedTargetStrata)
+                    end
+                    if _G.QUI_SetFrameLayoutOwned then
+                        _G.QUI_SetFrameLayoutOwned(targetFrame, nil)
                     end
                 end
                 handle._savedTargetParent = nil
@@ -544,6 +550,11 @@ function QUI_LayoutMode:Open()
                     -- regardless of their frame level.
                     targetFrame:SetFrameStrata("DIALOG")
                     targetFrame:SetFrameLevel(1)
+                    -- Block module positioning (PositionFrame) for this
+                    -- frame while it's managed by the layout mode handle.
+                    if _G.QUI_SetFrameLayoutOwned then
+                        _G.QUI_SetFrameLayoutOwned(targetFrame, hKey)
+                    end
                     targetFrame:ClearAllPoints()
                     if hKey == "bossFrames" then
                         -- Boss1 anchors to the TOP of the handle, not center
@@ -652,6 +663,10 @@ function QUI_LayoutMode:Close(skipSaveCheck)
                 if handle._savedTargetStrata then
                     pcall(targetFrame.SetFrameStrata, targetFrame, handle._savedTargetStrata)
                 end
+                -- Release the PositionFrame guard set during reparenting
+                if _G.QUI_SetFrameLayoutOwned then
+                    _G.QUI_SetFrameLayoutOwned(targetFrame, nil)
+                end
             end
             handle._savedTargetParent = nil
             handle._savedTargetStrata = nil
@@ -752,12 +767,28 @@ function QUI_LayoutMode:SaveAndClose()
     CommitPositions()
     self._hasChanges = false
     self:Close(true)
+    -- Re-apply anchors now that layout mode is fully closed and frames
+    -- are restored to their original parents. The CommitPositions() call
+    -- above applies anchors while layout mode is still active — frames are
+    -- reparented to handles and some (e.g., boss frames) bail from
+    -- ApplyFrameAnchor while QUI_IsLayoutModeActive() is true. After
+    -- Close() deactivates layout mode and restores parents, a fresh apply
+    -- ensures all frames land at their saved positions.
+    local ApplyAll = _G.QUI_ApplyAllFrameAnchors
+    if ApplyAll then
+        ApplyAll(true)
+    end
 end
 
 function QUI_LayoutMode:DiscardAndClose()
     RevertPositions()
     self._hasChanges = false
     self:Close(true)
+    -- Re-apply anchors after Close() for the same reason as SaveAndClose.
+    local ApplyAll = _G.QUI_ApplyAllFrameAnchors
+    if ApplyAll then
+        ApplyAll(true)
+    end
 end
 
 ---------------------------------------------------------------------------
@@ -3310,6 +3341,9 @@ function QUI_LayoutMode:ToggleHandlePreview(key)
             local targetFrame = def.getFrame and def.getFrame()
             if targetFrame then
                 pcall(targetFrame.SetParent, targetFrame, handle._savedTargetParent)
+                if _G.QUI_SetFrameLayoutOwned then
+                    _G.QUI_SetFrameLayoutOwned(targetFrame, nil)
+                end
             end
             handle._savedTargetParent = nil
         end
@@ -3362,6 +3396,9 @@ function QUI_LayoutMode:ToggleHandlePreview(key)
                 targetFrame:SetParent(handle)
                 targetFrame:SetFrameStrata("DIALOG")
                 targetFrame:SetFrameLevel(1)
+                if _G.QUI_SetFrameLayoutOwned then
+                    _G.QUI_SetFrameLayoutOwned(targetFrame, def.key)
+                end
                 targetFrame:ClearAllPoints()
                 if def.getCenterOffset then
                     local cdx, cdy = def.getCenterOffset(handle:GetSize())
@@ -3497,6 +3534,13 @@ end
 
 _G.QUI_IsLayoutModeActive = function()
     return QUI_LayoutMode.isActive
+end
+
+-- Returns true if layout mode is active and owns a handle for this key.
+-- Used by the anchoring system to skip repositioning frames that are
+-- currently managed by layout mode handles.
+_G.QUI_IsLayoutModeManaged = function(key)
+    return QUI_LayoutMode.isActive and QUI_LayoutMode._handles[key] ~= nil
 end
 
 -- Sync a mover handle to match current DB position (called from options panel)
