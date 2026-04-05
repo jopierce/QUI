@@ -193,8 +193,22 @@ local function LoadOrSnapshotSpecProfile(specID)
                     containerDB.ownedSpells = CopyTable(savedContainer.ownedSpells)
                     containerDB.removedSpells = CopyTable(savedContainer.removedSpells)
                     containerDB.dormantSpells = CopyTable(savedContainer.dormantSpells or {})
+                else
+                    -- Container exists now but wasn't in the saved profile
+                    -- (e.g. custom container created after the profile was
+                    -- saved). Clear it so stale spells from the previous
+                    -- spec don't leak through.
+                    containerDB.ownedSpells = nil
                 end
             end
+        end
+        -- Validate restored spells belong to the current spec/class.
+        -- Saved profiles can contain spells from other specs or even other
+        -- classes (shared AceDB profile across characters). Run a full
+        -- dormant check synchronously so unrecognised spells are shelved
+        -- before the first RefreshAll renders them.
+        if ns.CDMSpellData then
+            ns.CDMSpellData:CheckAllDormantSpells()
         end
     else
         -- No saved profile for this spec — fresh snapshot from Blizzard CDM
@@ -213,9 +227,6 @@ local function LoadOrSnapshotSpecProfile(specID)
             end
         end
     end
-
-    -- Dormant spell check is handled by the caller (spec change handler)
-    -- after this function returns, ensuring correct ordering.
 end
 
 -- Initialize the previous spec ID on first load.
@@ -667,7 +678,7 @@ function CDMContainers_API:RegisterDynamicFrameResolver(containerKey, settings)
         local resolverKey = "cdmCustom_" .. containerKey
         _G.QUI_RegisterFrameResolver(resolverKey, {
             resolver = function() return containers[containerKey] end,
-            displayName = settings.name or containerKey,
+            displayName = type(settings.name) == "string" and settings.name ~= "" and settings.name or containerKey,
             category = "Cooldown Manager & Custom Tracker Bars",
             order = 100,
         })
@@ -850,6 +861,13 @@ end
 -- Falls back to ncdm.pos.  Returns true if a position was applied.
 local function RestoreContainerPosition(container, trackerKey)
     if not container then return false end
+
+    -- During layout mode, handles own frame positions — skip restoring
+    -- from DB so we don't yank the container away from its mover.
+    local anchorKey = ANCHOR_KEY_MAP[trackerKey]
+    if anchorKey and _G.QUI_IsLayoutModeManaged and _G.QUI_IsLayoutModeManaged(anchorKey) then
+        return true
+    end
 
     -- If the centralized frame anchoring system has an enabled override for
     -- this CDM key with a screen parent, use its CENTER offsets directly.
@@ -2292,10 +2310,20 @@ function ownedEngine:Initialize()
 
     eventFrame:SetScript("OnEvent", function(self, event, arg1, arg2)
         if event == "PLAYER_REGEN_ENABLED" then
-            -- Combat end: full rebuild to pick up any spell data changes
-            -- that were deferred while LayoutContainer was combat-gated.
+            -- Combat end: restore dormant spells that were incorrectly
+            -- shelved during zone transitions (e.g. SPELLS_CHANGED fired
+            -- while APIs were stale, then combat started before the next
+            -- dormant check could run).
+            -- restoreOnly=true: only run Phase 2 (restore returning spells).
+            -- Phase 1 (mark dormant) is skipped because this is a recovery
+            -- path — we don't want to re-dormant spells that the stale-API
+            -- window already incorrectly shelved.
             C_Timer.After(0.1, function()
                 if not InCombatLockdown() then
+                    if ns.CDMSpellData then
+                        ns.CDMSpellData:CheckAllDormantSpells(true)
+                        ns.CDMSpellData:ReconcileAllContainers()
+                    end
                     RefreshAll()
                 end
             end)
@@ -2371,7 +2399,21 @@ function ownedEngine:Initialize()
                 end
             end
         elseif event == "CHALLENGE_MODE_START" then
-            C_Timer.After(0.5, RefreshAll)
+            -- Restore dormant spells before refreshing — SPELLS_CHANGED
+            -- may have incorrectly shelved spells during the zone
+            -- transition when WoW APIs were temporarily stale.
+            -- restoreOnly=true: only rescue spells from dormant, don't
+            -- risk marking more spells dormant with still-settling APIs.
+            -- If already in combat, PLAYER_REGEN_ENABLED handles recovery.
+            C_Timer.After(0.5, function()
+                if not InCombatLockdown() then
+                    if ns.CDMSpellData then
+                        ns.CDMSpellData:CheckAllDormantSpells(true)
+                        ns.CDMSpellData:ReconcileAllContainers()
+                    end
+                    RefreshAll()
+                end
+            end)
         elseif event == "ZONE_CHANGED_NEW_AREA" then
             C_Timer.After(0.3, RefreshAll)
         elseif event == "CINEMATIC_STOP" or event == "STOP_MOVIE" then
@@ -2695,6 +2737,13 @@ do
         end
 
         local function GetCharCustomEntries(trackerKey)
+            if Helpers and Helpers.GetNCDMCustomEntries then
+                local activeData = Helpers.GetNCDMCustomEntries(trackerKey)
+                if activeData then
+                    return activeData
+                end
+            end
+
             local core = Helpers.GetCore()
             if core and core.db and core.db.char and core.db.char.ncdm
                 and core.db.char.ncdm[trackerKey] then

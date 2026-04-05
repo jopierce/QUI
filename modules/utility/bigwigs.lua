@@ -215,6 +215,7 @@ function QUI_BigWigs:BuildAnchorOptions()
                 and name ~= "playerFrame" and name ~= "targetFrame"
             then
                 local displayName = data.options and data.options.displayName or name
+                displayName = tostring(displayName)
                 displayName = displayName:gsub("^%l", string.upper)
                 displayName = displayName:gsub("([a-z])([A-Z])", "%1 %2")
                 table.insert(options, {value = name, text = displayName})

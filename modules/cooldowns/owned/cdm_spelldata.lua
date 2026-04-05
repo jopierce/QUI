@@ -24,6 +24,12 @@ pcall(function() SetCVar("cooldownViewerEnabled", 1) end)
 ---------------------------------------------------------------------------
 local CDMSpellData = {}
 
+-- Zone transition flag — set true on PLAYER_ENTERING_WORLD, cleared after
+-- 2s. Suppresses SPELLS_CHANGED dormant checks and Phase 3 permanent
+-- deletion while WoW APIs (IsSpellKnown, C_CooldownViewer, spellbook) are
+-- returning stale/incomplete data.
+local _inZoneTransition = false
+
 ---------------------------------------------------------------------------
 -- CONSTANTS
 ---------------------------------------------------------------------------
@@ -1237,7 +1243,7 @@ local function IsSpellKnownByPlayer(spellID)
             -- Spell has valid info — check if it's in the CDM viewer
             -- (Blizzard only lists spells that belong to the current spec)
             if C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCategorySet then
-                for cat = 0, 1 do
+                for cat = 0, 3 do
                     local okCat, cdIDs = pcall(C_CooldownViewer.GetCooldownViewerCategorySet, cat)
                     if okCat and cdIDs then
                         for _, cdID in ipairs(cdIDs) do
@@ -1820,7 +1826,12 @@ end
 -- Phase 2: Re-insert returning dormant spells at their saved position.
 -- Phase 3: Clean obsolete dormant entries for spells removed from game.
 -- dormantSpells is a map: { [spellID] = { slot = originalSlotIndex, row = rowNum } }
-function CDMSpellData:CheckDormantSpells(containerKey)
+--
+-- restoreOnly (boolean): when true, skip Phase 1 (marking spells dormant) and
+-- Phase 3 (permanent deletion). Only run Phase 2 (restore returning spells).
+-- Used by recovery handlers (PLAYER_REGEN_ENABLED, CHALLENGE_MODE_START) that
+-- should rescue incorrectly-dormanted spells without risking re-dormanting more.
+function CDMSpellData:CheckDormantSpells(containerKey, restoreOnly)
     local db = GetContainerDB(containerKey)
     if not db or type(db.ownedSpells) ~= "table" then
         return
@@ -1867,20 +1878,26 @@ function CDMSpellData:CheckDormantSpells(containerKey)
         return
     end
 
-    local toRemove = {}  -- indices to remove (descending order)
-    for i, entry in ipairs(ownedSpells) do
-        if entry and entry.id and entry.type == "spell" then
-            local known = IsSpellKnownByPlayer(entry.id)
-            if not known then
-                -- Save slot position AND row assignment so both are restored
-                db.dormantSpells[entry.id] = { slot = i, row = entry.row }
-                toRemove[#toRemove + 1] = i
+    -- Phase 1: Move unlearned spells to dormant.
+    -- Skipped when restoreOnly is true — recovery handlers should only
+    -- rescue spells from dormant, not risk marking more spells dormant
+    -- while APIs may still be settling after a zone transition.
+    if not restoreOnly then
+        local toRemove = {}  -- indices to remove (descending order)
+        for i, entry in ipairs(ownedSpells) do
+            if entry and entry.id and entry.type == "spell" then
+                local known = IsSpellKnownByPlayer(entry.id)
+                if not known then
+                    -- Save slot position AND row assignment so both are restored
+                    db.dormantSpells[entry.id] = { slot = i, row = entry.row }
+                    toRemove[#toRemove + 1] = i
+                end
             end
         end
-    end
-    -- Remove from ownedSpells in reverse order to preserve indices
-    for j = #toRemove, 1, -1 do
-        table.remove(db.ownedSpells, toRemove[j])
+        -- Remove from ownedSpells in reverse order to preserve indices
+        for j = #toRemove, 1, -1 do
+            table.remove(db.ownedSpells, toRemove[j])
+        end
     end
 
     -- Phase 2: Re-insert returning dormant spells at saved positions
@@ -1908,8 +1925,14 @@ function CDMSpellData:CheckDormantSpells(containerKey)
         table.insert(db.ownedSpells, insertAt, { type = "spell", id = info.id, row = info.row })
     end
 
-    -- Phase 3: Clean obsolete dormant spells no longer in the CDM system
-    if C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCategorySet then
+    -- Phase 3: Clean obsolete dormant spells no longer in the CDM system.
+    -- Skip when restoreOnly (recovery path) or during zone transitions —
+    -- C_CooldownViewer and spellbook APIs return incomplete data during
+    -- transitions, which causes valid dormant spells to be permanently
+    -- deleted with no way to recover them.
+    if restoreOnly or _inZoneTransition then
+        -- skip Phase 3
+    elseif C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCategorySet then
         local allCDMSpells = {}
         for cat = 0, 3 do
             local ok, ids = pcall(C_CooldownViewer.GetCooldownViewerCategorySet, cat, true)
@@ -1962,14 +1985,16 @@ function CDMSpellData:CheckDormantSpells(containerKey)
     end
 end
 
--- CheckAllDormantSpells: Run dormant check on all container keys
-function CDMSpellData:CheckAllDormantSpells()
+-- CheckAllDormantSpells: Run dormant check on all container keys.
+-- restoreOnly: when true, only Phase 2 (restore) runs — no new dormanting
+-- or permanent deletion. Used by recovery handlers.
+function CDMSpellData:CheckAllDormantSpells(restoreOnly)
     local containerKeys = { "essential", "utility", "buff", "trackedBar" }
     if ns.CDMContainers and ns.CDMContainers.GetAllContainerKeys then
         containerKeys = ns.CDMContainers.GetAllContainerKeys()
     end
     for _, key in ipairs(containerKeys) do
-        self:CheckDormantSpells(key)
+        self:CheckDormantSpells(key, restoreOnly)
     end
 end
 
@@ -3025,7 +3050,9 @@ function CDMSpellData:Initialize()
         HookBlizzardSettings()
         initialized = true
         -- Initial reconciliation after scan data is available
-        CDMSpellData:ReconcileAllContainers()
+        if not InCombatLockdown() then
+            CDMSpellData:ReconcileAllContainers()
+        end
         -- Start periodic scan (out of combat only, 0.5s base interval).
         -- Backs off to every 2s after 3s of no changes to reduce idle CPU.
         if not scanTimer then
@@ -3076,6 +3103,16 @@ function CDMSpellData:Initialize()
             -- Talent/spell changes: update dormant spell lists and invalidate cache.
             -- Cache invalidation is immediate so stale data is never returned.
             InvalidateLearnedCooldownsCache()
+            -- Skip dormant checks during zone transitions — WoW APIs
+            -- (IsSpellKnown, IsPlayerSpell, CDM viewer) are temporarily
+            -- stale after PLAYER_ENTERING_WORLD, causing override spells
+            -- (e.g. Ice Cold 414658 replacing Ice Block 45438) to be
+            -- incorrectly marked dormant. Dedicated handlers for
+            -- CHALLENGE_MODE_START and PLAYER_ENTERING_WORLD already run
+            -- dormant checks with better timing once APIs stabilise.
+            if _inZoneTransition then
+                return
+            end
             -- Debounce dormant/reconcile — SPELLS_CHANGED fires multiple times
             -- during talent swaps; collapse into a single deferred rebuild.
             _spellsChangedToken = _spellsChangedToken + 1
@@ -3099,6 +3136,10 @@ function CDMSpellData:Initialize()
                 CDMSpellData:ReconcileAllContainers()
             end
         elseif event == "PLAYER_ENTERING_WORLD" then
+            -- Suppress SPELLS_CHANGED dormant checks during zone transitions.
+            -- APIs are stale for ~1-2s after entering a new zone/instance.
+            _inZoneTransition = true
+            C_Timer.After(2.0, function() _inZoneTransition = false end)
             -- Hide viewers immediately to prevent flash of unstyled icons
             HideBlizzardViewers()
             C_Timer.After(1.0, function()

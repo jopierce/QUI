@@ -298,6 +298,9 @@ function QUI_LayoutMode:SetElementEnabled(key, enabled)
                     targetFrame:SetParent(handle)
                     targetFrame:SetFrameStrata("DIALOG")
                     targetFrame:SetFrameLevel(1)
+                    if _G.QUI_SetFrameLayoutOwned then
+                        _G.QUI_SetFrameLayoutOwned(targetFrame, def.key)
+                    end
                     targetFrame:ClearAllPoints()
                     -- Elements with getCenterOffset: offset the preview within the mover
                     if def.getCenterOffset then
@@ -321,6 +324,9 @@ function QUI_LayoutMode:SetElementEnabled(key, enabled)
                     pcall(targetFrame.SetParent, targetFrame, handle._savedTargetParent)
                     if handle._savedTargetStrata then
                         pcall(targetFrame.SetFrameStrata, targetFrame, handle._savedTargetStrata)
+                    end
+                    if _G.QUI_SetFrameLayoutOwned then
+                        _G.QUI_SetFrameLayoutOwned(targetFrame, nil)
                     end
                 end
                 handle._savedTargetParent = nil
@@ -407,10 +413,17 @@ function QUI_LayoutMode:Open()
     -- Snapshot current positions for revert
     SnapshotPositions()
 
-    -- Fire enter callbacks
+    -- Fire enter callbacks BEFORE handle creation — callbacks like
+    -- QUI_OnEditModeEnterCDM show/populate CDM containers so their frames
+    -- are visible when CreateHandle runs (enabling child overlays instead
+    -- of proxy mover fallbacks).
+    -- Flag: during this window, _handles don't exist yet but we still need
+    -- QUI_IsLayoutModeManaged to block positioning triggered by callbacks.
+    self._enterCallbacksRunning = true
     for _, cb in ipairs(self._enterCallbacks) do
         pcall(cb)
     end
+    self._enterCallbacksRunning = false
 
     -- Create and show handles (only for enabled elements, respecting persisted hidden state)
     -- onOpen previews only fire for elements that are both enabled AND not hidden.
@@ -544,6 +557,11 @@ function QUI_LayoutMode:Open()
                     -- regardless of their frame level.
                     targetFrame:SetFrameStrata("DIALOG")
                     targetFrame:SetFrameLevel(1)
+                    -- Block module positioning (PositionFrame) for this
+                    -- frame while it's managed by the layout mode handle.
+                    if _G.QUI_SetFrameLayoutOwned then
+                        _G.QUI_SetFrameLayoutOwned(targetFrame, hKey)
+                    end
                     targetFrame:ClearAllPoints()
                     if hKey == "bossFrames" then
                         -- Boss1 anchors to the TOP of the handle, not center
@@ -652,6 +670,10 @@ function QUI_LayoutMode:Close(skipSaveCheck)
                 if handle._savedTargetStrata then
                     pcall(targetFrame.SetFrameStrata, targetFrame, handle._savedTargetStrata)
                 end
+                -- Release the PositionFrame guard set during reparenting
+                if _G.QUI_SetFrameLayoutOwned then
+                    _G.QUI_SetFrameLayoutOwned(targetFrame, nil)
+                end
             end
             handle._savedTargetParent = nil
             handle._savedTargetStrata = nil
@@ -752,12 +774,28 @@ function QUI_LayoutMode:SaveAndClose()
     CommitPositions()
     self._hasChanges = false
     self:Close(true)
+    -- Re-apply anchors now that layout mode is fully closed and frames
+    -- are restored to their original parents. The CommitPositions() call
+    -- above applies anchors while layout mode is still active — frames are
+    -- reparented to handles and some (e.g., boss frames) bail from
+    -- ApplyFrameAnchor while QUI_IsLayoutModeActive() is true. After
+    -- Close() deactivates layout mode and restores parents, a fresh apply
+    -- ensures all frames land at their saved positions.
+    local ApplyAll = _G.QUI_ApplyAllFrameAnchors
+    if ApplyAll then
+        ApplyAll(true)
+    end
 end
 
 function QUI_LayoutMode:DiscardAndClose()
     RevertPositions()
     self._hasChanges = false
     self:Close(true)
+    -- Re-apply anchors after Close() for the same reason as SaveAndClose.
+    local ApplyAll = _G.QUI_ApplyAllFrameAnchors
+    if ApplyAll then
+        ApplyAll(true)
+    end
 end
 
 ---------------------------------------------------------------------------
@@ -3310,6 +3348,9 @@ function QUI_LayoutMode:ToggleHandlePreview(key)
             local targetFrame = def.getFrame and def.getFrame()
             if targetFrame then
                 pcall(targetFrame.SetParent, targetFrame, handle._savedTargetParent)
+                if _G.QUI_SetFrameLayoutOwned then
+                    _G.QUI_SetFrameLayoutOwned(targetFrame, nil)
+                end
             end
             handle._savedTargetParent = nil
         end
@@ -3362,6 +3403,9 @@ function QUI_LayoutMode:ToggleHandlePreview(key)
                 targetFrame:SetParent(handle)
                 targetFrame:SetFrameStrata("DIALOG")
                 targetFrame:SetFrameLevel(1)
+                if _G.QUI_SetFrameLayoutOwned then
+                    _G.QUI_SetFrameLayoutOwned(targetFrame, def.key)
+                end
                 targetFrame:ClearAllPoints()
                 if def.getCenterOffset then
                     local cdx, cdy = def.getCenterOffset(handle:GetSize())
@@ -3497,6 +3541,21 @@ end
 
 _G.QUI_IsLayoutModeActive = function()
     return QUI_LayoutMode.isActive
+end
+
+-- Returns true if layout mode is active and owns a handle for this key.
+-- During the brief enter-callback window (handles not yet created), falls
+-- back to checking registered elements so that positioning triggered by
+-- callbacks is still blocked.
+_G.QUI_IsLayoutModeManaged = function(key)
+    if not QUI_LayoutMode.isActive then return false end
+    if QUI_LayoutMode._handles[key] then return true end
+    -- Enter callbacks fire before handles are created — use element
+    -- registration as a proxy during that narrow window only.
+    if QUI_LayoutMode._enterCallbacksRunning and QUI_LayoutMode._elements[key] then
+        return true
+    end
+    return false
 end
 
 -- Sync a mover handle to match current DB position (called from options panel)

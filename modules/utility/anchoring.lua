@@ -239,6 +239,7 @@ function QUI_Anchoring:GetAnchorTargetList(include, exclude, excludeSelf)
     for name, data in pairs(self.anchorTargets) do
         if ShouldInclude(name) then
             local displayName = data.options and data.options.displayName or name
+            displayName = tostring(displayName)
             -- Capitalize first letter and add spaces before capitals
             displayName = displayName:gsub("^%l", string.upper)
             displayName = displayName:gsub("([a-z])([A-Z])", "%1 %2")
@@ -2226,14 +2227,6 @@ function QUI_Anchoring:ApplyFrameAnchor(key, settings)
 
     -- Boss frames: single setting applied to all with stacking Y offset
     if key == "bossFrames" and type(resolved) == "table" and not resolved.GetObjectType then
-        -- During layout mode, boss frames are reparented to the mover handle
-        -- and anchored TOPLEFT. Skip repositioning here — the handle system
-        -- manages their position. Without this guard, ApplyAllFrameAnchors
-        -- would re-anchor boss1 using ptSelf (CENTER/BOTTOM), overriding the
-        -- TOPLEFT anchoring that SyncHandle set.
-        if _G.QUI_IsLayoutModeActive and _G.QUI_IsLayoutModeActive() then
-            return
-        end
         for i, frame in ipairs(resolved) do
             local stackOffsetY = offsetY - ((i - 1) * 50)
             if useSizeStable then
@@ -2401,6 +2394,15 @@ function QUI_Anchoring:ApplyAllFrameAnchors(force)
     local anchoringDB = QUICore.db.profile.frameAnchoring
     if not anchoringDB then return end
 
+    -- During layout mode, skip bulk reapply — the handle system owns frame
+    -- positions. Debounced reapply (from module refreshes, OnSizeChanged)
+    -- would yank frames away from movers. Individual ApplyFrameAnchor calls
+    -- (from settings changes) are still allowed. force=true bypasses this
+    -- (used by post-Close reapply in SaveAndClose/DiscardAndClose).
+    if not force and _G.QUI_IsLayoutModeActive and _G.QUI_IsLayoutModeActive() then
+        return
+    end
+
     -- Throttle: if already applied this frame, defer to next frame
     if not force and _anchorThrottlePending then return end
     _anchorThrottlePending = true
@@ -2445,6 +2447,15 @@ end
 -- hud_visibility) should respect this and avoid re-showing the frame.
 _G.QUI_IsFrameHiddenByAnchor = function(key)
     return hideWithParentHidden[key] or false
+end
+
+-- Mark/unmark a frame in the layoutOwnedFrames table so PositionFrame
+-- skips module positioning for frames managed by layout mode handles,
+-- even when they have no frameAnchoring DB entry.
+_G.QUI_SetFrameLayoutOwned = function(frame, key)
+    if QUI_Anchoring and frame then
+        QUI_Anchoring.layoutOwnedFrames[frame] = key or nil
+    end
 end
 
 _G.QUI_ApplyAllFrameAnchors = function(force)
