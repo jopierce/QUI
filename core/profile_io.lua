@@ -1854,7 +1854,16 @@ end
 function QUICore:ImportProfileFromString(str, targetProfileName)
     local ok, payloadOrErr = ParseProfileImportString(self, str)
     if not ok then
-        return false, payloadOrErr
+        -- Strict validation failed — attempt auto-sanitize (strip incompatible types and retry)
+        local sok, sanitized, prefix, stripped, serr = self:SanitizeProfileImportString(str)
+        if not sok then
+            return false, payloadOrErr  -- Return original error if sanitize also fails
+        end
+        if stripped and #stripped > 0 then
+            local count = #stripped
+            print(("|cff60A5FAQUI:|r Auto-fixed %d incompatible setting%s during import."):format(count, count == 1 and "" or "s"))
+        end
+        payloadOrErr = sanitized
     end
 
     return RunImportFullProfile(self, payloadOrErr, targetProfileName)
