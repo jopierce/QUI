@@ -40,6 +40,7 @@ QUI.imports = setmetatable({}, {
 QUI._presetProfiles = {
     { key = "QUIProfile",         profileName = "Quazii",           description = "Quazii's signature UI layout" },
     { key = "QUIProfileDarkMode", profileName = "Quazii Dark Mode", description = "Dark mode variant of Quazii's layout" },
+    { key = "CocoProfile",        profileName = "Coco",             description = "Coco's personal UI layout" },
 }
 
 ---@type table
