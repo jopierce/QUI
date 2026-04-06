@@ -1568,6 +1568,13 @@ local function ApplyFullProfilePayload(core, importedProfile)
         core:RefreshAll()
     end
 
+    -- Imported profiles may contain CDM spells from a different class/spec.
+    -- Clear the imported ownedSpells and re-snapshot from Blizzard's CDM
+    -- viewers so the current spec's abilities display immediately.
+    if ns.CDMContainers and ns.CDMContainers.ResnapshotForCurrentSpec then
+        ns.CDMContainers.ResnapshotForCurrentSpec()
+    end
+
     return true, "Profile imported successfully."
 end
 
@@ -1708,6 +1715,13 @@ local function RunImportProfileSelection(core, payloadOrErr, selectedCategoryIDs
         ns.Registry:RefreshByCategories(selectedCategoryIDs)
     elseif core.RefreshAll then
         core:RefreshAll()
+    end
+
+    -- Imported profiles may contain CDM spells from a different class/spec.
+    -- Clear the imported ownedSpells and re-snapshot from Blizzard's CDM
+    -- viewers so the current spec's abilities display immediately.
+    if ns.CDMContainers and ns.CDMContainers.ResnapshotForCurrentSpec then
+        ns.CDMContainers.ResnapshotForCurrentSpec()
     end
 
     if usingExplicitTarget then

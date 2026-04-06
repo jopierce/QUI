@@ -1538,6 +1538,13 @@ end
 local UNSAFE_BLIZZARD_MANAGED_OVERRIDES = {
 }
 
+-- Frames that manage their own parent-relative positioning (e.g. anchored to
+-- a Blizzard panel that opens/closes). The anchoring system skips SetPoint for
+-- these but still marks them overridden so layout mode handles work.
+local SELF_ANCHORED_FRAMES = {
+    partyKeystones = true,
+}
+
 -- Frame display info for anchor target registration
 local FRAME_ANCHOR_INFO = {
     cdmEssential    = { displayName = "CDM Essential Viewer",  category = "Cooldown Manager & Custom Tracker Bars",  order = 1 },
@@ -2146,6 +2153,13 @@ function QUI_Anchoring:ApplyFrameAnchor(key, settings)
     -- Keep them on Blizzard defaults to avoid protected layout taint.
     -- Still mark them overridden so internal anchoring checks work.
     if UNSAFE_BLIZZARD_MANAGED_OVERRIDES[key] then
+        SetFrameOverride(resolved, true, key)
+        return
+    end
+
+    -- Self-anchored frames manage their own SetPoint (e.g. anchored to a
+    -- Blizzard panel). Skip positioning but mark overridden for layout handles.
+    if SELF_ANCHORED_FRAMES[key] then
         SetFrameOverride(resolved, true, key)
         return
     end
