@@ -2768,11 +2768,13 @@ do
                 key = "lootFrame", label = "Loot Frame", group = "Display", order = 7,
                 frame = "QUI_LootFrame",
                 dbKey = "loot", enabledField = "enabled",
+                requiresReload = true,
             },
             {
                 key = "lootRollAnchor", label = "Loot Roll Anchor", group = "Display", order = 8,
                 frame = "QUI_LootRollAnchor",
                 dbKey = "lootRoll", enabledField = "enabled",
+                requiresReload = true,
             },
             {
                 key = "alertAnchor", label = "Alert Anchor", group = "Display", order = 9,
@@ -2823,7 +2825,22 @@ do
                 end,
                 setEnabled = function(val)
                     local db = GetDB()
-                    if db then db[info.enabledField] = val end
+                    if not db then return end
+                    local old = db[info.enabledField]
+                    db[info.enabledField] = val
+                    local changed = (old ~= false) ~= (val ~= false)
+                    if changed and info.requiresReload then
+                        local GUI = QUI and QUI.GUI
+                        if GUI then
+                            GUI:ShowConfirmation({
+                                title = "Reload UI?",
+                                message = "This change requires a reload to take effect.",
+                                acceptText = "Reload",
+                                cancelText = "Later",
+                                onAccept = function() QUI:SafeReload() end,
+                            })
+                        end
+                    end
                     if info.refresh and _G[info.refresh] then
                         _G[info.refresh]()
                     end

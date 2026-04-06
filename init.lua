@@ -32,6 +32,16 @@ QUI.imports = setmetatable({}, {
     end,
 })
 
+-- Preset profiles: bundled QUI profile strings that users can install as
+-- real AceDB profiles from the Profiles tab. Each entry maps an
+-- _importLoaders key to a human-friendly profile name and description.
+-- To add a new preset, just append an entry here and ship the matching
+-- importstring file — the UI picks it up automatically.
+QUI._presetProfiles = {
+    { key = "QUIProfile",         profileName = "Quazii",           description = "Quazii's signature UI layout" },
+    { key = "QUIProfileDarkMode", profileName = "Quazii Dark Mode", description = "Dark mode variant of Quazii's layout" },
+}
+
 ---@type table
 QUI.defaults = {
     global = {},
