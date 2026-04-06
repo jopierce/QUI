@@ -216,6 +216,19 @@ function ActionBarsOwned.SafeUpdate(self)
     if HasAction(action) then
         -- Icon
         local texture = GetActionTexture(action)
+        -- Assisted combat rotation slots return nil texture when the
+        -- rotation has no current recommendation (e.g. no target).  Fall
+        -- back to the next-cast spell texture so the button isn't blank.
+        if not texture and C_AssistedCombat and C_AssistedCombat.GetNextCastSpell then
+            local aOk, isAssisted = pcall(C_ActionBar.IsAssistedCombatAction, action)
+            if aOk and isAssisted then
+                local sOk, spellID = pcall(C_AssistedCombat.GetNextCastSpell, true)
+                if sOk and spellID then
+                    local tOk, tex = pcall(C_Spell.GetSpellTexture, spellID)
+                    if tOk and tex then texture = tex end
+                end
+            end
+        end
         if texture then
             self.icon:SetTexture(texture)
             self.icon:Show()
@@ -3835,6 +3848,12 @@ abSlotFrame:SetScript("OnUpdate", function(self)
     wipe(abDirtySlots)
     -- Rebuild spell-to-button map after slot content changes (drag/drop)
     ActionBarsOwned.RebuildSpellIdMap()
+    -- Refresh assisted combat highlights and rotation frames — the spell
+    -- may have moved to a different button, so the old highlight/arrow
+    -- must move too.  Without this, dragging the one-button rotation
+    -- action leaves the highlight on the old (now-empty) slot.
+    UpdateAllAssistedHighlights()
+    ActionBarsOwned.UpdateAllAssistedCombatRotation()
     if InCombatLockdown() then
         ActionBarsOwned.pendingSlotUpdate = true
     end
@@ -4168,6 +4187,17 @@ local function OnOwnedEvent(self, event, ...)
         -- ACTIONBAR_SLOT_CHANGED (fires constantly even while idle).
         ActionBarsOwned._showGrid = nil
         self:UnregisterEvent("ACTIONBAR_SLOT_CHANGED")
+        -- Full post-drag refresh: the drag may have moved spells (including
+        -- the one-button rotation action) between slots.  Some action types
+        -- don't fire per-slot ACTIONBAR_SLOT_CHANGED, so we refresh
+        -- everything here to guarantee correctness.
+        ScheduleABVisualUpdate()
+        ScheduleABCooldownUpdate()
+        -- Assisted combat rotation and highlights must also refresh — the
+        -- rotation action may have moved to a new button.
+        ActionBarsOwned.UpdateAllAssistedCombatRotation()
+        UpdateAllAssistedHighlights()
+        -- Restore empty slot visibility (alpha was forced to 1 during grid)
         for _, barKey in ipairs(STANDARD_BAR_KEYS) do
             local buttons = ActionBarsOwned.nativeButtons[barKey]
             local settings = GetEffectiveSettings(barKey)
@@ -4177,6 +4207,8 @@ local function OnOwnedEvent(self, event, ...)
                 end
             end
         end
+        -- Rebuild spell-to-button map (slot contents may have changed)
+        ActionBarsOwned.RebuildSpellIdMap()
 
     elseif event == "PLAYER_ENTER_COMBAT" or event == "PLAYER_LEAVE_COMBAT" then
         -- Auto-attack flash state changes (SafeUpdate handles flash now)
@@ -7183,8 +7215,26 @@ function ActionBarsOwned:Initialize()
         end, "QUI_ActionBars_AssistedCombat")
 
         -- Assisted combat highlight (marching ants on the next-cast button).
+        -- Also schedule a visual update: the one-button rotation slot
+        -- dynamically changes which spell it shows, so GetActionTexture
+        -- returns a different icon.  Without this, the button texture is
+        -- stale until the next unrelated visual event.
+        --
+        -- Soft targeting causes constant nil→spell→nil→spell oscillation.
+        -- Nil means "no recommendation right now" (target lost, soft-target
+        -- gap) — NOT "rotation disabled".  Clearing highlights on nil
+        -- causes visible on/off flicker.  Instead, ignore nil entirely
+        -- and keep showing the last valid recommendation.  Highlights
+        -- refresh naturally when the rotation action is moved/removed
+        -- (HIDEGRID) or during the post-combat full refresh
+        -- (PLAYER_REGEN_ENABLED calls UpdateAllAssistedHighlights).
         EventRegistry:RegisterCallback("AssistedCombatManager.OnAssistedHighlightSpellChange", function()
-            UpdateAllAssistedHighlights()
+            local ok, nextSpell = pcall(C_AssistedCombat.GetNextCastSpell, true)
+            if ok and nextSpell then
+                UpdateAllAssistedHighlights()
+                ScheduleABVisualUpdate()
+            end
+            -- nil events intentionally ignored — keep last valid highlight
         end, "QUI_ActionBars_AssistedHighlight")
     end
 
