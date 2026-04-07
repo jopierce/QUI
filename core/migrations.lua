@@ -13,8 +13,41 @@ local ADDON_NAME, ns = ...
 
 local Migrations = ns.Migrations or {}
 ns.Migrations = Migrations
+-- Also expose on the QUI global so init.lua (which has no `ns` scope) can
+-- reach the snapshot/restore helpers for the `/qui migration` slash command.
+if _G.QUI then _G.QUI.Migrations = Migrations end
 
-local CURRENT_SCHEMA_VERSION = 1
+---------------------------------------------------------------------------
+-- Schema version history
+---------------------------------------------------------------------------
+-- v0  = unknown / fresh install / 2.55 and earlier (pre-modern data model)
+-- v1  = legacy "always 1" stamp (3.0 – 3.1.4) — treated as v0 by the rewrite
+-- v2  = MigrateDatatextSlots                       (3.0)
+-- v3  = MigratePerSlotSettings                     (3.0)
+-- v4  = MigrateMasterTextColors                    (3.0)
+-- v5  = MigrateChatEditBox                         (3.0)
+-- v6  = MigrateCooldownSwipeV2                     (3.0)
+-- v7  = MigrateCastBars                            (3.0)
+-- v8  = MigrateUnitFrames                          (3.0)
+-- v9  = MigrateSelfFirst + CleanOrphanKeys         (3.0)
+-- v10 = Legacy 2.55 mainline anchor rebuild        (2.55 only)
+-- v11 = EnsureThemeStorage                         (3.0/3.1)
+-- v12 = MigrateLegacyLootSettings                  (3.0)
+-- v13 = EnsureCraftingOrderIndicator               (minimap indicator default flip)
+-- v14 = MigrateToShowLogic (cdm + unitframes)      (3.0 hide → show)
+-- v15 = MigrateGroupFrameContainers                (3.0 party/raid split)
+-- v16 = NormalizeAuraIndicators                    (3.0 shape normalize)
+-- v17 = NormalizeEngines                           (3.0 drop legacy engine keys)
+-- v18 = NormalizeMinimapSettings                   (2.55 position array → FA)
+-- v19 = MigrateAnchoringV1                         (2.55 anchoring + castbar anchor)
+-- v20 = MigrateAnchoringV2                         (3.0 mplusTimer/tooltip/brez legacy offsets)
+-- v21 = MigrateAnchoringV3                         (3.1 readyCheck/loot/alerts/bars position)
+-- v22 = MigrateNCDMContainers                      (3.0 ncdm.containers schema)
+--
+-- When adding a new migration: bump CURRENT_SCHEMA_VERSION, add it to the
+-- linear gate chain in RunOnProfile, and document the version above.
+---------------------------------------------------------------------------
+local CURRENT_SCHEMA_VERSION = 22
 
 ---------------------------------------------------------------------------
 -- Shared helpers
@@ -119,40 +152,44 @@ local function MigrateChatEditBox(chat)
     chat.styleEditBox = nil
 end
 
--- Migrate legacy cooldownSwipe (hideEssential/hideUtility) to new 3-toggle system
+-- Migrate legacy cooldownSwipe (hideEssential/hideUtility) to new 3-toggle system.
+-- Idempotency: gated externally by schema version v6; internally by the absence
+-- of the legacy hide* keys. Safe to call on already-migrated data.
 local function MigrateCooldownSwipeV2(profile)
     if not profile then return end
     if not profile.cooldownSwipe then profile.cooldownSwipe = {} end
 
     local cs = profile.cooldownSwipe
-    if cs.migratedToV2 then return end  -- Already migrated
+    -- Strip legacy sentinel from any 3.1.x profile that still carries it.
+    cs.migratedToV2 = nil
 
-    -- Check old settings
     local hadHideEssential = cs.hideEssential == true
     local hadHideUtility = cs.hideUtility == true
     local hadHideBuffSwipe = profile.cooldownManager and profile.cooldownManager.hideSwipe == true
 
-    -- Migration: If user had swipes hidden, they likely wanted to hide GCD clutter
-    -- Give them spell cooldowns back while keeping GCD hidden
+    -- Data-shape guard: if none of the legacy keys exist and the new-style
+    -- show* keys already exist, there's nothing to migrate.
+    if not (hadHideEssential or hadHideUtility or hadHideBuffSwipe)
+        and cs.hideEssential == nil and cs.hideUtility == nil
+        and cs.showBuffSwipe ~= nil then
+        return
+    end
+
     if hadHideEssential or hadHideUtility or hadHideBuffSwipe then
         cs.showBuffSwipe = true
         cs.showGCDSwipe = false       -- Hide GCD (what most users wanted)
         cs.showCooldownSwipe = true   -- Show actual cooldowns
-    else
-        -- Fresh or never-hidden: show all
+    elseif cs.showBuffSwipe == nil then
         cs.showBuffSwipe = true
         cs.showGCDSwipe = true
         cs.showCooldownSwipe = true
     end
 
-    -- Clean up legacy keys
     cs.hideEssential = nil
     cs.hideUtility = nil
     if profile.cooldownManager then
         profile.cooldownManager.hideSwipe = nil
     end
-
-    cs.migratedToV2 = true
 end
 
 -- Migrate legacy top-level castBar/targetCastBar/focusCastBar to quiUnitFrames.*.castbar
@@ -392,91 +429,25 @@ end
 -- 2. Legacy profile detection & normalization
 ---------------------------------------------------------------------------
 
-local function LooksLikeLegacyMainlineProfile(profile)
-    if type(profile) ~= "table" then
-        return false
-    end
-
-    local general = profile.general
-    local hasNextVersionMarkers = false
-    if type(general) == "table" then
-        if general.addEditModeButton ~= nil
-            or general.objectiveTrackerClickThrough ~= nil
-            or general.skinAuctionHouse ~= nil
-            or general.skinCraftingOrders ~= nil
-            or general.skinProfessions ~= nil
-            or general.overrideSCTFont ~= nil
-            or general.craftingOrderExpansionFilter ~= nil
-            or general.themePreset ~= nil
-        then
-            hasNextVersionMarkers = true
-        end
-    end
-    if profile.actionBarsVisibility ~= nil
-        or profile.chatVisibility ~= nil
-        or profile.cooldownHighlighter ~= nil
-        or profile.preyTracker ~= nil
-        or profile.themePreset ~= nil
-    then
-        hasNextVersionMarkers = true
-    end
-
-    if hasNextVersionMarkers then
-        return false
-    end
-
-    if type(general) == "table" then
-        if general.skinLootWindow ~= nil
-            or general.skinLootUnderMouse ~= nil
-            or general.skinLootHistory ~= nil
-            or general.skinRollFrames ~= nil
-            or general.skinRollSpacing ~= nil
-        then
+-- Explicit legacy-2.55 detection.
+--
+-- We no longer shape-sniff a dozen heuristics. The 2.55-era anchoring system
+-- stored positions with an `enabled` flag on each `frameAnchoring` entry;
+-- 3.0+ dropped that flag in favor of parent-chain entries. Presence of any
+-- `frameAnchoring.<key>.enabled` value is a reliable 2.55 marker.
+--
+-- Called exactly once, from the v10 schema gate in RunOnProfile, for profiles
+-- whose schema version is below v10. Fresh installs and 3.0+ upgraders return
+-- false here and skip the legacy anchor rebuild entirely.
+local function IsLegacy255Profile(profile)
+    if type(profile) ~= "table" then return false end
+    local fa = profile.frameAnchoring
+    if type(fa) ~= "table" then return false end
+    for _, entry in pairs(fa) do
+        if type(entry) == "table" and entry.enabled ~= nil then
             return true
         end
     end
-
-    if profile.unitFrames ~= nil
-        or profile.castBar ~= nil
-        or profile.targetCastBar ~= nil
-        or profile.focusCastBar ~= nil
-    then
-        return true
-    end
-
-    local gf = profile.quiGroupFrames
-    if type(gf) == "table" and (gf.unifiedPosition ~= nil or gf.partyLayout ~= nil or gf.raidLayout ~= nil) then
-        return true
-    end
-
-    local mm = profile.minimap
-    if type(mm) == "table" and (mm.hideMicroMenu ~= nil or mm.hideBagBar ~= nil) then
-        return true
-    end
-
-    local cdmVis = profile.cdmVisibility
-    local ufVis = profile.unitframesVisibility
-    for _, vis in ipairs({ cdmVis, ufVis }) do
-        if type(vis) == "table" and (
-            vis.hideOutOfCombat ~= nil
-            or vis.hideWhenNotInGroup ~= nil
-            or vis.hideWhenNotInInstance ~= nil
-        ) then
-            return true
-        end
-    end
-
-    if type(profile.ncdm) == "table" and profile.ncdm.engine ~= nil then
-        return true
-    end
-    if type(profile.actionBars) == "table" and profile.actionBars.engine == "classic" then
-        return true
-    end
-
-    if type(profile.frameAnchoring) == "table" or profile._anchoringMigrationVersion ~= nil then
-        return true
-    end
-
     return false
 end
 
@@ -545,8 +516,11 @@ local function PruneLegacyPlaceholderAnchors(profile)
     end
 end
 
+-- Gated externally by schema version v10 (only runs once, only for legacy
+-- 2.55 mainline profiles). Any stale `_legacyMainlineAnchorsRebuilt` sentinel
+-- on 3.1.x profiles is scrubbed at the bottom of this function.
 local function ResetLegacyAnchorsForRebuild(profile)
-    if type(profile) ~= "table" or profile._legacyMainlineAnchorsRebuilt then
+    if type(profile) ~= "table" then
         return
     end
     if type(profile.frameAnchoring) ~= "table" then
@@ -636,7 +610,7 @@ local function ResetLegacyAnchorsForRebuild(profile)
     end
 
     profile._anchoringMigrationVersion = nil
-    profile._legacyMainlineAnchorsRebuilt = true
+    profile._legacyMainlineAnchorsRebuilt = nil
 end
 
 local LEGACY_MAINLINE_EDIT_MODE_BARS = {
@@ -826,6 +800,12 @@ local function MigrateLegacyLootSettings(profile)
     end
 end
 
+-- Gated externally by schema version v13. This is a one-time default flip:
+-- users who never touched `showCraftingOrder` get it set to true. Users who
+-- explicitly set it to false must NOT have their choice overwritten. We
+-- detect "untouched" as `== nil` (AceDB proxy returns nil for keys the user
+-- never set, because there's no default for this key). Scrubs any stale
+-- sentinel from 3.1.x profiles.
 local function EnsureCraftingOrderIndicator(profile)
     if not profile then
         return
@@ -833,9 +813,9 @@ local function EnsureCraftingOrderIndicator(profile)
     if not profile.minimap then
         profile.minimap = {}
     end
-    if profile.minimap._showCraftingOrderMigrated ~= true then
+    profile.minimap._showCraftingOrderMigrated = nil
+    if profile.minimap.showCraftingOrder == nil then
         profile.minimap.showCraftingOrder = true
-        profile.minimap._showCraftingOrderMigrated = true
     end
 end
 
@@ -1024,8 +1004,15 @@ end
 ---------------------------------------------------------------------------
 -- 4. Anchoring migrations (depend on data being in final locations)
 ---------------------------------------------------------------------------
+--
+-- Split into three separate functions, one per schema version (v19/v20/v21).
+-- Each function is gated externally by the linear schema version in
+-- RunOnProfile; the old `profile._anchoringMigrationVersion` sentinel is
+-- scrubbed at the top of MigrateAnchoringV1 on first upgrade.
+--
+-- The Ensure/Read helpers are shared via closure-capture factories.
 
-local function MigrateAnchoring(profile)
+local function MakeAnchoringHelpers(profile)
     -- Lazy accessor: only materializes profile.frameAnchoring on first write.
     -- Fresh profiles with no legacy source data never trigger the creation,
     -- so they don't get an empty shadow table that would mask AceDB defaults.
@@ -1041,8 +1028,16 @@ local function MigrateAnchoring(profile)
     local function ReadFa()
         return profile.frameAnchoring
     end
+    return EnsureFa, ReadFa
+end
 
-    if not profile._anchoringMigrationVersion then
+local function MigrateAnchoringV1(profile)
+    -- Scrub legacy sentinel on first upgrade.
+    profile._anchoringMigrationVersion = nil
+
+    local EnsureFa, ReadFa = MakeAnchoringHelpers(profile)
+
+    do
         -- Detect 2.55-style profile: has frameAnchoring entries with the
         -- legacy `enabled` flag. In 2.55, positions were stored as absolute
         -- screen offsets (parent=screen, CENTER) regardless of the frame's
@@ -1295,10 +1290,13 @@ local function MigrateAnchoring(profile)
             end
         end
 
-        profile._anchoringMigrationVersion = 1
     end
+end
 
-    if (profile._anchoringMigrationVersion or 0) < 2 then
+local function MigrateAnchoringV2(profile)
+    local EnsureFa, ReadFa = MakeAnchoringHelpers(profile)
+
+    do
         local mpt = profile.mplusTimer and profile.mplusTimer.position
         if mpt then
             local currentFa = ReadFa()
@@ -1356,11 +1354,13 @@ local function MigrateAnchoring(profile)
         MigrateOffsets(profile.focusCastAlert, "focusCastAlert")
         MigrateOffsets(profile.petCombatWarning, "petWarning")
         MigrateOffsets(profile.raidBuffs, "missingRaidBuffs")
-
-        profile._anchoringMigrationVersion = 2
     end
+end
 
-    if (profile._anchoringMigrationVersion or 0) < 3 then
+local function MigrateAnchoringV3(profile)
+    local EnsureFa, ReadFa = MakeAnchoringHelpers(profile)
+
+    do
         -- Legacy position tables are UIParent-center-based absolute coords.
         -- Pin parent="screen" explicitly so copyDefaults can't later fill
         -- in a chain-rooted default parent and misinterpret the offsets.
@@ -1454,15 +1454,18 @@ local function MigrateAnchoring(profile)
                 end
             end
         end
-
-        profile._anchoringMigrationVersion = 3
     end
 end
 
+-- Gated externally by schema version v22. The data-shape guard is "does
+-- ncdm.<legacy key> still exist?" — if not, the loop below is a no-op.
 local function MigrateNCDMContainers(profile)
-    if not profile.ncdm or profile.ncdm._containersMigrated then
+    if not profile or not profile.ncdm then
         return
     end
+
+    -- Scrub stale sentinel from 3.1.x profiles.
+    profile.ncdm._containersMigrated = nil
 
     if not profile.ncdm.containers then
         profile.ncdm.containers = {}
@@ -1481,16 +1484,20 @@ local function MigrateNCDMContainers(profile)
         trackedBar = "auraBar",
     }
 
+    -- Only migrate each key when the destination container is absent.
+    -- Profiles that have already been through this migration once (3.0 / 3.1.x
+    -- users) already have `containers[key]` populated and may have modified
+    -- it since; clobbering it from the stale `ncdm[key]` would lose user
+    -- changes. The source `ncdm[key]` is intentionally left in place to
+    -- stay compatible with any module still reading from the old location.
     for _, key in ipairs({ "essential", "utility", "buff", "trackedBar" }) do
-        if profile.ncdm[key] then
+        if profile.ncdm[key] and profile.ncdm.containers[key] == nil then
             profile.ncdm.containers[key] = CloneValue(profile.ncdm[key])
             profile.ncdm.containers[key].builtIn = true
             profile.ncdm.containers[key].containerType = containerTypes[key]
             profile.ncdm.containers[key].name = containerNames[key]
         end
     end
-
-    profile.ncdm._containersMigrated = true
 end
 
 ---------------------------------------------------------------------------
@@ -1508,80 +1515,163 @@ end
 -- LEGACY255_DISCARD_ABSOLUTE handling still nils the broken entries;
 -- AceDB defaults then fill in the replacements via metatable.
 
+---------------------------------------------------------------------------
+-- Snapshot / restore
+---------------------------------------------------------------------------
+-- Before the migration pipeline mutates a profile, we save a deep copy of
+-- the profile under `_migrationBackup`. If a migration corrupts data, the
+-- user can run `/qui migration restore` to roll back to the pre-migration
+-- state. One backup per profile, overwritten on each successful run where
+-- migrations actually executed (version < CURRENT).
+--
+-- The backup excludes `_migrationBackup` itself to prevent recursive growth.
+
+local BACKUP_KEY = "_migrationBackup"
+
+local function DeepCloneExcluding(value, excludeKey)
+    if type(value) ~= "table" then return value end
+    local copy = {}
+    for k, v in pairs(value) do
+        if k ~= excludeKey then
+            copy[k] = DeepCloneExcluding(v, excludeKey)
+        end
+    end
+    return copy
+end
+
+local function CreateBackup(profile, fromVersion)
+    profile[BACKUP_KEY] = {
+        fromVersion = fromVersion or 0,
+        toVersion   = CURRENT_SCHEMA_VERSION,
+        savedAt     = (time and time()) or 0,
+        snapshot    = DeepCloneExcluding(profile, BACKUP_KEY),
+    }
+end
+
+-- Restore the active profile from its most recent migration backup. Wipes
+-- all current profile keys (except the backup itself) and copies the
+-- snapshot in. Returns (ok, messageOrBackupInfo).
+function Migrations.Restore(profile)
+    if type(profile) ~= "table" then
+        return false, "no profile"
+    end
+    local backup = profile[BACKUP_KEY]
+    if type(backup) ~= "table" or type(backup.snapshot) ~= "table" then
+        return false, "no migration backup available for this profile"
+    end
+
+    for k in pairs(profile) do
+        if k ~= BACKUP_KEY then
+            profile[k] = nil
+        end
+    end
+    for k, v in pairs(backup.snapshot) do
+        profile[k] = DeepCloneExcluding(v, BACKUP_KEY)
+    end
+    -- After restore, the profile is back at its pre-migration version. The
+    -- backup itself is preserved so the user can restore again if needed.
+    return true, backup
+end
+
+function Migrations.GetBackupInfo(profile)
+    if type(profile) ~= "table" then return nil end
+    return profile[BACKUP_KEY]
+end
+
+---------------------------------------------------------------------------
+-- Entry point: Run all profile migrations
+---------------------------------------------------------------------------
+--
 -- Run the full migration pipeline against a single raw profile table.
 -- Accepts either db.profile (AceDB proxy) or a raw db.sv.profiles[name]
 -- entry. Operates only on explicit user data — never relies on AceDB
 -- default-merging, so it's safe to call against raw tables that have
 -- never been touched by AceDB.
+--
+-- Each migration is gated by a linear schema version. A profile's
+-- `_schemaVersion` records the last version it was migrated through;
+-- on upgrade, gates v(stored+1)..v(CURRENT) run in order. Each migration
+-- function retains an internal data-shape guard so that running it twice
+-- (e.g. on a profile already at CURRENT that re-enters the pipeline from
+-- a profile import) is a no-op.
+--
+-- Historical note: prior to the rewrite, CURRENT_SCHEMA_VERSION was a
+-- constant `1` that never matched the actual number of migrations added
+-- over time. Profiles from the 3.0 – 3.1.4 era all have `_schemaVersion=1`
+-- stamped regardless of which migrations had actually run; they are
+-- treated as v1 here and all post-v1 gates re-run against them, relying
+-- on each migration's internal shape guards to no-op on already-migrated
+-- data.
 function Migrations.RunOnProfile(profile)
     if type(profile) ~= "table" then return false end
 
-    -- NOTE: The `_cdmFaCleanupVersion` migration used to live here. It
-    -- nil'd `frameAnchoring.cdmEssential/cdmUtility/buffIcon/buffBar`
-    -- entries from every profile on the theory that CDM containers should
-    -- never have frameAnchoring entries (because they're positioned by
-    -- the CDM module via `ncdm.<key>.pos`). That theory was wrong:
-    --
-    --   * The teleport bug that motivated the cleanup was `GetFrameDB`
-    --     write-on-read creating ghost entries whenever a CDM settings
-    --     panel opened. Fixed at the source: `GetFrameDB` is now a lazy
-    --     proxy, and `__newindex` skips writes that match the default.
-    --
-    --   * The hide/teleport bugs in the `hideWithParent` / `keepInPlace`
-    --     branches of `ApplyFrameAnchor` when `parent="screen"` were
-    --     making CDM containers with legitimate 3.0 FA entries disappear
-    --     or jump to screen center. Fixed by gating both branches on
-    --     `not parentIsSentinel` — they now fall through to normal
-    --     chain-walk positioning for screen/disabled parents.
-    --
-    --   * The CDM module's `QUI_HasFrameAnchor(key)` cooperation check
-    --     (cdm_containers.lua:1752, buffbar.lua:177/285) already makes
-    --     the CDM module yield to the anchoring system when an FA entry
-    --     exists. So CDM containers with FA entries were always the
-    --     anchoring system's responsibility — nilling them broke that
-    --     cooperation and made user settings panels become no-ops.
-    --
-    -- Removing the cleanup lets 3.0 users keep their legitimate CDM
-    -- container anchor configurations. Fresh users don't get FA entries
-    -- for these keys (they're absent from defaults.lua), and layout mode
-    -- drags materialize them on demand via the lazy proxy.
+    local stored = tonumber(profile._schemaVersion) or 0
 
-    -- 1. Data format migrations (restructure raw data first)
-    MigrateDatatextSlots(profile.datatext)
-    MigratePerSlotSettings(profile.datatext)
-    MigrateMasterTextColors(profile.quiUnitFrames and profile.quiUnitFrames.general)
-    MigrateChatEditBox(profile.chat)
-    MigrateCooldownSwipeV2(profile)
-    MigrateCastBars(profile)
-    MigrateUnitFrames(profile)
-    MigrateSelfFirst(profile)
-    CleanOrphanKeys(profile)
+    -- ResetCastbarPreviewModes is a runtime sanity reset, NOT a migration —
+    -- it clears the transient previewMode flag on every load so a preview
+    -- left enabled in a prior session never persists. Always runs.
+    ResetCastbarPreviewModes(profile)
 
-    -- 2. Legacy profile detection & normalization
-    local isLegacy = LooksLikeLegacyMainlineProfile(profile)
-    if isLegacy then
+    if stored >= CURRENT_SCHEMA_VERSION then
+        return false  -- Nothing to do. Backup (if any) remains untouched.
+    end
+
+    -- Skip the backup for empty/fresh profiles — there's nothing worth
+    -- rolling back to. A profile is "fresh" if it has no keys other than
+    -- internal version stamps.
+    local hasUserData = false
+    for k in pairs(profile) do
+        if k ~= "_schemaVersion" and k ~= "_defaultsVersion" and k ~= BACKUP_KEY then
+            hasUserData = true
+            break
+        end
+    end
+
+    -- Snapshot BEFORE any gate runs, so a failed/corrupt migration can
+    -- always be rolled back to the pre-pipeline state.
+    if hasUserData then
+        CreateBackup(profile, stored)
+    end
+
+    -- === Data format migrations (restructure raw data first) ===
+    if stored < 2  then MigrateDatatextSlots(profile.datatext) end
+    if stored < 3  then MigratePerSlotSettings(profile.datatext) end
+    if stored < 4  then MigrateMasterTextColors(profile.quiUnitFrames and profile.quiUnitFrames.general) end
+    if stored < 5  then MigrateChatEditBox(profile.chat) end
+    if stored < 6  then MigrateCooldownSwipeV2(profile) end
+    if stored < 7  then MigrateCastBars(profile) end
+    if stored < 8  then MigrateUnitFrames(profile) end
+    if stored < 9  then
+        MigrateSelfFirst(profile)
+        CleanOrphanKeys(profile)
+    end
+
+    -- === Legacy 2.55 mainline normalization (explicit marker check) ===
+    if stored < 10 and IsLegacy255Profile(profile) then
         PruneLegacyPlaceholderAnchors(profile)
         ResetLegacyAnchorsForRebuild(profile)
         NormalizeLegacyActionBarLayouts(profile)
     end
 
-    -- 3. Feature migrations
-    ResetCastbarPreviewModes(profile)
-    EnsureThemeStorage(profile)
-    MigrateLegacyLootSettings(profile)
-    EnsureCraftingOrderIndicator(profile)
-    MigrateToShowLogic(profile.cdmVisibility)
-    MigrateToShowLogic(profile.unitframesVisibility)
-    MigrateGroupFrameContainers(profile)
-    NormalizeAuraIndicators(profile)
-    NormalizeEngines(profile)
-    NormalizeMinimapSettings(profile)
+    -- === Feature migrations ===
+    if stored < 11 then EnsureThemeStorage(profile) end
+    if stored < 12 then MigrateLegacyLootSettings(profile) end
+    if stored < 13 then EnsureCraftingOrderIndicator(profile) end
+    if stored < 14 then
+        MigrateToShowLogic(profile.cdmVisibility)
+        MigrateToShowLogic(profile.unitframesVisibility)
+    end
+    if stored < 15 then MigrateGroupFrameContainers(profile) end
+    if stored < 16 then NormalizeAuraIndicators(profile) end
+    if stored < 17 then NormalizeEngines(profile) end
+    if stored < 18 then NormalizeMinimapSettings(profile) end
 
-    -- 4. Anchoring (depends on data being in final locations)
-    MigrateAnchoring(profile)
-    MigrateNCDMContainers(profile)
+    -- === Anchoring (depends on data being in final locations) ===
+    if stored < 19 then MigrateAnchoringV1(profile) end
+    if stored < 20 then MigrateAnchoringV2(profile) end
+    if stored < 21 then MigrateAnchoringV3(profile) end
+    if stored < 22 then MigrateNCDMContainers(profile) end
 
-    -- 5. Stamp schema version
     profile._schemaVersion = CURRENT_SCHEMA_VERSION
     return true
 end

@@ -126,6 +126,51 @@ function QUI:SlashCommandOpen(input)
             print("|cff60A5FAQUI:|r CDM Spell Composer not available. Enable CDM first.")
         end
         return
+    elseif input and input:match("^migration") then
+        -- /qui migration          → status (current schema version + backup info)
+        -- /qui migration status   → same
+        -- /qui migration restore  → roll back to pre-migration snapshot
+        local sub = input:match("^migration%s+(%S+)") or "status"
+        local Mig = self.Migrations
+        local profile = self.db and self.db.profile
+        if not (Mig and profile) then
+            print("|cff60A5FAQUI:|r Migration system not available.")
+            return
+        end
+        if sub == "status" then
+            local v = tonumber(profile._schemaVersion) or 0
+            print(("|cff60A5FAQUI migration:|r current profile schema version = v%d"):format(v))
+            local backup = Mig.GetBackupInfo and Mig.GetBackupInfo(profile)
+            if backup then
+                local savedAtStr = "unknown"
+                if type(backup.savedAt) == "number" and backup.savedAt > 0 then
+                    savedAtStr = date("%Y-%m-%d %H:%M:%S", backup.savedAt)
+                end
+                print(("  backup: v%s → v%s (saved %s)"):format(
+                    tostring(backup.fromVersion or "?"),
+                    tostring(backup.toVersion or "?"),
+                    savedAtStr))
+                print("  run |cFFFFFF00/qui migration restore|r to roll back this profile.")
+            else
+                print("  no migration backup on file for this profile.")
+            end
+        elseif sub == "restore" then
+            if not Mig.Restore then
+                print("|cff60A5FAQUI:|r Restore not supported by this build.")
+                return
+            end
+            local ok, info = Mig.Restore(profile)
+            if ok then
+                print(("|cff60A5FAQUI migration:|r restored profile to pre-migration state (v%s). Reloading..."):format(
+                    tostring(info and info.fromVersion or "?")))
+                QUI:SafeReload()
+            else
+                print("|cff60A5FAQUI migration:|r " .. tostring(info or "restore failed"))
+            end
+        else
+            print("|cff60A5FAQUI:|r unknown migration subcommand. Use: status, restore")
+        end
+        return
     elseif input and input == "tooltipdbg" then
         local isS = issecretvalue
         local count = 0
