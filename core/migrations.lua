@@ -1516,61 +1516,35 @@ end
 function Migrations.RunOnProfile(profile)
     if type(profile) ~= "table" then return false end
 
-    -- Cleanup: delete CDM container FA entries from existing profiles.
-    -- The CDM module owns positioning via ncdm.pos; FA entries for CDM
-    -- containers are ignored at the apply layer (ApplyFrameAnchor early-
-    -- returns for them), but we still want to remove them from the SV to
-    -- keep it clean.
+    -- NOTE: The `_cdmFaCleanupVersion` migration used to live here. It
+    -- nil'd `frameAnchoring.cdmEssential/cdmUtility/buffIcon/buffBar`
+    -- entries from every profile on the theory that CDM containers should
+    -- never have frameAnchoring entries (because they're positioned by
+    -- the CDM module via `ncdm.<key>.pos`). That theory was wrong:
     --
-    -- BEFORE nilling, backfill ncdm.<key>.pos from any screen-rooted FA
-    -- entry. This rescues 3.0 upgraders whose CDM container position
-    -- lived only in frameAnchoring (they never opened layout mode, so
-    -- SaveContainerPosition never wrote ncdm.pos). Chain-rooted entries
-    -- (parent = "primaryPower" etc.) can't be resolved at migration time;
-    -- those are skipped and the user will need to re-drag in layout mode.
+    --   * The teleport bug that motivated the cleanup was `GetFrameDB`
+    --     write-on-read creating ghost entries whenever a CDM settings
+    --     panel opened. Fixed at the source: `GetFrameDB` is now a lazy
+    --     proxy, and `__newindex` skips writes that match the default.
     --
-    -- v1 (initial cleanup) ran once per profile. v2 re-runs to purge any
-    -- ghost entries created by the pre-fix GetFrameDB write-on-read bug,
-    -- and to add the ncdm.pos backfill that v1 was missing.
-    if (profile._cdmFaCleanupVersion or 0) < 2 then
-        local fa = profile.frameAnchoring
-        if type(fa) == "table" then
-            local FA_TO_NCDM = {
-                cdmEssential = "essential",
-                cdmUtility   = "utility",
-                buffIcon     = "buff",
-                buffBar      = "trackedBar",
-            }
-            for faKey, ncdmKey in pairs(FA_TO_NCDM) do
-                local entry = fa[faKey]
-                if type(entry) == "table" then
-                    local parent = entry.parent or "screen"
-                    if parent == "screen" or parent == "disabled" then
-                        -- Screen-rooted: copy offsets to ncdm.<key>.pos
-                        -- (only if ncdm.pos doesn't already have a value).
-                        if type(profile.ncdm) ~= "table" then
-                            profile.ncdm = {}
-                        end
-                        if type(profile.ncdm[ncdmKey]) ~= "table" then
-                            profile.ncdm[ncdmKey] = {}
-                        end
-                        local tracker = profile.ncdm[ncdmKey]
-                        if type(tracker.pos) ~= "table"
-                            or tracker.pos.ox == nil
-                            or tracker.pos.oy == nil then
-                            tracker.pos = {
-                                ox = entry.offsetX or 0,
-                                oy = entry.offsetY or 0,
-                            }
-                        end
-                    end
-                    -- Nil the FA entry regardless of parent type.
-                    fa[faKey] = nil
-                end
-            end
-        end
-        profile._cdmFaCleanupVersion = 2
-    end
+    --   * The hide/teleport bugs in the `hideWithParent` / `keepInPlace`
+    --     branches of `ApplyFrameAnchor` when `parent="screen"` were
+    --     making CDM containers with legitimate 3.0 FA entries disappear
+    --     or jump to screen center. Fixed by gating both branches on
+    --     `not parentIsSentinel` — they now fall through to normal
+    --     chain-walk positioning for screen/disabled parents.
+    --
+    --   * The CDM module's `QUI_HasFrameAnchor(key)` cooperation check
+    --     (cdm_containers.lua:1752, buffbar.lua:177/285) already makes
+    --     the CDM module yield to the anchoring system when an FA entry
+    --     exists. So CDM containers with FA entries were always the
+    --     anchoring system's responsibility — nilling them broke that
+    --     cooperation and made user settings panels become no-ops.
+    --
+    -- Removing the cleanup lets 3.0 users keep their legitimate CDM
+    -- container anchor configurations. Fresh users don't get FA entries
+    -- for these keys (they're absent from defaults.lua), and layout mode
+    -- drags materialize them on demand via the lazy proxy.
 
     -- 1. Data format migrations (restructure raw data first)
     MigrateDatatextSlots(profile.datatext)
