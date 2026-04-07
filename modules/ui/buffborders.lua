@@ -1321,12 +1321,32 @@ end
 ---------------------------------------------------------------------------
 -- Derive the growth-corner anchor for a buff/debuff container based on the
 -- user's grow direction settings, and write it to the frame anchoring DB
--- entry as `growAnchor`. The apply path (ApplyFrameAnchor) reads growAnchor
--- to perform CENTER → corner conversion at apply time, so the icon-grow
--- corner stays fixed even as the container resizes.
+-- entry.
+--
+-- Two cases depending on the entry's current format:
+--
+-- 1) Legacy CENTER format (point=CENTER, relative=CENTER): just set the
+--    growAnchor metadata field. The apply path's CENTER→corner self-heal
+--    branch will pick it up on the next apply, convert to corner format,
+--    and write back.
+--
+-- 2) New corner format (point=<corner>, relative=<corner>): the stored
+--    offsets are relative to the OLD corner. Changing grow direction
+--    means changing which corner the frame anchors at. To preserve the
+--    visual position of the growth origin (i.e. the first icon), we
+--    recompute the offsets so the NEW corner lands at the same screen
+--    position the OLD corner was at:
+--      parent.newCorner + (newX, newY) = parent.oldCorner + (oldX, oldY)
+--      newX = oldX + (FRAC_X[oldCorner] - FRAC_X[newCorner]) * pw
+--      newY = oldY + (FRAC_Y[oldCorner] - FRAC_Y[newCorner]) * ph
+--    Formula is independent of container size — the growth-anchor corner
+--    stays at exactly the same screen point.
 --
 -- Called from FullRefresh whenever the user toggles a grow direction
 -- checkbox, and from Init so the field is present on first load.
+local GROW_ANCHOR_FRAC_X = { TOPLEFT = 0, TOPRIGHT = 1, BOTTOMLEFT = 0, BOTTOMRIGHT = 1 }
+local GROW_ANCHOR_FRAC_Y = { TOPLEFT = 1, TOPRIGHT = 1, BOTTOMLEFT = 0, BOTTOMRIGHT = 0 }
+
 local function UpdateGrowAnchor(faKey)
     if not faKey then return end
     local profile = QUI and QUI.db and QUI.db.profile
@@ -1345,11 +1365,11 @@ local function UpdateGrowAnchor(faKey)
         return
     end
 
-    local corner
+    local newCorner
     if growUp then
-        corner = growLeft and "BOTTOMRIGHT" or "BOTTOMLEFT"
+        newCorner = growLeft and "BOTTOMRIGHT" or "BOTTOMLEFT"
     else
-        corner = growLeft and "TOPRIGHT" or "TOPLEFT"
+        newCorner = growLeft and "TOPRIGHT" or "TOPLEFT"
     end
 
     if not profile.frameAnchoring then
@@ -1359,11 +1379,35 @@ local function UpdateGrowAnchor(faKey)
         profile.frameAnchoring[faKey] = {}
     end
     local entry = profile.frameAnchoring[faKey]
-    if entry.growAnchor == corner then return end  -- no change, skip apply
-    entry.growAnchor = corner
+    local oldCorner = entry.growAnchor
 
-    -- Re-apply so the new corner takes effect immediately. ApplyFrameAnchor
-    -- reads growAnchor and re-derives the SetPoint with the current size.
+    if oldCorner == newCorner then return end  -- no change, skip
+
+    -- Detect entry format: new corner format has point==relative==corner.
+    local isNewCornerFormat = entry.point == oldCorner
+        and entry.relative == oldCorner
+        and GROW_ANCHOR_FRAC_X[oldCorner] ~= nil
+
+    if isNewCornerFormat and oldCorner and entry.parent == "disabled" then
+        -- Recompute the corner offsets so the NEW corner lands at the
+        -- same screen point the OLD corner was at. This preserves the
+        -- position of the first icon (the growth origin).
+        local pw = UIParent:GetWidth()
+        local ph = UIParent:GetHeight()
+        local dX = (GROW_ANCHOR_FRAC_X[oldCorner] - GROW_ANCHOR_FRAC_X[newCorner]) * pw
+        local dY = (GROW_ANCHOR_FRAC_Y[oldCorner] - GROW_ANCHOR_FRAC_Y[newCorner]) * ph
+        entry.offsetX = math.floor((entry.offsetX or 0) + dX + 0.5)
+        entry.offsetY = math.floor((entry.offsetY or 0) + dY + 0.5)
+        entry.point = newCorner
+        entry.relative = newCorner
+    end
+    -- For legacy CENTER format: don't touch point/relative/offsets. The
+    -- apply path's self-heal will convert on next apply using the current
+    -- container size.
+
+    entry.growAnchor = newCorner
+
+    -- Re-apply so the new anchor takes effect immediately.
     if _G.QUI_ApplyFrameAnchor then
         _G.QUI_ApplyFrameAnchor(faKey)
     end

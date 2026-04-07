@@ -1101,13 +1101,76 @@ local function SavePendingPosition(key, point, relPoint, offsetX, offsetY, ancho
                 end
             else
                 -- Free-position fall-through: parent is nil/screen/disabled,
-                -- or there's no real chain to recompute against. Reset to
-                -- CENTER/CENTER so the drag offsets match the coordinate
-                -- space they were measured in.
-                fa[key].point = "CENTER"
-                fa[key].relative = "CENTER"
-                fa[key].offsetX = offsetX
-                fa[key].offsetY = offsetY
+                -- or there's no real chain to recompute against.
+                --
+                -- Dynamic-size buff-borders containers (buffFrame/debuffFrame)
+                -- get stored as CORNER-anchored directly, using the growth
+                -- corner derived from buffBorders config. This decouples
+                -- the stored position from the container's current size —
+                -- apply time just SetPoints with the stored corner offsets,
+                -- no size-dependent math.
+                --
+                -- NOTE: this is NOT applied to CDM containers (buffIcon,
+                -- buffBar, cdmEssential, cdmUtility). Those are owned by
+                -- the CDM module and positioned via `ncdm.<key>.pos` —
+                -- their frameAnchoring entries are actively stripped by
+                -- CDM_OWNED_KEYS in the migration layer. They also support
+                -- a different growth model (CENTERED_HORIZONTAL / auraBar
+                -- growUp / etc.) that doesn't fit the four-corner scheme.
+                local isGrowAnchorKey = key == "buffFrame" or key == "debuffFrame"
+                local growCorner
+                if isGrowAnchorKey then
+                    local profile = QUI and QUI.db and QUI.db.profile
+                    local bbDB = profile and profile.buffBorders
+                    if bbDB then
+                        local growLeft, growUp
+                        if key == "buffFrame" then
+                            growLeft = bbDB.buffGrowLeft
+                            growUp   = bbDB.buffGrowUp
+                        else
+                            growLeft = bbDB.debuffGrowLeft
+                            growUp   = bbDB.debuffGrowUp
+                        end
+                        if growUp then
+                            growCorner = growLeft and "BOTTOMRIGHT" or "BOTTOMLEFT"
+                        else
+                            growCorner = growLeft and "TOPRIGHT" or "TOPLEFT"
+                        end
+                    end
+                end
+
+                if growCorner then
+                    -- Convert the drag handle's CENTER offset to a corner
+                    -- offset using the live container's current size. This
+                    -- one-time conversion at SAVE time means the apply path
+                    -- can use the stored values directly — no recomputation.
+                    local def = QUI_LayoutMode._elements[key]
+                    local frame = def and def.frame and _G[def.frame]
+                    local fw = frame and (frame._naturalW or (frame.GetWidth and frame:GetWidth())) or 0
+                    local fh = frame and (frame._naturalH or (frame.GetHeight and frame:GetHeight())) or 0
+                    if fw < 4 then fw = 32 end
+                    if fh < 4 then fh = 32 end
+                    local pw = UIParent:GetWidth()
+                    local ph = UIParent:GetHeight()
+                    local FRAC_X = { TOPLEFT = 0, TOPRIGHT = 1, BOTTOMLEFT = 0, BOTTOMRIGHT = 1 }
+                    local FRAC_Y = { TOPLEFT = 1, TOPRIGHT = 1, BOTTOMLEFT = 0, BOTTOMRIGHT = 0 }
+                    local cornerX = (offsetX or 0) + (FRAC_X[growCorner] - 0.5) * (fw - pw)
+                    local cornerY = (offsetY or 0) + (FRAC_Y[growCorner] - 0.5) * (fh - ph)
+                    fa[key].point = growCorner
+                    fa[key].relative = growCorner
+                    fa[key].offsetX = math.floor(cornerX + 0.5)
+                    fa[key].offsetY = math.floor(cornerY + 0.5)
+                    fa[key].growAnchor = growCorner
+                else
+                    -- Normal free-position frame: CENTER-anchored, drag
+                    -- offsets used verbatim. Reset point/relative to CENTER
+                    -- so the offsets are interpreted in the same coordinate
+                    -- space they were measured in.
+                    fa[key].point = "CENTER"
+                    fa[key].relative = "CENTER"
+                    fa[key].offsetX = offsetX
+                    fa[key].offsetY = offsetY
+                end
             end
         end
     end

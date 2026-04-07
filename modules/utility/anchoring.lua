@@ -2353,39 +2353,81 @@ function QUI_Anchoring:ApplyFrameAnchor(key, settings)
     -- Forcing the conversion would rewrite the user's `relative` from
     -- TOPLEFT to TOPRIGHT (or whatever growAnchor is) and visually break
     -- the chain anchor.
+    -- growAnchor legacy CENTER→corner self-heal path.
+    --
+    -- As of 3.1.5 Phase 2, SavePendingPosition writes buff/debuff entries in
+    -- CORNER format directly (point=corner, relative=corner, offsets in
+    -- corner space). The normal apply path below handles those entries
+    -- with zero special-case code — it just SetPoints with the stored
+    -- values.
+    --
+    -- For LEGACY entries still in CENTER format (e.g. profiles that ran
+    -- through v25's "normalize to CENTER/CENTER" repair, or profiles from
+    -- before Phase 2 landed), this branch converts the CENTER offsets to
+    -- corner offsets at apply time AND writes the corner format back to
+    -- the DB. After the self-heal, the entry is in the new format and
+    -- this branch will never fire for it again.
+    --
+    -- Only fires when:
+    --   * The entry is CENTER/CENTER (or has no explicit point/relative)
+    --   * growAnchor is set to a valid corner (from UpdateGrowAnchor)
+    --   * The key is a buff/debuff/auraBar container
+    --   * The container has a REAL size (not the 1×1 pre-LayoutIcons state).
+    --     If the container is still at its initial 1×1, we SetPoint with
+    --     a reasonable fallback position but DO NOT write back — we wait
+    --     until LayoutIcons runs with real icons and re-triggers an apply.
     local entryPoint    = settings.point or "CENTER"
     local entryRelative = settings.relative or "CENTER"
-    local isFreePosition = entryPoint == "CENTER" and entryRelative == "CENTER"
-    if isFreePosition
+    local isLegacyCenter = entryPoint == "CENTER" and entryRelative == "CENTER"
+    if isLegacyCenter
         and settings.growAnchor and CORNER_POINTS and CORNER_POINTS[settings.growAnchor]
-        and (key == "buffFrame" or key == "debuffFrame" or key == "buffBar" or key == "buffIcon")
+        and (key == "buffFrame" or key == "debuffFrame")
     then
         local corner = settings.growAnchor
-        local fw = (resolved.GetWidth and resolved:GetWidth()) or 0
-        local fh = (resolved.GetHeight and resolved:GetHeight()) or 0
-        -- Container size resolution (in priority order):
-        --   1. The frame's actual current size (real, post-LayoutIcons)
-        --   2. The cached natural size from the most recent LayoutIcons
-        --      pass — survives across Init/PEW/SetSize when the live frame
-        --      is briefly 1x1 again
-        --   3. A sane minimum (32x32) so the corner math at least produces
-        --      an on-screen value, which gets corrected on the next call
-        --      to ApplyFrameAnchor (LayoutIcons triggers one when it
-        --      finishes positioning icons).
+        local fwRaw = (resolved.GetWidth and resolved:GetWidth()) or 0
+        local fhRaw = (resolved.GetHeight and resolved:GetHeight()) or 0
+        local fw, fh = fwRaw, fhRaw
+        local sizeIsReal = fwRaw >= 4 and fhRaw >= 4
         if fw < 4 then
             fw = resolved._naturalW or settings._minWidth or 32
         end
         if fh < 4 then
             fh = resolved._naturalH or settings._minHeight or 32
         end
+        -- If we fell back via _naturalW/_naturalH, treat that as real
+        -- enough to self-heal — LayoutIcons was here at some point.
+        if not sizeIsReal and (resolved._naturalW and resolved._naturalW >= 4) then
+            sizeIsReal = true
+        end
         local pw = (parentFrame and parentFrame.GetWidth and parentFrame:GetWidth()) or UIParent:GetWidth()
         local ph = (parentFrame and parentFrame.GetHeight and parentFrame:GetHeight()) or UIParent:GetHeight()
         local GA_FRAC_X = { TOPLEFT = 0, TOPRIGHT = 1, BOTTOMLEFT = 0, BOTTOMRIGHT = 1 }
         local GA_FRAC_Y = { TOPLEFT = 1, TOPRIGHT = 1, BOTTOMLEFT = 0, BOTTOMRIGHT = 0 }
-        -- offsetX/offsetY are CENTER-relative; convert to corner-relative.
         local cornerX = offsetX + (GA_FRAC_X[corner] - 0.5) * (fw - pw)
         local cornerY = offsetY + (GA_FRAC_Y[corner] - 0.5) * (fh - ph)
         SmoothSetPoint(resolved, corner, parentFrame, corner, cornerX, cornerY)
+
+        -- Self-heal: promote this entry from legacy CENTER format to the
+        -- new corner format if we have a real container size. Subsequent
+        -- applies will take the normal (non-branch) path because point/
+        -- relative are now the corner, and the stored offsets match the
+        -- SetPoint we just applied.
+        if sizeIsReal and QUICore and QUICore.db and QUICore.db.profile then
+            local faDB = QUICore.db.profile.frameAnchoring
+            local dbEntry = faDB and faDB[key]
+            if dbEntry
+                and (dbEntry.point == nil or dbEntry.point == "CENTER")
+                and (dbEntry.relative == nil or dbEntry.relative == "CENTER")
+            then
+                dbEntry.point = corner
+                dbEntry.relative = corner
+                dbEntry.offsetX = math.floor(cornerX + 0.5)
+                dbEntry.offsetY = math.floor(cornerY + 0.5)
+                -- growAnchor stays set; it's the "which corner is growth
+                -- aligned" metadata that UpdateGrowAnchor reads.
+            end
+        end
+
         -- Skip ApplyAutoSizing — buff/debuff containers manage their own
         -- size via LayoutIcons.
         return

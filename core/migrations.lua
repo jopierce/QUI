@@ -1669,7 +1669,12 @@ local function BackfillGrowAnchor(profile)
     if type(profile) ~= "table" or type(profile.frameAnchoring) ~= "table" then
         return
     end
-    local KEYS = { "buffFrame", "debuffFrame", "buffBar", "buffIcon" }
+    -- Only buff-borders containers. CDM containers (buffIcon, buffBar,
+    -- cdmEssential, cdmUtility) are positioned by the CDM module via
+    -- ncdm.<key>.pos — their FA entries are stripped by CDM_OWNED_KEYS
+    -- and they use a different growth model (CENTERED_HORIZONTAL etc.)
+    -- that doesn't fit the four-corner growAnchor scheme.
+    local KEYS = { "buffFrame", "debuffFrame" }
     local backfilled = 0
     for _, key in ipairs(KEYS) do
         local entry = profile.frameAnchoring[key]
