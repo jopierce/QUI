@@ -127,10 +127,12 @@ function QUI:SlashCommandOpen(input)
         end
         return
     elseif input and input:match("^migration") then
-        -- /qui migration          → status (current schema version + backup info)
-        -- /qui migration status   → same
-        -- /qui migration restore  → roll back to pre-migration snapshot
-        local sub = input:match("^migration%s+(%S+)") or "status"
+        -- /qui migration             → status (current schema version + backup slots)
+        -- /qui migration status      → same
+        -- /qui migration restore     → roll back to most recent snapshot (slot 1)
+        -- /qui migration restore N   → roll back to snapshot in slot N (1 = newest)
+        local sub, arg = input:match("^migration%s+(%S+)%s*(%S*)")
+        sub = sub or "status"
         local Mig = self.Migrations
         local profile = self.db and self.db.profile
         if not (Mig and profile) then
@@ -140,17 +142,22 @@ function QUI:SlashCommandOpen(input)
         if sub == "status" then
             local v = tonumber(profile._schemaVersion) or 0
             print(("|cff60A5FAQUI migration:|r current profile schema version = v%d"):format(v))
-            local backup = Mig.GetBackupInfo and Mig.GetBackupInfo(profile)
-            if backup then
-                local savedAtStr = "unknown"
-                if type(backup.savedAt) == "number" and backup.savedAt > 0 then
-                    savedAtStr = date("%Y-%m-%d %H:%M:%S", backup.savedAt)
+            local container = Mig.GetBackupInfo and Mig.GetBackupInfo(profile)
+            local slots = container and container.slots
+            if slots and #slots > 0 then
+                print(("  %d backup slot(s) available (1 = newest):"):format(#slots))
+                for i, entry in ipairs(slots) do
+                    local savedAtStr = "unknown"
+                    if type(entry.savedAt) == "number" and entry.savedAt > 0 then
+                        savedAtStr = date("%Y-%m-%d %H:%M:%S", entry.savedAt)
+                    end
+                    print(("    [%d] v%s → v%s (saved %s)"):format(
+                        i,
+                        tostring(entry.fromVersion or "?"),
+                        tostring(entry.toVersion or "?"),
+                        savedAtStr))
                 end
-                print(("  backup: v%s → v%s (saved %s)"):format(
-                    tostring(backup.fromVersion or "?"),
-                    tostring(backup.toVersion or "?"),
-                    savedAtStr))
-                print("  run |cFFFFFF00/qui migration restore|r to roll back this profile.")
+                print("  run |cFFFFFF00/qui migration restore [N]|r to roll back to slot N (default 1).")
             else
                 print("  no migration backup on file for this profile.")
             end
@@ -159,16 +166,18 @@ function QUI:SlashCommandOpen(input)
                 print("|cff60A5FAQUI:|r Restore not supported by this build.")
                 return
             end
-            local ok, info = Mig.Restore(profile)
+            local slotIndex = tonumber(arg) or 1
+            local ok, info = Mig.Restore(profile, slotIndex)
             if ok then
-                print(("|cff60A5FAQUI migration:|r restored profile to pre-migration state (v%s). Reloading..."):format(
+                print(("|cff60A5FAQUI migration:|r restored profile from slot %d to pre-migration state (v%s). Reloading..."):format(
+                    slotIndex,
                     tostring(info and info.fromVersion or "?")))
                 QUI:SafeReload()
             else
                 print("|cff60A5FAQUI migration:|r " .. tostring(info or "restore failed"))
             end
         else
-            print("|cff60A5FAQUI:|r unknown migration subcommand. Use: status, restore")
+            print("|cff60A5FAQUI:|r unknown migration subcommand. Use: status, restore [N]")
         end
         return
     elseif input and input == "miglog" then

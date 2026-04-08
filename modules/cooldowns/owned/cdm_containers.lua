@@ -824,7 +824,7 @@ local function SaveContainerPosition(trackerKey)
             local profile = QUICore and QUICore.db and QUICore.db.profile
             local anchoringDB = profile and profile.frameAnchoring
             local settings = anchoringDB and anchoringDB[anchorKey]
-            if settings and settings.enabled then
+            if settings and settings.enabled ~= false then
                 local parent = settings.parent or "screen"
                 if parent == "screen" or parent == "disabled" then
                     -- ox/oy are CENTER→CENTER offsets. If the anchoring config
@@ -878,7 +878,7 @@ local function RestoreContainerPosition(container, trackerKey)
         local profile = QUICore and QUICore.db and QUICore.db.profile
         local anchoringDB = profile and profile.frameAnchoring
         local settings = anchoringDB and anchoringDB[anchorKey]
-        if settings and settings.enabled then
+        if settings and settings.enabled ~= false then
             local parent = settings.parent or "screen"
             if parent == "screen" or parent == "disabled" then
                 local ox = settings.offsetX or 0

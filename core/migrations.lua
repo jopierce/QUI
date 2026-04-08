@@ -72,11 +72,29 @@ if _G.QUI then _G.QUI.Migrations = Migrations end
 --        the new ApplyFrameAnchor growAnchor branch interprets them as
 --        already-corner-anchored. Entries that v24/v25 normalized to
 --        CENTER/CENTER get growAnchor derived from buffBorders config.)
+-- v27 = RestoreChainedDefaultAnchors
+--       (3.1.5: MigrateAnchoringV2's MigrateOffsets unconditionally pinned
+--        legacy 2.55 inline-offset frames to parent="screen", which
+--        clobbered the chained-default parents for brezCounter (→
+--        combatTimer), combatTimer (→ bar3), and petWarning (→ playerFrame).
+--        Detect FA entries that exactly match the legacy MigrateOffsets
+--        shape and delete them so AceDB defaults restore the chain. Also
+--        patches MigrateOffsets going forward to skip these keys.)
+-- v28 = RestoreMplusTimerChainedDefault
+--       (3.1.5: same root cause as v27, but for MigrateAnchoringV2's
+--        mplusTimer branch — it pinned the timer to parent="screen" from
+--        legacy `profile.mplusTimer.position`, clobbering the chained
+--        partyFrames default. v27's RestoreChainedDefaultAnchors couldn't
+--        catch it because IsLegacyMigrateOffsetsEntry requires point=CENTER
+--        and the V2 mplusTimer entry inherits the user's saved point. v28
+--        uses a relaxed shape check (parent=screen, sizeStable=true, only
+--        the 6 V2 fields) and also patches MigrateAnchoringV2 to skip the
+--        mplusTimer write going forward.)
 --
 -- When adding a new migration: bump CURRENT_SCHEMA_VERSION, add it to the
 -- linear gate chain in RunOnProfile, and document the version above.
 ---------------------------------------------------------------------------
-local CURRENT_SCHEMA_VERSION = 26
+local CURRENT_SCHEMA_VERSION = 28
 
 ---------------------------------------------------------------------------
 -- Shared helpers
@@ -1411,20 +1429,14 @@ local function MigrateAnchoringV2(profile)
     local EnsureFa, ReadFa = MakeAnchoringHelpers(profile)
 
     do
-        local mpt = profile.mplusTimer and profile.mplusTimer.position
-        if mpt then
-            local currentFa = ReadFa()
-            if not (currentFa and currentFa.mplusTimer) then
-                EnsureFa().mplusTimer = {
-                    parent = "screen",
-                    point = mpt.point or "TOPRIGHT",
-                    relative = mpt.relPoint or "TOPRIGHT",
-                    offsetX = mpt.x or -100,
-                    offsetY = mpt.y or -200,
-                    sizeStable = true,
-                }
-            end
-        end
+        -- mplusTimer's AceDB default is chained to partyFrames
+        -- (point=BOTTOMLEFT, parent=partyFrames, relative=BOTTOMRIGHT). The
+        -- legacy `profile.mplusTimer.position` table is just resolved screen
+        -- coords written by the module's GetPosition(), so migrating it into
+        -- frameAnchoring as parent="screen" clobbers the chained default.
+        -- Skip the write entirely; the chained default will take over. v28
+        -- (RestoreMplusTimerChainedDefault) cleans up profiles that already
+        -- ran the buggy version of this migration.
 
         local tp = profile.tooltip and profile.tooltip.anchorPosition
         if tp then
@@ -1444,6 +1456,11 @@ local function MigrateAnchoringV2(profile)
         -- Legacy inline offsets are UIParent-center-based absolute coords.
         -- Pin parent="screen" explicitly so copyDefaults can't later fill
         -- in a chain-rooted default parent and misinterpret the offsets.
+        --
+        -- Excludes keys whose AceDB default has a chained (non-screen)
+        -- parent — pinning those to screen would clobber the chain. See
+        -- v27 (RestoreChainedDefaultAnchors) for the cleanup of profiles
+        -- that ran the original buggy version of this migration.
         local function MigrateOffsets(sourceTable, targetKey)
             if not sourceTable then return end
             local ox = sourceTable.offsetX or sourceTable.xOffset
@@ -1461,12 +1478,12 @@ local function MigrateAnchoringV2(profile)
             }
         end
 
-        MigrateOffsets(profile.brzCounter, "brezCounter")
-        MigrateOffsets(profile.combatTimer, "combatTimer")
+        -- brezCounter, combatTimer, petWarning omitted intentionally — their
+        -- AceDB defaults chain to other frames (combatTimer / bar3 /
+        -- playerFrame respectively) and screen-pinning loses the chain.
         MigrateOffsets(profile.rangeCheck, "rangeCheck")
         MigrateOffsets(profile.actionTracker, "actionTracker")
         MigrateOffsets(profile.focusCastAlert, "focusCastAlert")
-        MigrateOffsets(profile.petCombatWarning, "petWarning")
         MigrateOffsets(profile.raidBuffs, "missingRaidBuffs")
     end
 end
@@ -1710,6 +1727,115 @@ local function BackfillGrowAnchor(profile)
     MigLog("BackfillGrowAnchor done: backfilled=%d", backfilled)
 end
 
+---------------------------------------------------------------------------
+-- v27: Restore chained-default parents clobbered by MigrateOffsets
+---------------------------------------------------------------------------
+-- The original v20 MigrateOffsets pinned all legacy 2.55 inline-offset
+-- frames to parent="screen", which broke the chained defaults for
+-- frames whose AceDB default points at another frame:
+--
+--   brezCounter → combatTimer  (default)
+--   combatTimer → bar3         (default)
+--   petWarning  → playerFrame  (default)
+--
+-- Detect FA entries that exactly match the legacy MigrateOffsets shape
+-- and delete them so AceDB's default chain takes over. The shape is
+-- distinctive: parent="screen", point/relative=CENTER (or stripped to
+-- nil by AceDB), sizeStable=true, with no other customization fields.
+-- Any user-edited entry (different point/relative, enabled flag,
+-- keepInPlace, scale, etc.) is left untouched.
+local RESTORE_CHAINED_KEYS = {
+    brezCounter = true,
+    combatTimer = true,
+    petWarning  = true,
+}
+
+-- Fields permitted in a "pristine MigrateOffsets" entry. Anything outside
+-- this set means the user (or another migration) edited the entry, so
+-- we leave it alone.
+local MIGRATE_OFFSETS_FIELDS = {
+    parent     = true,
+    point      = true,
+    relative   = true,
+    offsetX    = true,
+    offsetY    = true,
+    sizeStable = true,
+}
+
+local function IsLegacyMigrateOffsetsEntry(entry)
+    if type(entry) ~= "table" then return false end
+    if entry.parent ~= "screen" then return false end
+    if entry.point ~= nil and entry.point ~= "CENTER" then return false end
+    if entry.relative ~= nil and entry.relative ~= "CENTER" then return false end
+    for k in pairs(entry) do
+        if not MIGRATE_OFFSETS_FIELDS[k] then
+            return false
+        end
+    end
+    return true
+end
+
+local function RestoreChainedDefaultAnchors(profile)
+    if type(profile) ~= "table" or type(profile.frameAnchoring) ~= "table" then
+        return
+    end
+    local fa = profile.frameAnchoring
+    local restored = 0
+    for key in pairs(RESTORE_CHAINED_KEYS) do
+        local entry = fa[key]
+        if IsLegacyMigrateOffsetsEntry(entry) then
+            MigLog("v27 RestoreChainedDefault: %s (parent=screen, point=%s, ofs=%s/%s) → default chain",
+                tostring(key),
+                tostring(entry.point),
+                tostring(entry.offsetX),
+                tostring(entry.offsetY))
+            fa[key] = nil
+            restored = restored + 1
+        end
+    end
+    MigLog("RestoreChainedDefaultAnchors done: restored=%d", restored)
+end
+
+-- v28: clean up frameAnchoring.mplusTimer entries that the buggy
+-- MigrateAnchoringV2 wrote with parent="screen". The mplusTimer AceDB
+-- default is chained to partyFrames, so deleting the entry restores the
+-- chain. RestoreChainedDefaultAnchors couldn't handle this key because
+-- IsLegacyMigrateOffsetsEntry requires point=CENTER, while V2's mplusTimer
+-- entry inherited the user's saved point (TOPRIGHT/BOTTOMRIGHT/etc.).
+-- The shape check here is relaxed: parent="screen", sizeStable=true, only
+-- the 6 fields V2 ever wrote, and no extra keys. A user who positioned
+-- the timer via layout mode after the buggy V2 ran will lose that
+-- customization, but v27 only just landed so the blast radius is small.
+local function IsLegacyMigrateAnchoringV2MplusEntry(entry)
+    if type(entry) ~= "table" then return false end
+    if entry.parent ~= "screen" then return false end
+    if entry.sizeStable ~= true then return false end
+    for k in pairs(entry) do
+        if not MIGRATE_OFFSETS_FIELDS[k] then
+            return false
+        end
+    end
+    return true
+end
+
+local function RestoreMplusTimerChainedDefault(profile)
+    if type(profile) ~= "table" or type(profile.frameAnchoring) ~= "table" then
+        return
+    end
+    local fa = profile.frameAnchoring
+    local entry = fa.mplusTimer
+    if IsLegacyMigrateAnchoringV2MplusEntry(entry) then
+        MigLog("v28 RestoreMplusTimerChainedDefault: mplusTimer (parent=screen, point=%s, ofs=%s/%s) → default chain",
+            tostring(entry.point),
+            tostring(entry.offsetX),
+            tostring(entry.offsetY))
+        fa.mplusTimer = nil
+        MigLog("RestoreMplusTimerChainedDefault done: restored=1")
+    else
+        MigLog("RestoreMplusTimerChainedDefault done: restored=0")
+    end
+end
+
 -- CORNER_POINTS used by both RepairDisabledStaleCornerEntries and
 -- BackfillGrowAnchor. Defined locally so the migration module is
 -- self-contained (anchoring.lua has its own copy).
@@ -1778,13 +1904,15 @@ end
 ---------------------------------------------------------------------------
 -- Before the migration pipeline mutates a profile, we save a deep copy of
 -- the profile under `_migrationBackup`. If a migration corrupts data, the
--- user can run `/qui migration restore` to roll back to the pre-migration
--- state. One backup per profile, overwritten on each successful run where
--- migrations actually executed (version < CURRENT).
+-- user can run `/qui migration restore [N]` to roll back to a previous
+-- pre-migration state. We keep up to MAX_BACKUP_SLOTS snapshots in a
+-- circular buffer (slot 1 = newest, slot N = oldest); each successful
+-- migration run pushes a new snapshot to the front and trims the tail.
 --
 -- The backup excludes `_migrationBackup` itself to prevent recursive growth.
 
 local BACKUP_KEY = "_migrationBackup"
+local MAX_BACKUP_SLOTS = 5
 
 local function DeepCloneExcluding(value, excludeKey)
     if type(value) ~= "table" then return value end
@@ -1797,25 +1925,64 @@ local function DeepCloneExcluding(value, excludeKey)
     return copy
 end
 
+-- Returns the backup container in slotted form, lazily upgrading the
+-- legacy single-slot shape ({fromVersion, toVersion, savedAt, snapshot})
+-- to the new {slots = {...}} shape. Returns nil if no backup exists.
+local function GetBackupContainer(profile)
+    local b = profile[BACKUP_KEY]
+    if type(b) ~= "table" then return nil end
+    if type(b.slots) == "table" then
+        return b
+    end
+    -- Legacy single-slot shape — migrate in place.
+    if type(b.snapshot) == "table" then
+        local upgraded = { slots = { {
+            fromVersion = b.fromVersion,
+            toVersion   = b.toVersion,
+            savedAt     = b.savedAt,
+            snapshot    = b.snapshot,
+        } } }
+        profile[BACKUP_KEY] = upgraded
+        return upgraded
+    end
+    return nil
+end
+
 local function CreateBackup(profile, fromVersion)
-    profile[BACKUP_KEY] = {
+    local container = GetBackupContainer(profile) or { slots = {} }
+    local newEntry = {
         fromVersion = fromVersion or 0,
         toVersion   = CURRENT_SCHEMA_VERSION,
         savedAt     = (time and time()) or 0,
         snapshot    = DeepCloneExcluding(profile, BACKUP_KEY),
     }
+    -- Push to front, trim tail to MAX_BACKUP_SLOTS.
+    table.insert(container.slots, 1, newEntry)
+    while #container.slots > MAX_BACKUP_SLOTS do
+        table.remove(container.slots)
+    end
+    profile[BACKUP_KEY] = container
 end
 
--- Restore the active profile from its most recent migration backup. Wipes
--- all current profile keys (except the backup itself) and copies the
--- snapshot in. Returns (ok, messageOrBackupInfo).
-function Migrations.Restore(profile)
+-- Restore the active profile from a migration backup slot. `slotIndex`
+-- is 1-based and defaults to 1 (most recent). Wipes all current profile
+-- keys (except the backup container itself) and copies the snapshot in.
+-- Returns (ok, messageOrBackupInfo).
+function Migrations.Restore(profile, slotIndex)
     if type(profile) ~= "table" then
         return false, "no profile"
     end
-    local backup = profile[BACKUP_KEY]
-    if type(backup) ~= "table" or type(backup.snapshot) ~= "table" then
+    local container = GetBackupContainer(profile)
+    if not container or #container.slots == 0 then
         return false, "no migration backup available for this profile"
+    end
+    slotIndex = tonumber(slotIndex) or 1
+    if slotIndex < 1 or slotIndex > #container.slots then
+        return false, ("invalid slot %d (have %d backup(s))"):format(slotIndex, #container.slots)
+    end
+    local entry = container.slots[slotIndex]
+    if type(entry) ~= "table" or type(entry.snapshot) ~= "table" then
+        return false, ("backup slot %d is empty or corrupt"):format(slotIndex)
     end
 
     for k in pairs(profile) do
@@ -1823,18 +1990,22 @@ function Migrations.Restore(profile)
             profile[k] = nil
         end
     end
-    for k, v in pairs(backup.snapshot) do
+    for k, v in pairs(entry.snapshot) do
         profile[k] = DeepCloneExcluding(v, BACKUP_KEY)
     end
     -- After restore, the profile is back at its pre-migration version. The
-    -- backup itself is preserved so the user can restore again if needed.
-    return true, backup
+    -- backup container is preserved so the user can restore other slots.
+    return true, entry
 end
 
+-- Returns the full backup container ({slots = {...}}) for inspection.
+-- Lazily upgrades legacy single-slot shape on read.
 function Migrations.GetBackupInfo(profile)
     if type(profile) ~= "table" then return nil end
-    return profile[BACKUP_KEY]
+    return GetBackupContainer(profile)
 end
+
+Migrations.MAX_BACKUP_SLOTS = MAX_BACKUP_SLOTS
 
 ---------------------------------------------------------------------------
 -- Entry point: Run all profile migrations
@@ -1982,6 +2153,16 @@ function Migrations.RunOnProfile(profile)
     -- this field to perform CENTER → corner conversion at apply time. See
     -- the function docstring for case-handling details.
     if stored < 26 then BackfillGrowAnchor(profile) end
+
+    -- v27: undo MigrateOffsets's screen-pinning of frames whose AceDB
+    -- default has a chained parent (brezCounter → combatTimer, combatTimer
+    -- → bar3, petWarning → playerFrame). See function docstring.
+    if stored < 27 then RestoreChainedDefaultAnchors(profile) end
+
+    -- v28: undo MigrateAnchoringV2's mplusTimer screen-pinning. Same root
+    -- cause as v27 but for a key v27's discriminator couldn't catch (V2's
+    -- mplusTimer entry uses non-CENTER points). See function docstring.
+    if stored < 28 then RestoreMplusTimerChainedDefault(profile) end
 
     if type(profile.frameAnchoring) == "table" and profile.frameAnchoring.debuffFrame then
         local d = profile.frameAnchoring.debuffFrame
