@@ -275,8 +275,9 @@ function QUI_LayoutMode:SetElementEnabled(key, enabled)
             self._handles[key] = handle
             SyncHandle(key)
             handle:Show()
-            -- If child overlay isn't visible (parent hidden), replace with proxy mover
-            if handle._isChildOverlay and not handle:IsVisible() then
+            -- If child overlay isn't visible (parent hidden), replace with proxy mover.
+            -- mplusTimer exempt (see main code path).
+            if handle._isChildOverlay and not handle:IsVisible() and key ~= "mplusTimer" then
                 handle:Hide()
                 handle:SetParent(nil)
                 handle = CreateProxyMover(def)
@@ -327,6 +328,21 @@ function QUI_LayoutMode:SetElementEnabled(key, enabled)
                     end
                     if _G.QUI_SetFrameLayoutOwned then
                         _G.QUI_SetFrameLayoutOwned(targetFrame, nil)
+                    end
+                    -- Re-pin to UIParent at the handle's current screen
+                    -- position — otherwise SetAllPoints(handle) leaves a
+                    -- dangling anchor to the about-to-be-hidden handle and
+                    -- the frame disappears.  See Close() for details.
+                    local cx, cy = handle:GetCenter()
+                    if cx and cy then
+                        local hs = handle:GetEffectiveScale() or 1
+                        local us = UIParent:GetEffectiveScale() or 1
+                        local uw = UIParent:GetWidth() or 0
+                        local uh = UIParent:GetHeight() or 0
+                        local ox = (cx * hs / us) - (uw / 2)
+                        local oy = (cy * hs / us) - (uh / 2)
+                        pcall(targetFrame.ClearAllPoints, targetFrame)
+                        pcall(targetFrame.SetPoint, targetFrame, "CENTER", UIParent, "CENTER", ox, oy)
                     end
                 end
                 handle._savedTargetParent = nil
@@ -413,6 +429,16 @@ function QUI_LayoutMode:Open()
     -- Snapshot current positions for revert
     SnapshotPositions()
 
+    -- Snapshot hidden-handle state for revert on discard
+    local hiddenSnap = {}
+    local hiddenDB = GetHiddenHandlesDB()
+    if hiddenDB then
+        for k, v in pairs(hiddenDB) do
+            hiddenSnap[k] = v
+        end
+    end
+    self._snapshotHiddenHandles = hiddenSnap
+
     -- Fire enter callbacks BEFORE handle creation — callbacks like
     -- QUI_OnEditModeEnterCDM show/populate CDM containers so their frames
     -- are visible when CreateHandle runs (enabling child overlays instead
@@ -474,8 +500,10 @@ function QUI_LayoutMode:Open()
                     handle:Show()
                 end
 
-                -- If child overlay isn't visible (parent hidden), replace with proxy mover
-                if handle._isChildOverlay and not handle:IsVisible() then
+                -- If child overlay isn't visible (parent hidden), replace with proxy mover.
+                -- mplusTimer is exempt: its parent is shown via demo mode and we
+                -- need the child overlay to inherit the parent's user-set scale.
+                if handle._isChildOverlay and not handle:IsVisible() and key ~= "mplusTimer" then
                     handle:Hide()
                     handle:SetParent(nil)
                     handle = CreateProxyMover(def)
@@ -674,6 +702,27 @@ function QUI_LayoutMode:Close(skipSaveCheck)
                 if _G.QUI_SetFrameLayoutOwned then
                     _G.QUI_SetFrameLayoutOwned(targetFrame, nil)
                 end
+                -- The frame was SetAllPoints(handle) while layout mode was
+                -- active.  The handle is about to be hidden, leaving the
+                -- frame with a dangling anchor to a hidden ancestor — the
+                -- frame disappears even though it's still "shown".  Re-pin
+                -- to UIParent at the handle's current screen position so
+                -- the frame stays where the user left it.  SaveAndClose /
+                -- DiscardAndClose run QUI_ApplyAllFrameAnchors after this,
+                -- which will override with any saved anchor; for elements
+                -- without a frameAnchoring entry (e.g. zoneAbility that
+                -- the user never moved), this keeps them visible.
+                local cx, cy = handle:GetCenter()
+                if cx and cy then
+                    local hs = handle:GetEffectiveScale() or 1
+                    local us = UIParent:GetEffectiveScale() or 1
+                    local uw = UIParent:GetWidth() or 0
+                    local uh = UIParent:GetHeight() or 0
+                    local ox = (cx * hs / us) - (uw / 2)
+                    local oy = (cy * hs / us) - (uh / 2)
+                    pcall(targetFrame.ClearAllPoints, targetFrame)
+                    pcall(targetFrame.SetPoint, targetFrame, "CENTER", UIParent, "CENTER", ox, oy)
+                end
             end
             handle._savedTargetParent = nil
             handle._savedTargetStrata = nil
@@ -768,6 +817,7 @@ function QUI_LayoutMode:Close(skipSaveCheck)
     self._selectedKey = nil
     self._pendingPositions = {}
     self._snapshotPositions = {}
+    self._snapshotHiddenHandles = nil
 end
 
 function QUI_LayoutMode:SaveAndClose()
@@ -789,6 +839,17 @@ end
 
 function QUI_LayoutMode:DiscardAndClose()
     RevertPositions()
+    -- Revert hidden-handle state to snapshot
+    local snap = self._snapshotHiddenHandles
+    if snap then
+        local hidden = GetHiddenHandlesDB()
+        if hidden then
+            wipe(hidden)
+            for k, v in pairs(snap) do
+                hidden[k] = v
+            end
+        end
+    end
     self._hasChanges = false
     self:Close(true)
     -- Re-apply anchors after Close() for the same reason as SaveAndClose.
@@ -1036,26 +1097,40 @@ local function SavePendingPosition(key, point, relPoint, offsetX, offsetY, ancho
             fa[key].point = ptSelf
             fa[key].relative = ptTarget
         else
-            -- If the frame has an existing anchor with non-CENTER points,
-            -- compute relative offsets from handle positions rather than
-            -- writing absolute screen offsets.
+            -- No anchor target = free position drag. The handle's offsetX/offsetY
+            -- are screen-CENTER-relative (computed against UIParent CENTER).
+            -- If the existing entry has non-CENTER point/relative AND a real
+            -- parent frame, we recompute via handle edges so the offset is
+            -- expressed relative to the existing anchor pair. Otherwise we
+            -- store the raw CENTER-based drag offsets and reset point/relative
+            -- to CENTER/CENTER so the offsets are interpreted in the same
+            -- coordinate space they were measured in.
+            --
+            -- Bug fix: previously the "disabled"-parent case fell through to
+            -- a raw offset write WITHOUT resetting point/relative. If the
+            -- entry still carried stale TOPRIGHT/TOPRIGHT from a prior
+            -- corner-conversion (e.g. buffFrame/debuffFrame), the new
+            -- CENTER-based offsets were applied as TOPRIGHT-anchored offsets
+            -- and the frame teleported off-screen. CommitPositions' corner
+            -- conversion only re-derives offsets when both point AND relative
+            -- match its expected before-state, so we MUST normalize here.
             local existingParent = fa[key].parent
             local existingPt = fa[key].point or "CENTER"
             local existingRelPt = fa[key].relative or "CENTER"
 
-            if existingParent and existingParent ~= "disabled"
-               and (existingPt ~= "CENTER" or existingRelPt ~= "CENTER") then
+            local hasRealParent = existingParent
+                and existingParent ~= "disabled"
+                and existingParent ~= "screen"
+            local hasNonCenterPoints = existingPt ~= "CENTER" or existingRelPt ~= "CENTER"
+
+            if hasRealParent and hasNonCenterPoints then
                 -- Compute relative offset from anchor parent
                 local childHandle = QUI_LayoutMode._handles and QUI_LayoutMode._handles[key]
-                local parentHandle = (existingParent == "screen") and nil
-                    or (QUI_LayoutMode._handles and QUI_LayoutMode._handles[existingParent])
+                local parentHandle = QUI_LayoutMode._handles
+                    and QUI_LayoutMode._handles[existingParent]
 
-                -- For "screen" parent, use UIParent edges
                 local pL, pR, pT, pB
-                if existingParent == "screen" then
-                    pL, pB = 0, 0
-                    pR, pT = UIParent:GetWidth(), UIParent:GetHeight()
-                elseif parentHandle then
+                if parentHandle then
                     pL, pR, pT, pB = parentHandle:GetLeft(), parentHandle:GetRight(), parentHandle:GetTop(), parentHandle:GetBottom()
                 end
 
@@ -1083,8 +1158,77 @@ local function SavePendingPosition(key, point, relPoint, offsetX, offsetY, ancho
                     fa[key].offsetY = offsetY
                 end
             else
-                fa[key].offsetX = offsetX
-                fa[key].offsetY = offsetY
+                -- Free-position fall-through: parent is nil/screen/disabled,
+                -- or there's no real chain to recompute against.
+                --
+                -- Dynamic-size buff-borders containers (buffFrame/debuffFrame)
+                -- get stored as CORNER-anchored directly, using the growth
+                -- corner derived from buffBorders config. This decouples
+                -- the stored position from the container's current size —
+                -- apply time just SetPoints with the stored corner offsets,
+                -- no size-dependent math.
+                --
+                -- NOTE: this is NOT applied to CDM containers (buffIcon,
+                -- buffBar, cdmEssential, cdmUtility). Those are owned by
+                -- the CDM module and positioned via `ncdm.<key>.pos` —
+                -- their frameAnchoring entries are actively stripped by
+                -- CDM_OWNED_KEYS in the migration layer. They also support
+                -- a different growth model (CENTERED_HORIZONTAL / auraBar
+                -- growUp / etc.) that doesn't fit the four-corner scheme.
+                local isGrowAnchorKey = key == "buffFrame" or key == "debuffFrame"
+                local growCorner
+                if isGrowAnchorKey then
+                    local profile = QUI and QUI.db and QUI.db.profile
+                    local bbDB = profile and profile.buffBorders
+                    if bbDB then
+                        local growLeft, growUp
+                        if key == "buffFrame" then
+                            growLeft = bbDB.buffGrowLeft
+                            growUp   = bbDB.buffGrowUp
+                        else
+                            growLeft = bbDB.debuffGrowLeft
+                            growUp   = bbDB.debuffGrowUp
+                        end
+                        if growUp then
+                            growCorner = growLeft and "BOTTOMRIGHT" or "BOTTOMLEFT"
+                        else
+                            growCorner = growLeft and "TOPRIGHT" or "TOPLEFT"
+                        end
+                    end
+                end
+
+                if growCorner then
+                    -- Convert the drag handle's CENTER offset to a corner
+                    -- offset using the live container's current size. This
+                    -- one-time conversion at SAVE time means the apply path
+                    -- can use the stored values directly — no recomputation.
+                    local def = QUI_LayoutMode._elements[key]
+                    local frame = def and def.frame and _G[def.frame]
+                    local fw = frame and (frame._naturalW or (frame.GetWidth and frame:GetWidth())) or 0
+                    local fh = frame and (frame._naturalH or (frame.GetHeight and frame:GetHeight())) or 0
+                    if fw < 4 then fw = 32 end
+                    if fh < 4 then fh = 32 end
+                    local pw = UIParent:GetWidth()
+                    local ph = UIParent:GetHeight()
+                    local FRAC_X = { TOPLEFT = 0, TOPRIGHT = 1, BOTTOMLEFT = 0, BOTTOMRIGHT = 1 }
+                    local FRAC_Y = { TOPLEFT = 1, TOPRIGHT = 1, BOTTOMLEFT = 0, BOTTOMRIGHT = 0 }
+                    local cornerX = (offsetX or 0) + (FRAC_X[growCorner] - 0.5) * (fw - pw)
+                    local cornerY = (offsetY or 0) + (FRAC_Y[growCorner] - 0.5) * (fh - ph)
+                    fa[key].point = growCorner
+                    fa[key].relative = growCorner
+                    fa[key].offsetX = math.floor(cornerX + 0.5)
+                    fa[key].offsetY = math.floor(cornerY + 0.5)
+                    fa[key].growAnchor = growCorner
+                else
+                    -- Normal free-position frame: CENTER-anchored, drag
+                    -- offsets used verbatim. Reset point/relative to CENTER
+                    -- so the offsets are interpreted in the same coordinate
+                    -- space they were measured in.
+                    fa[key].point = "CENTER"
+                    fa[key].relative = "CENTER"
+                    fa[key].offsetX = offsetX
+                    fa[key].offsetY = offsetY
+                end
             end
         end
     end
@@ -1098,10 +1242,20 @@ end
 
 --- Convert a handle's position to CENTER-based offsets relative to UIParent.
 --- Works for both proxy movers and child overlays.
+--- Returns offsets in UIParent local coord. For scaled child overlay parents,
+--- GetCenter returns in the frame's own scaled coord, so we multiply by the
+--- frame's scale to get UIParent local coord.
 HandleToOffsets = function(handle)
     local cx, cy
     if handle._isChildOverlay and handle._parentFrame then
         cx, cy = handle._parentFrame:GetCenter()
+        if cx and cy and handle._parentFrame.GetScale then
+            local pScale = handle._parentFrame:GetScale() or 1
+            if pScale > 0 and pScale ~= 1 then
+                cx = cx * pScale
+                cy = cy * pScale
+            end
+        end
     else
         cx, cy = handle:GetCenter()
     end
@@ -1113,11 +1267,22 @@ end
 
 --- Position a handle from CENTER-based offsets.
 --- For child overlays, repositions the parent frame.
+--- offsetX/Y are in UIParent local coord. For child overlays whose parent has
+--- a custom scale, divide by the scale because SetPoint offsets are interpreted
+--- in the frame's own scaled coord space. No-op for scale=1 frames.
 SetHandleFromOffsets = function(handle, offsetX, offsetY)
     if handle._isChildOverlay and handle._parentFrame then
         local parent = handle._parentFrame
+        local ox, oy = offsetX or 0, offsetY or 0
+        if parent.GetScale then
+            local pScale = parent:GetScale() or 1
+            if pScale > 0 and pScale ~= 1 then
+                ox = ox / pScale
+                oy = oy / pScale
+            end
+        end
         pcall(parent.ClearAllPoints, parent)
-        pcall(parent.SetPoint, parent, "CENTER", UIParent, "CENTER", offsetX or 0, offsetY or 0)
+        pcall(parent.SetPoint, parent, "CENTER", UIParent, "CENTER", ox, oy)
     else
         handle:ClearAllPoints()
         handle:SetPoint("CENTER", UIParent, "CENTER", offsetX or 0, offsetY or 0)
@@ -1219,45 +1384,14 @@ CommitPositions = function()
                     -- (e.g. TOPRIGHT/BOTTOMRIGHT) leak back through the
                     -- metatable on reload, misinterpreting CENTER-based offsets.
                     if not pos.anchorTarget then
+                        -- Free-position frames are stored as CENTER offsets,
+                        -- including dynamic-size containers like buffFrame /
+                        -- debuffFrame. The apply path handles corner-anchor
+                        -- conversion for those via the `growAnchor` field
+                        -- (set by the buff borders module). Layout mode no
+                        -- longer special-cases buff/debuff here.
                         fa[key].point = "CENTER"
                         fa[key].relative = "CENTER"
-                    end
-                    -- Growth-direction containers need corner anchoring so
-                    -- the fixed edge stays put as the grid resizes.  Convert
-                    -- CENTER offsets to corner offsets when real dimensions
-                    -- are available (auras were showing during save).
-                    if not pos.anchorTarget and (key == "buffFrame" or key == "debuffFrame") then
-                        local bbDB = _G.QUI and _G.QUI.db and _G.QUI.db.profile
-                            and _G.QUI.db.profile.buffBorders
-                        if bbDB then
-                            local growLeft, growUp
-                            if key == "buffFrame" then
-                                growLeft, growUp = bbDB.buffGrowLeft, bbDB.buffGrowUp
-                            else
-                                growLeft, growUp = bbDB.debuffGrowLeft, bbDB.debuffGrowUp
-                            end
-                            local corner
-                            if growUp then
-                                corner = growLeft and "BOTTOMRIGHT" or "BOTTOMLEFT"
-                            else
-                                corner = growLeft and "TOPRIGHT" or "TOPLEFT"
-                            end
-                            local frame = def.frame and _G[def.frame]
-                            local fw = frame and frame._naturalW
-                            local fh = frame and frame._naturalH
-                            if fw and fh and fw > 1 and fh > 1 then
-                                local FRAC_X = { TOPLEFT = 0, TOPRIGHT = 1, BOTTOMLEFT = 0, BOTTOMRIGHT = 1 }
-                                local FRAC_Y = { TOPLEFT = 1, TOPRIGHT = 1, BOTTOMLEFT = 0, BOTTOMRIGHT = 0 }
-                                local cx = fa[key].offsetX or 0
-                                local cy = fa[key].offsetY or 0
-                                local pw = UIParent:GetWidth()
-                                local ph = UIParent:GetHeight()
-                                fa[key].point = corner
-                                fa[key].relative = corner
-                                fa[key].offsetX = math.floor(cx + (FRAC_X[corner] - 0.5) * (fw - pw) + 0.5)
-                                fa[key].offsetY = math.floor(cy + (FRAC_Y[corner] - 0.5) * (fh - ph) + 0.5)
-                            end
-                        end
                     end
                 end
                 if fa[key].sizeStable == nil then
@@ -1540,10 +1674,19 @@ AddHandleScripts = function(handle, def)
         -- Capture cursor-to-handle offset so snap can compute cursor-intended position
         local cx, cy = GetCursorPosition()
         local scale = UIParent:GetEffectiveScale()
-        cx, cy = cx / scale, cy / scale
+        cx, cy = cx / scale, cy / scale  -- cursor in UIParent local coord
         local hx, hy
         if self._isChildOverlay and self._parentFrame then
             hx, hy = self._parentFrame:GetCenter()
+            -- parent.GetCenter returns in the frame's OWN (scaled) coord space.
+            -- Convert to UIParent local coord so it matches the cursor's space.
+            if hx and hy and self._parentFrame.GetScale then
+                local pScale = self._parentFrame:GetScale() or 1
+                if pScale > 0 and pScale ~= 1 then
+                    hx = hx * pScale
+                    hy = hy * pScale
+                end
+            end
         else
             hx, hy = self:GetCenter()
         end
@@ -2763,6 +2906,14 @@ do
                 key = "mplusTimer", label = "M+ Timer", group = "Instance", order = 2,
                 frame = "QUI_MPlusTimerFrame",
                 dbKey = "mplusTimer", enabledField = "enabled",
+                -- Use child overlay (setupOverlay forces the child overlay
+                -- code path because of `isOwned and (not getSize or setupOverlay)`).
+                -- Child overlay parents to QUI_MPlusTimerFrame so it inherits
+                -- the frame's scale automatically — no coord-space math.
+                setupOverlay = function(overlay, targetFrame)
+                    overlay:ClearAllPoints()
+                    overlay:SetAllPoints(targetFrame)
+                end,
                 previewOn  = function() local t = _G.QUI_MPlusTimer; if t and t.EnableDemoMode then t:EnableDemoMode() end end,
                 previewOff = function() local t = _G.QUI_MPlusTimer; if t and t.DisableDemoMode then t:DisableDemoMode() end end,
             },
@@ -3473,6 +3624,21 @@ function QUI_LayoutMode:ToggleHandlePreview(key)
                 pcall(targetFrame.SetParent, targetFrame, handle._savedTargetParent)
                 if _G.QUI_SetFrameLayoutOwned then
                     _G.QUI_SetFrameLayoutOwned(targetFrame, nil)
+                end
+                -- Re-pin the frame to UIParent at the handle's current
+                -- screen position; SetAllPoints(handle) would otherwise
+                -- leave a dangling anchor to the hidden handle.  See
+                -- Close() for details.
+                local cx, cy = handle:GetCenter()
+                if cx and cy then
+                    local hs = handle:GetEffectiveScale() or 1
+                    local us = UIParent:GetEffectiveScale() or 1
+                    local uw = UIParent:GetWidth() or 0
+                    local uh = UIParent:GetHeight() or 0
+                    local ox = (cx * hs / us) - (uw / 2)
+                    local oy = (cy * hs / us) - (uh / 2)
+                    pcall(targetFrame.ClearAllPoints, targetFrame)
+                    pcall(targetFrame.SetPoint, targetFrame, "CENTER", UIParent, "CENTER", ox, oy)
                 end
             end
             handle._savedTargetParent = nil

@@ -1364,6 +1364,7 @@ local defaults = {
                         buttonSpacing = 0,          -- spacing between buttons in pixels
                         growUp = false,             -- rows grow bottom-to-top
                         growLeft = false,           -- columns grow right-to-left
+                        flyoutDirection = "AUTO",   -- "AUTO" | "UP" | "DOWN" | "LEFT" | "RIGHT"
                     },
                     -- Style overrides (nil = use global)
                     overrideEnabled = false,
@@ -1382,6 +1383,7 @@ local defaults = {
                     ownedLayout = {
                         orientation = "horizontal", columns = 12, iconCount = 12,
                         buttonSize = 30, buttonSpacing = 0, growUp = false, growLeft = false,
+                        flyoutDirection = "AUTO",
                     },
                     overrideEnabled = false,
                     iconZoom = 0.05, showBackdrop = nil, backdropAlpha = 0,
@@ -1399,6 +1401,7 @@ local defaults = {
                     ownedLayout = {
                         orientation = "horizontal", columns = 12, iconCount = 12,
                         buttonSize = 30, buttonSpacing = 0, growUp = false, growLeft = false,
+                        flyoutDirection = "AUTO",
                     },
                     overrideEnabled = false,
                     iconZoom = 0.05, showBackdrop = nil, backdropAlpha = 0,
@@ -1416,6 +1419,7 @@ local defaults = {
                     ownedLayout = {
                         orientation = "horizontal", columns = 6, iconCount = 12,
                         buttonSize = 30, buttonSpacing = 0, growUp = false, growLeft = false,
+                        flyoutDirection = "AUTO",
                     },
                     overrideEnabled = false,
                     iconZoom = 0.05, showBackdrop = nil, backdropAlpha = 0,
@@ -1433,6 +1437,7 @@ local defaults = {
                     ownedLayout = {
                         orientation = "horizontal", columns = 6, iconCount = 12,
                         buttonSize = 30, buttonSpacing = 0, growUp = false, growLeft = false,
+                        flyoutDirection = "AUTO",
                     },
                     overrideEnabled = false,
                     iconZoom = 0.05, showBackdrop = nil, backdropAlpha = 0,
@@ -1450,6 +1455,7 @@ local defaults = {
                     ownedLayout = {
                         orientation = "horizontal", columns = 12, iconCount = 12,
                         buttonSize = 30, buttonSpacing = 0, growUp = false, growLeft = false,
+                        flyoutDirection = "AUTO",
                     },
                     overrideEnabled = false,
                     iconZoom = 0.05, showBackdrop = nil, backdropAlpha = 0,
@@ -1462,11 +1468,12 @@ local defaults = {
                     countAnchor = nil, countOffsetX = nil, countOffsetY = nil,
                 },
                 bar7 = {
-                    enabled = true, fadeEnabled = nil, fadeOutAlpha = nil, alwaysShow = false,
+                    enabled = false, fadeEnabled = nil, fadeOutAlpha = nil, alwaysShow = false,
                     ownedPosition = nil,
                     ownedLayout = {
                         orientation = "horizontal", columns = 12, iconCount = 12,
                         buttonSize = 30, buttonSpacing = 0, growUp = false, growLeft = false,
+                        flyoutDirection = "AUTO",
                     },
                     overrideEnabled = false,
                     iconZoom = 0.05, showBackdrop = nil, backdropAlpha = 0,
@@ -1479,11 +1486,12 @@ local defaults = {
                     countAnchor = nil, countOffsetX = nil, countOffsetY = nil,
                 },
                 bar8 = {
-                    enabled = true, fadeEnabled = nil, fadeOutAlpha = nil, alwaysShow = false,
+                    enabled = false, fadeEnabled = nil, fadeOutAlpha = nil, alwaysShow = false,
                     ownedPosition = nil,
                     ownedLayout = {
                         orientation = "horizontal", columns = 12, iconCount = 12,
                         buttonSize = 30, buttonSpacing = 0, growUp = false, growLeft = false,
+                        flyoutDirection = "AUTO",
                     },
                     overrideEnabled = false,
                     iconZoom = 0.05, showBackdrop = nil, backdropAlpha = 0,
@@ -2439,7 +2447,7 @@ local defaults = {
 
         -- QUI Group Frames (party/raid)
         quiGroupFrames = {
-            enabled = true,           -- Enabled by default
+            enabled = false,          -- Disabled by default (users enable explicitly)
 
             -- Position
             position = { offsetX = -400, offsetY = 0 },      -- party position
@@ -3227,6 +3235,7 @@ local defaults = {
             shape = "SQUARE",  -- SQUARE or ROUND
             size = 226,
             scale = 1.0,  -- Scale multiplier for minimap frame
+            zoomLevel = 0,  -- World zoom level (0-5); does not change the frame size
             borderSize = 1,
             borderColor = {0, 0, 0, 1},  -- Black border
             useClassColorBorder = false,
@@ -3649,14 +3658,14 @@ local defaults = {
                 point = "TOP", parent = "cdmEssential", relative = "BOTTOM",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = true, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             secondaryPower = {
                 point = "TOP", parent = "primaryPower", relative = "BOTTOM",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = true, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             -- Unit frames anchored to CDM
@@ -3664,14 +3673,14 @@ local defaults = {
                 point = "BOTTOMRIGHT", parent = "cdmEssential", relative = "BOTTOMLEFT",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             targetFrame = {
                 point = "BOTTOMLEFT", parent = "cdmEssential", relative = "BOTTOMRIGHT",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             totFrame = {
@@ -3685,7 +3694,7 @@ local defaults = {
                 point = "BOTTOMRIGHT", parent = "playerFrame", relative = "BOTTOMLEFT",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             focusFrame = {
@@ -3736,21 +3745,21 @@ local defaults = {
                 point = "BOTTOMRIGHT", parent = "screen", relative = "BOTTOM",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             bar1 = {
                 point = "BOTTOM", parent = "bar3", relative = "TOP",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             bar2 = {
                 point = "BOTTOM", parent = "bar1", relative = "TOP",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             bar6 = {
@@ -3771,7 +3780,7 @@ local defaults = {
                 point = "BOTTOMLEFT", parent = "bar5", relative = "TOPLEFT",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             bar7 = {
@@ -3793,14 +3802,14 @@ local defaults = {
                 point = "BOTTOMLEFT", parent = "bar6", relative = "BOTTOMRIGHT",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             stanceBar = {
                 point = "BOTTOMLEFT", parent = "petBar", relative = "TOPLEFT",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             -- Combat timer anchored to bar3
@@ -3815,7 +3824,7 @@ local defaults = {
                 point = "BOTTOM", parent = "combatTimer", relative = "TOP",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             -- Group frames below utility
@@ -3838,7 +3847,7 @@ local defaults = {
                 point = "TOPLEFT", parent = "datatextPanel", relative = "BOTTOMLEFT",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             -- Minimap and related
@@ -3846,28 +3855,28 @@ local defaults = {
                 point = "TOPRIGHT", parent = "screen", relative = "TOPRIGHT",
                 offsetX = 0, offsetY = -30,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             datatextPanel = {
                 point = "TOP", parent = "minimap", relative = "BOTTOM",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             objectiveTracker = {
                 point = "TOPRIGHT", parent = "datatextPanel", relative = "BOTTOMRIGHT",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             belowMinimapWidgets = {
                 point = "TOP", parent = "datatextPanel", relative = "BOTTOM",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             -- Buff/debuff frames
@@ -3875,14 +3884,14 @@ local defaults = {
                 point = "TOPRIGHT", parent = "minimap", relative = "TOPLEFT",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             debuffFrame = {
                 point = "TOPRIGHT", parent = "buffFrame", relative = "BOTTOMRIGHT",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             -- Micro menu and bags
@@ -3890,14 +3899,14 @@ local defaults = {
                 point = "TOPLEFT", parent = "screen", relative = "TOPLEFT",
                 offsetX = 0, offsetY = -30,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             bagBar = {
                 point = "TOPLEFT", parent = "microMenu", relative = "BOTTOMLEFT",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             -- Custom tracker anchored to player frame
@@ -3905,7 +3914,7 @@ local defaults = {
                 point = "BOTTOMRIGHT", parent = "playerFrame", relative = "TOPRIGHT",
                 offsetX = 0, offsetY = 0,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             -- Skyriding bar
@@ -3913,7 +3922,7 @@ local defaults = {
                 point = "CENTER", parent = "screen", relative = "TOP",
                 offsetX = 0, offsetY = -40,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             -- Top center widgets
@@ -3921,7 +3930,7 @@ local defaults = {
                 point = "TOP", parent = "screen", relative = "TOP",
                 offsetX = 0, offsetY = -100,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             -- Focus cast alert
@@ -3929,7 +3938,7 @@ local defaults = {
                 point = "CENTER", parent = "screen", relative = "CENTER",
                 offsetX = 0, offsetY = -40,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
             -- Crosshair
@@ -3961,7 +3970,148 @@ local defaults = {
                 point = "CENTER", parent = "screen", relative = "TOP",
                 offsetX = 0, offsetY = -125,
                 sizeStable = true, autoWidth = false, autoHeight = false,
-                hideWithParent = false, keepInPlace = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            -- ================================================================
+            -- Trackers, alerts, and utility anchors
+            -- These entries were previously seeded by SeedDefaultFrameAnchoring
+            -- in migrations.lua. Consolidated here so AceDB provides them via
+            -- metatable — no explicit SV writes needed for fresh profiles.
+            -- ================================================================
+            actionTracker = {
+                point = "RIGHT", parent = "screen", relative = "RIGHT",
+                offsetX = -20, offsetY = 0,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            alertAnchor = {
+                point = "TOP", parent = "screen", relative = "TOP",
+                offsetX = 0, offsetY = -20,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            atonementCounter = {
+                point = "BOTTOM", parent = "brezCounter", relative = "TOP",
+                offsetX = 0, offsetY = 0,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            consumables = {
+                point = "BOTTOM", parent = "readyCheck", relative = "TOP",
+                offsetX = 0, offsetY = 50,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            extraActionButton = {
+                point = "CENTER", parent = "screen", relative = "BOTTOM",
+                offsetX = 0, offsetY = 200,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            keyTracker = {
+                point = "TOPRIGHT", parent = "minimap", relative = "BOTTOMLEFT",
+                offsetX = 0, offsetY = 0,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            lootFrame = {
+                point = "CENTER", parent = "screen", relative = "CENTER",
+                offsetX = 300, offsetY = 0,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            lootRollAnchor = {
+                point = "TOP", parent = "readyCheck", relative = "BOTTOM",
+                offsetX = 0, offsetY = 0,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            missingRaidBuffs = {
+                point = "TOP", parent = "screen", relative = "TOP",
+                offsetX = 0, offsetY = -100,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            petWarning = {
+                point = "TOP", parent = "playerFrame", relative = "BOTTOM",
+                offsetX = 0, offsetY = -30,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            powerBarAlt = {
+                point = "CENTER", parent = "screen", relative = "TOP",
+                offsetX = 0, offsetY = -75,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            preyTracker = {
+                point = "CENTER", parent = "screen", relative = "TOP",
+                offsetX = 0, offsetY = -250,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            readyCheck = {
+                point = "CENTER", parent = "screen", relative = "CENTER",
+                offsetX = 0, offsetY = 0,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            -- rotationAssistIcon: CDM Rotation Helper anchor. Parents to cdmEssential
+            -- which is resolved at runtime via FRAME_RESOLVERS (no frameAnchoring entry).
+            rotationAssistIcon = {
+                point = "BOTTOM", parent = "cdmEssential", relative = "TOP",
+                offsetX = 0, offsetY = 40,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            toastAnchor = {
+                point = "TOP", parent = "screen", relative = "TOP",
+                offsetX = 0, offsetY = -150,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            tooltipAnchor = {
+                point = "BOTTOMRIGHT", parent = "screen", relative = "BOTTOMRIGHT",
+                offsetX = -200, offsetY = 100,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            totemBar = {
+                point = "CENTER", parent = "screen", relative = "BOTTOM",
+                offsetX = 0, offsetY = 200,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            xpTracker = {
+                point = "BOTTOM", parent = "screen", relative = "BOTTOM",
+                offsetX = 0, offsetY = 4,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
+                widthAdjust = 0, heightAdjust = 0,
+            },
+            zoneAbility = {
+                point = "CENTER", parent = "extraActionButton", relative = "CENTER",
+                offsetX = 0, offsetY = 0,
+                sizeStable = true, autoWidth = false, autoHeight = false,
+                hideWithParent = false, keepInPlace = true,
                 widthAdjust = 0, heightAdjust = 0,
             },
         },

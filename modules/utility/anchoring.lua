@@ -37,6 +37,15 @@ local Helpers = {}
 -- Forward-declared tables (populated later, referenced by ResolveFrameForKey)
 local CDM_LOGICAL_SIZE_KEYS = {}
 
+-- Corner anchor names — used by the growAnchor apply-time conversion to
+-- validate the corner string from FA entries.
+local CORNER_POINTS = {
+    TOPLEFT     = true,
+    TOPRIGHT    = true,
+    BOTTOMLEFT  = true,
+    BOTTOMRIGHT = true,
+}
+
 -- Edit Mode hook state (declared early so ApplyFrameAnchor can set the guard)
 local _editModeReapplyGuard = false  -- prevents recursive reapply during QUI's own SetPoint
 
@@ -1232,6 +1241,187 @@ local function IsBlizzardElementDisabled(elementKey)
     return db and db.enabled == false
 end
 
+---------------------------------------------------------------------------
+-- MANAGED-CONTAINER REPARENT
+--
+-- Blizzard's UIParentRightManagedFrameContainer is a secure layout chain.
+-- Calling ClearAllPoints/SetPoint on any of its children from addon code
+-- permanently taints the child's position data, which then propagates to
+-- the container itself. The next time Blizzard reshuffles the chain
+-- (e.g. CompactArenaFrame:RefreshMembers in raids), it fires
+-- "AddOn 'QUI' tried to call the protected function
+-- 'UIParentRightManagedFrameContainer:ClearAllPoints()'".
+--
+-- To let QUI layout mode keep positioning these frames, we reparent each
+-- target into a QUI-owned holder (child of UIParent, OUTSIDE the managed
+-- container) at login. The anchoring resolver returns the holder, so
+-- ApplyFrameAnchor and layout-mode handles SetPoint on addon-safe frames.
+-- The Blizzard frame rides along via a TOPLEFT→holder pin.
+--
+-- Reference implementation: ExtraActionButton in
+-- modules/frames/actionbars.lua.
+---------------------------------------------------------------------------
+
+local MANAGED_REPARENT_TARGETS = {
+    { key = "objectiveTracker",    frameName = "ObjectiveTrackerFrame",            holderName = "QUI_ObjectiveTrackerHolder"    },
+    { key = "topCenterWidgets",    frameName = "UIWidgetTopCenterContainerFrame",  holderName = "QUI_TopCenterWidgetsHolder"    },
+    { key = "belowMinimapWidgets", frameName = "UIWidgetBelowMinimapContainerFrame", holderName = "QUI_BelowMinimapWidgetsHolder" },
+}
+
+-- [key] = { holder, frame, installed, hookingSetPoint, hookingSetParent,
+--           pendingReanchor, sizeHooked, setPointHooked, setParentHooked }
+-- Declared here so FRAME_RESOLVERS closures can reference it via upvalue
+-- capture; the table is populated later by InstallManagedReparent.
+local managedReparentState = {}
+
+local function MirrorHolderSize(key)
+    local state = managedReparentState[key]
+    if not state or not state.holder or not state.frame then return end
+    local frame = state.frame
+    local w = (frame.GetWidth  and frame:GetWidth())  or 0
+    local h = (frame.GetHeight and frame:GetHeight()) or 0
+    if type(w) ~= "number" or w < 1 then w = 1 end
+    if type(h) ~= "number" or h < 1 then h = 1 end
+    state.holder:SetSize(w, h)
+end
+
+local function ReanchorFrameToHolder(key)
+    local state = managedReparentState[key]
+    if not state or not state.holder or not state.frame then return end
+    if InCombatLockdown() then return end
+    local frame = state.frame
+    state.hookingSetPoint = true
+    pcall(frame.ClearAllPoints, frame)
+    pcall(frame.SetPoint, frame, "TOPLEFT", state.holder, "TOPLEFT", 0, 0)
+    state.hookingSetPoint = false
+    MirrorHolderSize(key)
+end
+
+local function QueueManagedReanchor(key)
+    local state = managedReparentState[key]
+    if not state or state.pendingReanchor then return end
+    state.pendingReanchor = true
+    C_Timer.After(0, function()
+        state.pendingReanchor = false
+        if InCombatLockdown() then return end
+        ReanchorFrameToHolder(key)
+    end)
+end
+
+local function InstallManagedReparent(def)
+    local state = managedReparentState[def.key]
+    if state and state.installed then return state.holder end
+    if InCombatLockdown() then return nil end
+
+    local frame = _G[def.frameName]
+    if not frame then return nil end
+
+    state = state or {}
+    managedReparentState[def.key] = state
+    state.key   = def.key
+    state.frame = frame
+
+    -- Create the holder outside the managed container
+    local holder = state.holder or _G[def.holderName]
+    if not holder then
+        holder = CreateFrame("Frame", def.holderName, UIParent)
+        local strata = frame.GetFrameStrata and frame:GetFrameStrata() or "MEDIUM"
+        holder:SetFrameStrata(strata)
+        -- Seed with the frame's current footprint so layout-mode handles
+        -- get a real hit area before OnSizeChanged fires
+        local seedW = (frame.GetWidth  and frame:GetWidth())  or 0
+        local seedH = (frame.GetHeight and frame:GetHeight()) or 0
+        if type(seedW) ~= "number" or seedW < 1 then seedW = 200 end
+        if type(seedH) ~= "number" or seedH < 1 then seedH = 200 end
+        holder:SetSize(seedW, seedH)
+        -- Place the holder wherever the frame currently sits (best-effort —
+        -- ApplyFrameAnchor will overwrite this if the user has a saved anchor)
+        holder:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+    end
+    state.holder = holder
+
+    -- Reparent the Blizzard frame into the holder
+    state.hookingSetParent = true
+    pcall(frame.SetParent, frame, holder)
+    state.hookingSetParent = false
+
+    -- Pin the frame to the holder's TOPLEFT
+    ReanchorFrameToHolder(def.key)
+
+    -- Mirror the frame's size onto the holder so layout-mode handles track it
+    if frame.HookScript and not state.sizeHooked then
+        state.sizeHooked = true
+        frame:HookScript("OnSizeChanged", function()
+            MirrorHolderSize(def.key)
+        end)
+    end
+
+    -- If anything repositions the frame, reanchor back to the holder
+    if not state.setPointHooked then
+        state.setPointHooked = true
+        hooksecurefunc(frame, "SetPoint", function()
+            if state.hookingSetPoint then return end
+            QueueManagedReanchor(def.key)
+        end)
+    end
+
+    -- If anything reparents the frame back into a managed container
+    -- (Edit Mode layout recalc, zone transition), reclaim it
+    if not state.setParentHooked then
+        state.setParentHooked = true
+        hooksecurefunc(frame, "SetParent", function(self, newParent)
+            if state.hookingSetParent then return end
+            if newParent == state.holder then return end
+            C_Timer.After(0, function()
+                if InCombatLockdown() then return end
+                if state.frame:GetParent() == state.holder then return end
+                state.hookingSetParent = true
+                pcall(state.frame.SetParent, state.frame, state.holder)
+                state.hookingSetParent = false
+                QueueManagedReanchor(def.key)
+            end)
+        end)
+    end
+
+    state.installed = true
+    return holder
+end
+
+local function EnsureAllManagedReparents()
+    if InCombatLockdown() then return end
+    local installedAny = false
+    for _, def in ipairs(MANAGED_REPARENT_TARGETS) do
+        local wasInstalled = managedReparentState[def.key] and managedReparentState[def.key].installed
+        if InstallManagedReparent(def) and not wasInstalled then
+            installedAny = true
+        end
+    end
+    -- After a new holder becomes available, re-apply anchors so any
+    -- saved positions for these keys actually get committed to the
+    -- holder (prior ApplyAllFrameAnchors passes got nil from the
+    -- resolver and bailed).
+    if installedAny and QUI_Anchoring and QUI_Anchoring.ApplyAllFrameAnchors then
+        C_Timer.After(0, function()
+            if InCombatLockdown() then return end
+            pcall(QUI_Anchoring.ApplyAllFrameAnchors, QUI_Anchoring)
+        end)
+    end
+end
+
+-- Install reparents on login (all Blizzard frames exist by PLAYER_ENTERING_WORLD)
+-- and retry on PLAYER_REGEN_ENABLED in case combat blocked the first attempt.
+local managedReparentInitFrame = CreateFrame("Frame")
+managedReparentInitFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+managedReparentInitFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+managedReparentInitFrame:SetScript("OnEvent", function(_, event)
+    if event == "PLAYER_REGEN_ENABLED" then
+        EnsureAllManagedReparents()
+        return
+    end
+    -- Delay slightly so Blizzard's own frame setup has completed
+    C_Timer.After(0.5, EnsureAllManagedReparents)
+end)
+
 local FRAME_RESOLVERS = {
     -- CDM Viewers
     cdmEssential = function() return _G.QUI_GetCDMViewerFrame and _G.QUI_GetCDMViewerFrame("essential") end,
@@ -1439,9 +1629,25 @@ local FRAME_RESOLVERS = {
     -- Display
     minimap = function() return _G["Minimap"] end,
     datatextPanel = function() return _G["QUI_DatatextPanel"] end,
-    objectiveTracker = function() return _G["ObjectiveTrackerFrame"] end,
-    topCenterWidgets = function() return _G["UIWidgetTopCenterContainerFrame"] end,
-    belowMinimapWidgets = function() return _G["UIWidgetBelowMinimapContainerFrame"] end,
+    -- Managed-container frames resolve to their QUI holder once reparented
+    -- (see MANAGED_REPARENT_TARGETS above). Before the reparent installs
+    -- (early login window, or a combat-deferred retry), the resolver
+    -- returns nil so ApplyFrameAnchor bails early — SetPointing the raw
+    -- Blizzard frame while it still lives inside the managed container
+    -- would permanently taint the container. EnsureAllManagedReparents
+    -- triggers a reapply once the holders are installed.
+    objectiveTracker = function()
+        local state = managedReparentState["objectiveTracker"]
+        return state and state.holder or nil
+    end,
+    topCenterWidgets = function()
+        local state = managedReparentState["topCenterWidgets"]
+        return state and state.holder or nil
+    end,
+    belowMinimapWidgets = function()
+        local state = managedReparentState["belowMinimapWidgets"]
+        return state and state.holder or nil
+    end,
     buffFrame = function()
         local owned = _G["QUI_BuffIconContainer"]
         if owned then return owned end
@@ -1667,10 +1873,19 @@ local HUD_MIN_WIDTH_DEFAULT = (ns.Helpers and ns.Helpers.HUD_MIN_WIDTH_DEFAULT) 
 
 -- Fallback anchor targets for when a resolved frame is unavailable (nil or hidden).
 -- e.g. classes without a secondary resource should fall back to the primary bar.
+--
+-- Chain fallbacks matter when legacy profiles (QUI 3.0) have entries like
+-- primaryPower.parent = "secondaryPower" for classes that never had a
+-- secondary power bar (DK, druid in bear form, DH, rogue, warrior). The
+-- walker hits secondaryPower → nil → fallback primaryPower → visited
+-- (self-cycle) → needs another hop. Adding primaryPower → cdmEssential
+-- gives the walker a sensible next step: land below CDM Essential where
+-- the current default chain would have put it.
 FRAME_ANCHOR_FALLBACKS = {
     secondaryPower = "primaryPower",
-    petFrame = "playerFrame",
-    totFrame = "targetFrame",
+    primaryPower   = "cdmEssential",
+    petFrame       = "playerFrame",
+    totFrame       = "targetFrame",
 }
 
 -- Helper: resolve a single key to a visible frame (nil if unavailable)
@@ -1746,13 +1961,22 @@ end
 --                   frame in the chain rather than using the child's own points).
 --                   nil when no chain walk happened or only hardcoded fallbacks
 --                   were used.
-local function ResolveParentFrame(parentKey)
+-- originKey: optional key of the frame being anchored. Pre-seeding visited[originKey]
+-- prevents the walker from resolving to the origin frame itself via fallback chains.
+-- e.g. primaryPower.parent = "secondaryPower" on a class without a secondary resource
+-- falls back to FRAME_ANCHOR_FALLBACKS["secondaryPower"] = "primaryPower", which would
+-- return the primaryPower frame — creating a self-anchor. With originKey="primaryPower"
+-- the visited guard breaks the loop and the walker returns UIParent instead.
+local function ResolveParentFrame(parentKey, originKey)
     if not parentKey or parentKey == "screen" or parentKey == "disabled" then
         return UIParent, nil
     end
 
     local key = parentKey
     local visited = {}  -- guard against circular fallback chains
+    if originKey then
+        visited[originKey] = true  -- never resolve to the frame we're positioning
+    end
 
     -- Grab the user's anchoring config for dynamic chain walking
     local anchoringDB = QUICore and QUICore.db and QUICore.db.profile
@@ -1762,49 +1986,65 @@ local function ResolveParentFrame(parentKey)
     local lastChainSettings = nil
 
     while key do
-        if visited[key] then break end
-        visited[key] = true
-
-        local frame = ResolveFrameForKey(key)
-
-        -- Frame exists and is shown (or at least alpha-shown) → use it
-        if frame and frame.IsShown and frame:IsShown() then
-            return frame, lastChainSettings
-        end
-
-        -- In Layout Mode, treat hidden-but-enabled frames as valid anchor
-        -- targets. The mover overlay is visible even when the actual frame is
-        -- hidden (e.g. pet bar on a class with no pet), so dependents should
-        -- still anchor to it rather than walking up the chain.
-        if frame and ns.QUI_LayoutMode and ns.QUI_LayoutMode.isActive then
-            return frame, lastChainSettings
-        end
-
-        -- Frame exists but hidden — hook its visibility so that when it
-        -- reappears, children that chain-walked past it get re-anchored back.
-        if frame then
-            InstallVisibilityHook(frame)
-        end
-
-        -- Frame unavailable → try hardcoded fallback first
-        local fallback = FRAME_ANCHOR_FALLBACKS[key]
-        if fallback then
-            key = fallback
-        else
-            -- No hardcoded fallback — walk up the user's configured anchor chain.
-            -- If key itself has an anchor override with a parent, try that parent
-            -- (e.g. datatextPanel is anchored to minimap → use minimap).
-            local chainEntry = anchoringDB and anchoringDB[key]
-            local chainParent = chainEntry and chainEntry.parent
-            if chainParent and chainParent ~= "screen" and chainParent ~= "disabled" then
-                -- Remember this hidden link's anchor settings so the child can
-                -- adopt them (replacing the hidden frame in the visual chain).
-                lastChainSettings = chainEntry
-                key = chainParent
+        if visited[key] then
+            -- Cycle detected. The standard case: walker came back to a key
+            -- it already tried (or to the originKey we're trying to position,
+            -- pre-seeded to prevent self-anchoring). Before giving up, try
+            -- one more hop via the hardcoded fallback table — this lets
+            -- chains like "secondaryPower → primaryPower → cdmEssential"
+            -- recover on classes that don't have a secondary power bar.
+            -- A second unvisited hop continues the walk; otherwise we're
+            -- truly stuck and fall through to UIParent below.
+            local fallback = FRAME_ANCHOR_FALLBACKS[key]
+            if fallback and not visited[fallback] then
+                key = fallback
             else
-                -- End of the chain; return the frame if it exists (even if hidden)
-                -- so that anchored frames keep their reference, or UIParent as last resort
-                return frame or UIParent, lastChainSettings
+                break
+            end
+        else
+            visited[key] = true
+
+            local frame = ResolveFrameForKey(key)
+
+            -- Frame exists and is shown (or at least alpha-shown) → use it
+            if frame and frame.IsShown and frame:IsShown() then
+                return frame, lastChainSettings
+            end
+
+            -- In Layout Mode, treat hidden-but-enabled frames as valid anchor
+            -- targets. The mover overlay is visible even when the actual frame is
+            -- hidden (e.g. pet bar on a class with no pet), so dependents should
+            -- still anchor to it rather than walking up the chain.
+            if frame and ns.QUI_LayoutMode and ns.QUI_LayoutMode.isActive then
+                return frame, lastChainSettings
+            end
+
+            -- Frame exists but hidden — hook its visibility so that when it
+            -- reappears, children that chain-walked past it get re-anchored back.
+            if frame then
+                InstallVisibilityHook(frame)
+            end
+
+            -- Frame unavailable → try hardcoded fallback first
+            local fallback = FRAME_ANCHOR_FALLBACKS[key]
+            if fallback then
+                key = fallback
+            else
+                -- No hardcoded fallback — walk up the user's configured anchor chain.
+                -- If key itself has an anchor override with a parent, try that parent
+                -- (e.g. datatextPanel is anchored to minimap → use minimap).
+                local chainEntry = anchoringDB and anchoringDB[key]
+                local chainParent = chainEntry and chainEntry.parent
+                if chainParent and chainParent ~= "screen" and chainParent ~= "disabled" then
+                    -- Remember this hidden link's anchor settings so the child can
+                    -- adopt them (replacing the hidden frame in the visual chain).
+                    lastChainSettings = chainEntry
+                    key = chainParent
+                else
+                    -- End of the chain; return the frame if it exists (even if hidden)
+                    -- so that anchored frames keep their reference, or UIParent as last resort
+                    return frame or UIParent, lastChainSettings
+                end
             end
         end
     end
@@ -2186,10 +2426,20 @@ function QUI_Anchoring:ApplyFrameAnchor(key, settings)
         end
     end
 
+    -- Only hideWithParent/keepInPlace make sense when settings.parent is a
+    -- real frame key. For the "screen" and "disabled" sentinels there's no
+    -- parent frame whose visibility we can track and no frame to SetPoint
+    -- against other than UIParent, which is always visible. In those cases
+    -- fall through to the normal chain-walk path so the frame is positioned
+    -- via ResolveParentFrame (which correctly resolves screen/disabled to
+    -- UIParent) instead of getting Hide()'d or teleported to UIParent center.
+    local parentKey = settings.parent
+    local parentIsSentinel = not parentKey or parentKey == "screen" or parentKey == "disabled"
+
     -- hideWithParent: skip fallback chain, hide child when direct parent is hidden
     local parentFrame
-    if settings.hideWithParent then
-        local directParent = ResolveFrameForKey(settings.parent)
+    if settings.hideWithParent and not parentIsSentinel then
+        local directParent = ResolveFrameForKey(parentKey)
         -- Hook visibility so we re-evaluate when the parent shows/hides
         if directParent then
             InstallVisibilityHook(directParent)
@@ -2231,11 +2481,11 @@ function QUI_Anchoring:ApplyFrameAnchor(key, settings)
             hideWithParentHidden[key] = nil
         end
         parentFrame = directParent
-    elseif settings.keepInPlace then
+    elseif settings.keepInPlace and not parentIsSentinel then
         -- Keep In Place: anchor directly to the parent frame even if hidden.
         -- WoW's SetPoint works on hidden frames, so the child stays at the
         -- correct relative position. No chain walk, no settings adoption.
-        local directParent = ResolveFrameForKey(settings.parent)
+        local directParent = ResolveFrameForKey(parentKey)
         if directParent then
             InstallVisibilityHook(directParent)
         end
@@ -2249,7 +2499,9 @@ function QUI_Anchoring:ApplyFrameAnchor(key, settings)
         parentFrame = ResolveFrameForKey(settings.parent) or UIParent
     else
         local chainSettings
-        parentFrame, chainSettings = ResolveParentFrame(settings.parent)
+        -- Pass `key` as originKey so the walker can never resolve a fallback
+        -- chain back to the frame we're positioning (self-anchor loop).
+        parentFrame, chainSettings = ResolveParentFrame(settings.parent, key)
 
         -- When a chain walk occurred (hidden intermediate frame), adopt the
         -- last hidden link's anchor points so the child "replaces" it visually.
@@ -2274,6 +2526,110 @@ function QUI_Anchoring:ApplyFrameAnchor(key, settings)
     local relative = settings.relative or "CENTER"
     local offsetX = settings.offsetX or 0
     local offsetY = settings.offsetY or 0
+
+    -- growAnchor: apply-time corner conversion for FREE-POSITION dynamic-
+    -- size containers (buff/debuff/auraBar with parent=disabled or screen).
+    --
+    -- For free-position containers, layout mode writes CENTER-relative drag
+    -- offsets (just like every other frame). But the container's actual
+    -- SetPoint anchor needs to be a CORNER so the icons don't drift toward
+    -- the center as the container grows/shrinks. The corner is determined
+    -- by icon grow direction (set via the buff borders config) and stored
+    -- as `settings.growAnchor`. Read here at apply time so the math always
+    -- uses fresh values: the container's current natural size and UIParent's
+    -- current dimensions.
+    --
+    -- IMPORTANT: only fires when the entry is CENTER-anchored (or has no
+    -- explicit point/relative — both mean "free position"). For chain-
+    -- anchored containers (e.g. buffFrame.parent=minimap with explicit
+    -- point=TOPRIGHT, relative=TOPLEFT), the user's stored anchor pair
+    -- already provides a stable fixed-corner reference: the source corner
+    -- of the SetPoint sits at a fixed location on the parent frame, and
+    -- icons positioned inside the container relative to that same source
+    -- corner stay stable as the container resizes. No conversion needed.
+    -- Forcing the conversion would rewrite the user's `relative` from
+    -- TOPLEFT to TOPRIGHT (or whatever growAnchor is) and visually break
+    -- the chain anchor.
+    -- growAnchor legacy CENTER→corner self-heal path.
+    --
+    -- As of 3.1.5 Phase 2, SavePendingPosition writes buff/debuff entries in
+    -- CORNER format directly (point=corner, relative=corner, offsets in
+    -- corner space). The normal apply path below handles those entries
+    -- with zero special-case code — it just SetPoints with the stored
+    -- values.
+    --
+    -- For LEGACY entries still in CENTER format (e.g. profiles that ran
+    -- through v25's "normalize to CENTER/CENTER" repair, or profiles from
+    -- before Phase 2 landed), this branch converts the CENTER offsets to
+    -- corner offsets at apply time AND writes the corner format back to
+    -- the DB. After the self-heal, the entry is in the new format and
+    -- this branch will never fire for it again.
+    --
+    -- Only fires when:
+    --   * The entry is CENTER/CENTER (or has no explicit point/relative)
+    --   * growAnchor is set to a valid corner (from UpdateGrowAnchor)
+    --   * The key is a buff/debuff/auraBar container
+    --   * The container has a REAL size (not the 1×1 pre-LayoutIcons state).
+    --     If the container is still at its initial 1×1, we SetPoint with
+    --     a reasonable fallback position but DO NOT write back — we wait
+    --     until LayoutIcons runs with real icons and re-triggers an apply.
+    local entryPoint    = settings.point or "CENTER"
+    local entryRelative = settings.relative or "CENTER"
+    local isLegacyCenter = entryPoint == "CENTER" and entryRelative == "CENTER"
+    if isLegacyCenter
+        and settings.growAnchor and CORNER_POINTS and CORNER_POINTS[settings.growAnchor]
+        and (key == "buffFrame" or key == "debuffFrame")
+    then
+        local corner = settings.growAnchor
+        local fwRaw = (resolved.GetWidth and resolved:GetWidth()) or 0
+        local fhRaw = (resolved.GetHeight and resolved:GetHeight()) or 0
+        local fw, fh = fwRaw, fhRaw
+        local sizeIsReal = fwRaw >= 4 and fhRaw >= 4
+        if fw < 4 then
+            fw = resolved._naturalW or settings._minWidth or 32
+        end
+        if fh < 4 then
+            fh = resolved._naturalH or settings._minHeight or 32
+        end
+        -- If we fell back via _naturalW/_naturalH, treat that as real
+        -- enough to self-heal — LayoutIcons was here at some point.
+        if not sizeIsReal and (resolved._naturalW and resolved._naturalW >= 4) then
+            sizeIsReal = true
+        end
+        local pw = (parentFrame and parentFrame.GetWidth and parentFrame:GetWidth()) or UIParent:GetWidth()
+        local ph = (parentFrame and parentFrame.GetHeight and parentFrame:GetHeight()) or UIParent:GetHeight()
+        local GA_FRAC_X = { TOPLEFT = 0, TOPRIGHT = 1, BOTTOMLEFT = 0, BOTTOMRIGHT = 1 }
+        local GA_FRAC_Y = { TOPLEFT = 1, TOPRIGHT = 1, BOTTOMLEFT = 0, BOTTOMRIGHT = 0 }
+        local cornerX = offsetX + (GA_FRAC_X[corner] - 0.5) * (fw - pw)
+        local cornerY = offsetY + (GA_FRAC_Y[corner] - 0.5) * (fh - ph)
+        SmoothSetPoint(resolved, corner, parentFrame, corner, cornerX, cornerY)
+
+        -- Self-heal: promote this entry from legacy CENTER format to the
+        -- new corner format if we have a real container size. Subsequent
+        -- applies will take the normal (non-branch) path because point/
+        -- relative are now the corner, and the stored offsets match the
+        -- SetPoint we just applied.
+        if sizeIsReal and QUICore and QUICore.db and QUICore.db.profile then
+            local faDB = QUICore.db.profile.frameAnchoring
+            local dbEntry = faDB and faDB[key]
+            if dbEntry
+                and (dbEntry.point == nil or dbEntry.point == "CENTER")
+                and (dbEntry.relative == nil or dbEntry.relative == "CENTER")
+            then
+                dbEntry.point = corner
+                dbEntry.relative = corner
+                dbEntry.offsetX = math.floor(cornerX + 0.5)
+                dbEntry.offsetY = math.floor(cornerY + 0.5)
+                -- growAnchor stays set; it's the "which corner is growth
+                -- aligned" metadata that UpdateGrowAnchor reads.
+            end
+        end
+
+        -- Skip ApplyAutoSizing — buff/debuff containers manage their own
+        -- size via LayoutIcons.
+        return
+    end
+
     local useSizeStable = IsSizeStableAnchoringEnabled(settings)
     -- During early init, UIParent dimensions haven't settled — CENTER offset
     -- computation produces wrong values. Use raw point instead; deferred
@@ -2289,6 +2645,15 @@ function QUI_Anchoring:ApplyFrameAnchor(key, settings)
     if key == "buffBar" or key == "buffFrame" or key == "debuffFrame" then
         -- Buff/debuff containers change size dynamically as auras appear/disappear.
         -- Raw point anchoring keeps the growth edge fixed.
+        useSizeStable = false
+    end
+    if key == "totemBar" then
+        -- Totem bar container resizes dynamically as totems drop/expire
+        -- (1x1 when empty → N icons wide when active). sizeStable caches
+        -- CENTER offsets from the width at apply time, so the frame visibly
+        -- jumps when the size changes later — especially in combat where
+        -- LayoutButtons defers the SetSize until PLAYER_REGEN_ENABLED.
+        -- Raw point anchoring keeps the growth edge fixed instead.
         useSizeStable = false
     end
 
@@ -2331,6 +2696,16 @@ function QUI_Anchoring:ApplyFrameAnchor(key, settings)
         local centerX, centerY = ComputeCenterOffsetsForAnchor(
             resolved, key, parentFrame, point, relative, offsetX, offsetY, settings.parent
         )
+        -- SetPoint offsets are interpreted in the frame's OWN scaled coord
+        -- space. centerX/Y are in UIParent (parent) coord. Divide by the
+        -- frame's own scale so the visual position matches. No-op for scale=1.
+        if resolved and resolved.GetScale then
+            local fScale = resolved:GetScale() or 1
+            if fScale > 0 and fScale ~= 1 then
+                centerX = centerX / fScale
+                centerY = centerY / fScale
+            end
+        end
         if not FrameAlreadyAtPosition(resolved, "CENTER", parentFrame, "CENTER", centerX, centerY) then
             _editModeReapplyGuard = true
             pcall(SmoothSetPoint, resolved, "CENTER", parentFrame, "CENTER", centerX, centerY)
@@ -2345,7 +2720,7 @@ function QUI_Anchoring:ApplyFrameAnchor(key, settings)
         -- at 1x1 intentionally and grow as icons appear; converting to
         -- CENTER would break the growth-edge anchoring that LayoutIcons
         -- depends on.
-        local skipInflation = key == "buffFrame" or key == "debuffFrame" or key == "buffBar"
+        local skipInflation = key == "buffFrame" or key == "debuffFrame" or key == "buffBar" or key == "totemBar"
         local needsInflation = false
         if not skipInflation and parentFrame and parentFrame ~= UIParent and parentFrame.GetSize then
             local ok, pw, ph = pcall(parentFrame.GetSize, parentFrame)
@@ -2577,7 +2952,7 @@ _G.QUI_ReanchorFramePositionOnly = function(key)
     local resolved = ResolveApplyFrameForKey(key)
     if not resolved then return end
 
-    local parentFrame = ResolveParentFrame(settings.parent)
+    local parentFrame = ResolveParentFrame(settings.parent, key)
     if not parentFrame then return end
 
     local point = settings.point or "CENTER"
@@ -2585,7 +2960,7 @@ _G.QUI_ReanchorFramePositionOnly = function(key)
     local offsetX = settings.offsetX or 0
     local offsetY = settings.offsetY or 0
     local useSizeStable = IsSizeStableAnchoringEnabled(settings)
-    if CASTBAR_ANCHOR_KEYS[key] or key == "buffBar" or key == "buffFrame" or key == "debuffFrame" then
+    if CASTBAR_ANCHOR_KEYS[key] or key == "buffBar" or key == "buffFrame" or key == "debuffFrame" or key == "totemBar" then
         useSizeStable = false
     end
 
@@ -2616,7 +2991,7 @@ _G.QUI_AnchorOverlayToParent = function(overlayFrame, key, overlayW, overlayH)
     local settings = anchoringDB[key]
     if type(settings) ~= "table" then return end
 
-    local parentFrame = ResolveParentFrame(settings.parent)
+    local parentFrame = ResolveParentFrame(settings.parent, key)
     if not parentFrame then return end
 
     local point = settings.point or "CENTER"
@@ -2624,7 +2999,7 @@ _G.QUI_AnchorOverlayToParent = function(overlayFrame, key, overlayW, overlayH)
     local offsetX = settings.offsetX or 0
     local offsetY = settings.offsetY or 0
     local useSizeStable = IsSizeStableAnchoringEnabled(settings)
-    if CASTBAR_ANCHOR_KEYS[key] or key == "buffBar" or key == "buffFrame" or key == "debuffFrame" then
+    if CASTBAR_ANCHOR_KEYS[key] or key == "buffBar" or key == "buffFrame" or key == "debuffFrame" or key == "totemBar" then
         useSizeStable = false
     end
 

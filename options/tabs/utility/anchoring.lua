@@ -64,7 +64,7 @@ local ANCHORING_DEFAULTS = {
     autoHeight     = false,
     heightAdjust   = 0,
     hideWithParent = false,
-    keepInPlace    = false,
+    keepInPlace    = true,
 }
 
 local HUD_MIN_WIDTH_DEFAULT = (Helpers and Helpers.HUD_MIN_WIDTH_DEFAULT) or 200
@@ -99,19 +99,73 @@ function QUI_Anchoring_Options:GetAnchoringDB()
     return db.frameAnchoring
 end
 
+-- Returns a table bound to frameAnchoring[key] that widgets can read from
+-- and write to. If the underlying entry does not yet exist, the returned
+-- table is a lazy proxy: reads fall through to ANCHORING_DEFAULTS, and the
+-- first write materializes the real entry in frameAnchoring (with defaults
+-- backfilled) before applying the write.
+--
+-- This prevents the "opening a settings panel resurrects the entry" bug.
+-- Previously this function unconditionally created anchoringDB[key] on
+-- read, which caused ApplyAllFrameAnchors to pick up default screen/CENTER
+-- entries for frames that should not have a frameAnchoring entry at all
+-- (notably CDM containers owned by ncdm.pos).
 function QUI_Anchoring_Options:GetFrameDB(key)
     local anchoringDB = self:GetAnchoringDB()
     if not anchoringDB then return nil end
-    if not anchoringDB[key] then
-        anchoringDB[key] = {}
-    end
-    -- Backfill missing defaults (handles entries created before new fields were added)
-    for k, v in pairs(ANCHORING_DEFAULTS) do
-        if anchoringDB[key][k] == nil then
-            anchoringDB[key][k] = v
+
+    -- Existing entry: backfill missing default fields in-place and return it.
+    local existing = anchoringDB[key]
+    if existing then
+        for k, v in pairs(ANCHORING_DEFAULTS) do
+            if existing[k] == nil then
+                existing[k] = v
+            end
         end
+        return existing
     end
-    return anchoringDB[key]
+
+    -- No entry: return a proxy that only materializes on a meaningful write.
+    --
+    -- "Meaningful" = the new value differs from ANCHORING_DEFAULTS. Widgets
+    -- commonly fire OnChange handlers that write back the *current* value
+    -- (e.g. dropdowns re-selecting the same option). Without this guard, any
+    -- such write would materialize a full default-valued entry into the raw
+    -- SV, which ApplyFrameAnchor would then pick up and SetPoint the live
+    -- frame to the default position — causing CDM containers to teleport to
+    -- screen center the moment a settings panel opens.
+    --
+    -- A real edit (user actually changes a dropdown/slider) will always
+    -- produce a value different from the default, so the materialization
+    -- still fires for legitimate interaction.
+    local proxy = {}
+    setmetatable(proxy, {
+        __index = function(_, k)
+            local real = anchoringDB[key]
+            if real and real[k] ~= nil then
+                return real[k]
+            end
+            return ANCHORING_DEFAULTS[k]
+        end,
+        __newindex = function(_, k, v)
+            local real = anchoringDB[key]
+            if not real then
+                -- Skip no-op writes that would just restamp defaults.
+                if v == ANCHORING_DEFAULTS[k] then
+                    return
+                end
+                real = {}
+                anchoringDB[key] = real
+                -- Backfill defaults so the newly-materialized entry has the
+                -- full metadata shape the anchoring system expects.
+                for dk, dv in pairs(ANCHORING_DEFAULTS) do
+                    real[dk] = dv
+                end
+            end
+            real[k] = v
+        end,
+    })
+    return proxy
 end
 
 function QUI_Anchoring_Options:GetAnchoringDefaults()

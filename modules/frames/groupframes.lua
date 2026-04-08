@@ -37,6 +37,7 @@ local string_format = string.format
 local math_floor = math.floor
 local math_min = math.min
 local math_max = math.max
+local math_ceil = math.ceil
 
 -- Upvalue hot-path WoW APIs
 local UnitExists = UnitExists
@@ -1445,6 +1446,17 @@ local function SetDispelBorderColorMixin(overlay, color)
     end
 end
 
+local function ShowConfiguredDispelOverlay(overlay, colors, dispelType, opacity)
+    if not dispelType or not colors then return false end
+
+    local c = colors[dispelType]
+    if not c then return false end
+
+    SetDispelBorderColor(overlay, c[1], c[2], c[3], opacity)
+    overlay:Show()
+    return true
+end
+
 local function UpdateDispelOverlay(frame)
     if not frame or not frame.unit or not frame.dispelOverlay then return end
     local isRaid = frame._isRaid
@@ -1462,22 +1474,80 @@ local function UpdateDispelOverlay(frame)
     local unit = frame.unit
     local overlay = frame.dispelOverlay
 
-    -- Check shared aura cache first to avoid redundant C_UnitAuras.GetUnitAuras call.
+    -- Check shared aura cache first to avoid redundant full aura scans.
     -- The cache was just populated by the aura dispatcher before this function runs.
     local GFA = ns.QUI_GroupFrameAuras
     local cache = GFA and GFA.unitAuraCache and GFA.unitAuraCache[unit]
     local hasDispellable = false
     local firstDispellableInstID = nil
+    local firstDispellableType = nil
+    local fromPrivateSlots = false
 
     if cache and cache.harmful then
         for _, auraData in ipairs(cache.harmful) do
-            if auraData.dispelName then
+            local matched = false
+            local instID = auraData.auraInstanceID
+
+            -- Preferred path: ask the client directly whether this aura is
+            -- dispellable by the player using the HARMFUL|RAID_PLAYER_DISPELLABLE
+            -- classification filter. This is more reliable than trusting that
+            -- `dispelName` was populated on the cached aura payload.
+            if instID and not IsSecretValue(instID)
+               and C_UnitAuras and C_UnitAuras.IsAuraFilteredOutByInstanceID then
+                local ok, filteredOut = pcall(
+                    C_UnitAuras.IsAuraFilteredOutByInstanceID,
+                    unit,
+                    instID,
+                    "HARMFUL|RAID_PLAYER_DISPELLABLE"
+                )
+                if ok and not IsSecretValue(filteredOut) and filteredOut == false then
+                    matched = true
+                end
+            end
+
+            -- Fallback: legacy/raw dispel type from the cached aura payload.
+            if not matched and auraData.dispelName and not IsSecretValue(auraData.dispelName) then
                 local dType = SafeValue(auraData.dispelName, nil)
                 if dType then
-                    hasDispellable = true
-                    firstDispellableInstID = auraData.auraInstanceID
-                    break
+                    matched = true
+                    firstDispellableType = dType
                 end
+            end
+
+            -- Extra fallback: refresh directly from the aura instance in case
+            -- the shared cache entry is missing dispel metadata.
+            if not matched and instID and C_UnitAuras and C_UnitAuras.GetAuraDataByAuraInstanceID then
+                local ok, liveAura = pcall(C_UnitAuras.GetAuraDataByAuraInstanceID, unit, instID)
+                if ok and liveAura and liveAura.dispelName and not IsSecretValue(liveAura.dispelName) then
+                    local dType = SafeValue(liveAura.dispelName, nil)
+                    if dType then
+                        matched = true
+                        firstDispellableType = dType
+                    end
+                end
+            end
+
+            if matched then
+                hasDispellable = true
+                firstDispellableInstID = instID
+
+                if not firstDispellableType and auraData.dispelName and not IsSecretValue(auraData.dispelName) then
+                    firstDispellableType = SafeValue(auraData.dispelName, nil)
+                end
+
+                break
+            end
+        end
+    end
+
+    if not hasDispellable then
+        local GFPA = ns.QUI_GroupFramePrivateAuras
+        if GFPA and GFPA.RefreshPrivateDispelState then
+            local privateState = GFPA:RefreshPrivateDispelState(unit)
+            if privateState and privateState.auraInstanceID then
+                hasDispellable = true
+                fromPrivateSlots = true
+                firstDispellableInstID = privateState.auraInstanceID
             end
         end
     end
@@ -1487,7 +1557,7 @@ local function UpdateDispelOverlay(frame)
         return
     end
 
-    -- WoW 12.0+ secret-safe path: C-side color resolution using cached auraInstanceID
+    -- Preferred color path: let the client resolve the color from the aura instance.
     if firstDispellableInstID and C_UnitAuras.GetAuraDispelTypeColor then
         local opacity = healerSettings.dispelOverlay.opacity or 0.8
         local curve = GetDispelColorCurve(opacity)
@@ -1501,23 +1571,22 @@ local function UpdateDispelOverlay(frame)
         end
     end
 
-    -- Fallback: use dispel type from cache directly
+    -- Fallback color path: look up the resolved dispel type in the color table.
     local colors = GetDispelColors()
-    if cache and cache.harmful then
-        for _, auraData in ipairs(cache.harmful) do
-            if auraData.dispelName then
-                local dType = SafeValue(auraData.dispelName, nil)
-                if dType and colors[dType] then
-                    local c = colors[dType]
-                    local fallbackOpacity = healerSettings.dispelOverlay.opacity or 0.8
-                    SetDispelBorderColor(overlay, c[1], c[2], c[3], fallbackOpacity)
-                    overlay:Show()
-                    return
-                end
-            end
-        end
+    local fallbackOpacity = healerSettings.dispelOverlay.opacity or 0.8
+    if ShowConfiguredDispelOverlay(overlay, colors, firstDispellableType, fallbackOpacity) then
+        return
     end
-    overlay:Hide()
+
+    -- Last-resort fallback: detection succeeded but no type-specific color
+    -- could be resolved. For private-slot-only matches, prefer any available
+    -- dispel color; otherwise default to Magic blue so the healer still sees
+    -- the overlay instead of silently dropping it.
+    local fallback = fromPrivateSlots and colors and (colors.Magic or colors.Curse or colors.Disease or colors.Poison)
+        or (colors and colors.Magic)
+    fallback = fallback or { 0.2, 0.6, 1.0, 1 }
+    SetDispelBorderColor(overlay, fallback[1], fallback[2], fallback[3], fallbackOpacity)
+    overlay:Show()
 end
 
 ---------------------------------------------------------------------------
@@ -2452,6 +2521,66 @@ local function GetAnchorPosition(key, db)
     return pos and pos.offsetX or -400, pos and pos.offsetY or 0
 end
 
+-- Compute a fallback size for an anchor root when no headers are visible
+-- (solo for party, or no raid members for raid).  Frames anchored to this
+-- root via keepInPlace need a valid GetLeft/GetWidth to compute coordinates
+-- against, otherwise they render at nil coordinates.  The fallback matches
+-- what Layout Mode's test mode would display for a full party/raid so the
+-- size is consistent between the two modes.
+local function GetAnchorFallbackSize(key, db)
+    local isRaid = key == "raid"
+    local vdb = isRaid and (db and (db.raid or db)) or (db and (db.party or db))
+    local layout = (vdb and vdb.layout)
+        or (db and ((isRaid and db.raidLayout) or db.partyLayout))
+        or (db and db.layout)
+
+    local count
+    if isRaid then
+        count = (db and db.testMode and db.testMode.raidCount) or 25
+    else
+        count = 5
+    end
+
+    local framesPerGroup = 5
+    local numGroups = math_ceil(count / framesPerGroup)
+    local spacing = (layout and layout.spacing) or 2
+    local groupSpacing = (layout and layout.groupSpacing) or 10
+    local grow = (layout and layout.growDirection) or "DOWN"
+    local horizontal = (grow == "LEFT" or grow == "RIGHT")
+
+    -- Frame dimensions — mirror the logic in groupframes_editmode.lua
+    -- EnableTestMode for consistency with the live layout-mode preview.
+    local dims = vdb and vdb.dimensions
+    local mode
+    if count <= 5 then mode = "party"
+    elseif count <= 15 then mode = "small"
+    elseif count <= 25 then mode = "medium"
+    else mode = "large"
+    end
+
+    local frameW, frameH
+    if mode == "party" then
+        frameW, frameH = (dims and dims.partyWidth) or 200, (dims and dims.partyHeight) or 40
+    elseif mode == "small" then
+        frameW, frameH = (dims and dims.smallRaidWidth) or 180, (dims and dims.smallRaidHeight) or 36
+    elseif mode == "medium" then
+        frameW, frameH = (dims and dims.mediumRaidWidth) or 160, (dims and dims.mediumRaidHeight) or 30
+    else
+        frameW, frameH = (dims and dims.largeRaidWidth) or 140, (dims and dims.largeRaidHeight) or 24
+    end
+
+    local totalW, totalH
+    if horizontal then
+        totalW = framesPerGroup * frameW + (framesPerGroup - 1) * spacing
+        totalH = numGroups * frameH + (numGroups - 1) * groupSpacing
+    else
+        totalW = numGroups * frameW + (numGroups - 1) * groupSpacing
+        totalH = framesPerGroup * frameH + (framesPerGroup - 1) * spacing
+    end
+
+    return math_max(totalW, 1), math_max(totalH, 1)
+end
+
 local function GetHeaderLeadEdge(isRaid)
     local layout = GetLayoutSettings(isRaid)
     local grow = GetLayoutGrowDirection(layout, "DOWN")
@@ -2518,7 +2647,19 @@ local function UpdateAnchorRoot(key, mainHeader, selfHeader, isRaid)
     local selfVisible = selfHeader and selfHeader:IsShown()
 
     if not mainVisible and not selfVisible then
+        -- No headers to display, but we still give the root a valid
+        -- SetPoint and SetSize so frames anchored to it via keepInPlace
+        -- (in the anchoring system) can compute coordinates.  Without
+        -- this, GetLeft/GetBottom/GetWidth all return nil on the hidden
+        -- root and any child anchored through it renders at nil
+        -- coordinates (invisible).  The size matches what Layout Mode's
+        -- test mode would display for a full party/raid so there's no
+        -- visual jump between layout mode and gameplay.
+        local fallbackW, fallbackH = GetAnchorFallbackSize(key, db)
+        local posX, posY = GetAnchorPosition(key, db)
         root:ClearAllPoints()
+        root:SetPoint("CENTER", UIParent, "CENTER", posX, posY)
+        root:SetSize(fallbackW, fallbackH)
         root:Hide()
         return
     end
@@ -4524,6 +4665,10 @@ local function OnEvent(self, event, arg1, ...)
 end
 
 eventFrame:SetScript("OnEvent", OnEvent)
+
+-- Perf profiler opt-in (no-op until /qui perf → Modules toggle)
+ns.QUI_PerfRegistry = ns.QUI_PerfRegistry or {}
+ns.QUI_PerfRegistry[#ns.QUI_PerfRegistry + 1] = { name = "GroupFrames", frame = eventFrame }
 
 ---------------------------------------------------------------------------
 -- EVENT REGISTRATION

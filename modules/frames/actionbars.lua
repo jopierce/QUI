@@ -209,11 +209,20 @@ end
 -- comparison operators, so secret booleans/numbers pass through safely.
 -- Installed as an instance shadow so any residual mixin path that
 -- reaches self:Update() hits this safe version.
+-- Pre-filtered "buttons with an action" set. Mirrors LibActionButton's
+-- ActiveButtons pattern: maintained by SafeUpdate, consumed by the centralized
+-- state/usable/cooldown loops so they skip empty slots without an O(N)
+-- iterate + HasAction check every tick. Weak-keyed so destroyed buttons
+-- drop out automatically.
+ActionBarsOwned._activeButtons = ActionBarsOwned._activeButtons
+    or setmetatable({}, { __mode = "k" })
+
 function ActionBarsOwned.SafeUpdate(self)
     local action = self.action
     if not action then return end
 
     if HasAction(action) then
+        ActionBarsOwned._activeButtons[self] = true
         -- Icon
         local texture = GetActionTexture(action)
         -- Assisted combat rotation slots return nil texture when the
@@ -313,6 +322,7 @@ function ActionBarsOwned.SafeUpdate(self)
         end
     else
         -- Empty slot
+        ActionBarsOwned._activeButtons[self] = nil
         self.icon:Hide()
         if self.SlotBackground then self.SlotBackground:Show() end
         self:SetChecked(false)
@@ -448,6 +458,7 @@ end
 local SkinButton, UpdateButtonText, UpdateEmptySlotVisibility, UpdateKeybindText
 local FadeHideTextures, FadeShowTextures
 local ApplyAllBarSpacing
+local ApplyFlyoutDirection, ApplyAllFlyoutDirections
 
 -- Store QUI state outside secure Blizzard frame tables.
 -- Writing custom keys directly on action buttons can taint secret values.
@@ -1087,8 +1098,50 @@ local function CreateBarContainer(barKey)
     container:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
     container:Show()
     container:SetClampedToScreen(true)
+
+    -- Override / vehicle / possess / petbattle visibility gate.
+    --
+    -- Blizzard's OverrideActionBar and the pet battle UI take over input
+    -- during those states; leaving any QUI bar visible would draw
+    -- duplicate or empty icons.  We can't use the reserved "visibility"
+    -- state driver because it unconditionally Show()s the frame when the
+    -- macro doesn't match, which would clobber bars the user has
+    -- disabled (bar7/8 off, no-pet pet bar, no-stance stance bar, etc.).
+    --
+    -- Instead, use a custom state handler that hides on override but
+    -- only re-shows when the frame's "qui-user-shown" attribute is true.
+    -- Lua code that controls visibility (disable, HasPetUI,
+    -- GetNumShapeshiftForms) sets qui-user-shown alongside Show/Hide
+    -- calls via SetBarContainerShown() below.
+    container:SetAttribute("qui-user-shown", true)
+    container:SetAttribute("_onstate-quioverride", [[
+        if newstate == "hide" then
+            self:Hide()
+        elseif self:GetAttribute("qui-user-shown") then
+            self:Show()
+        end
+    ]])
+    RegisterStateDriver(container, "quioverride",
+        "[overridebar][vehicleui][possessbar][petbattle] hide; show")
+
     return container
 end
+
+-- Central helper for toggling a bar container's intended visibility.
+-- Sets the qui-user-shown attribute so the override/vehicle state driver
+-- knows whether to re-show the bar on exit, and calls Show/Hide to apply
+-- the change immediately (when out of combat).
+local function SetBarContainerShown(container, shown)
+    if not container then return end
+    container:SetAttribute("qui-user-shown", shown and true or false)
+    if InCombatLockdown() then return end
+    if shown then
+        container:Show()
+    else
+        container:Hide()
+    end
+end
+ActionBarsOwned.SetBarContainerShown = SetBarContainerShown
 
 ---------------------------------------------------------------------------
 -- LAYOUT ENGINE
@@ -3060,6 +3113,7 @@ UpdatePetBarVisibility = function()
 
     local barDB = GetBarSettings("pet")
     if barDB and barDB.enabled == false then
+        container:SetAttribute("qui-user-shown", false)
         if not InCombatLockdown() or inInitSafeWindow then
             container:Hide()
         else
@@ -3079,6 +3133,7 @@ UpdatePetBarVisibility = function()
     local wasShown = container:IsShown()
     local hasPet = HasPetUI and HasPetUI()
     if hasPet then
+        container:SetAttribute("qui-user-shown", true)
         container:Show()
         -- Populate pet button icons/state (PetActionBarMixin:Update on the
         -- original bar is suppressed, so QUI drives visuals directly).
@@ -3092,6 +3147,7 @@ UpdatePetBarVisibility = function()
         -- PLAYER_REGEN_ENABLED so pet events have a chance to populate.
         ActionBarsOwned.pendingPetUpdate = true
     else
+        container:SetAttribute("qui-user-shown", false)
         container:Hide()
     end
     -- Notify anchoring system when visibility changed so dependents re-anchor
@@ -3113,6 +3169,7 @@ UpdateStanceBarLayout = function()
 
     local barDB = GetBarSettings("stance")
     if barDB and barDB.enabled == false then
+        container:SetAttribute("qui-user-shown", false)
         container:Hide()
         if _G.QUI_UpdateFramesAnchoredTo then _G.QUI_UpdateFramesAnchoredTo("stanceBar") end
         return
@@ -3130,6 +3187,7 @@ UpdateStanceBarLayout = function()
             ActionBarsOwned.pendingStanceUpdate = true
             return
         end
+        container:SetAttribute("qui-user-shown", false)
         container:Hide()
         if wasShown and _G.QUI_UpdateFramesAnchoredTo then
             _G.QUI_UpdateFramesAnchoredTo("stanceBar")
@@ -3137,6 +3195,7 @@ UpdateStanceBarLayout = function()
         return
     end
 
+    container:SetAttribute("qui-user-shown", true)
     container:Show()
 
     -- Populate stance button icons/state (bar-level Update is suppressed).
@@ -3262,12 +3321,21 @@ do
         cooldown:SetCooldownFromDurationObject(durationObject)
     end
 
-    function ActionBarsOwned.UpdateCooldown(button)
-        local action = button.action or button:GetAttribute("action")
-        if not action or action == 0 then return end
+    -- Per-button "was on cooldown last scan" cache. Skips redundant Clear()
+    -- calls on idle buttons (the common case — ~90 of 96 buttons are usually
+    -- off cooldown at any given moment). In raid combat, SPELL_UPDATE_COOLDOWN
+    -- fires ~20-30/sec and we scan all 96 buttons on each tick; without this
+    -- cache we hit Clear() 270 times per tick (cooldown + charge + LoC frames)
+    -- for buttons that are already cleared.
+    local _buttonWasActive = setmetatable({}, { __mode = "k" })
 
-        -- Skip empty slots entirely — avoids 3+ API calls on buttons with no spell
-        if not HasAction(action) then return end
+    function ActionBarsOwned.UpdateCooldown(button)
+        -- Hot path: called every ~100ms for all active buttons. Every
+        -- saved Lua op compounds to measurable ms/sec in raid combat.
+        -- `button.action` is always set by SafeSyncAction/state driver,
+        -- so the GetAttribute fallback is dead code and has been removed.
+        local action = button.action
+        if not action or action == 0 then return end
 
         local cooldown = button.cooldown or button.Cooldown
         if not cooldown then return end
@@ -3278,12 +3346,17 @@ do
             -- button for the majority of buttons not on cooldown at any moment).
             local cdInfo = C_ActionBar.GetActionCooldown(action) or DEFAULT_CD_INFO
             if not cdInfo.isActive then
-                -- Not on cooldown — clear everything quickly
-                cooldown:Clear()
-                if button.chargeCooldown then button.chargeCooldown:Clear() end
-                if button.lossOfControlCooldown then button.lossOfControlCooldown:Clear() end
+                -- Idle button: only clear the frames on the active→inactive
+                -- transition. Subsequent idle scans skip the Clear() churn.
+                if _buttonWasActive[button] then
+                    _buttonWasActive[button] = nil
+                    cooldown:Clear()
+                    if button.chargeCooldown then button.chargeCooldown:Clear() end
+                    if button.lossOfControlCooldown then button.lossOfControlCooldown:Clear() end
+                end
                 return
             end
+            _buttonWasActive[button] = true
 
             -- Button IS on cooldown — now check charges and LoC (2 more API calls)
             local chgInfo = C_ActionBar.GetActionCharges(action) or DEFAULT_CHG_INFO
@@ -3329,15 +3402,23 @@ do
         if now == _lastCdUpdateTime then return end
         _lastCdUpdateTime = now
 
+        -- Fast path: iterate only buttons with actions (LibActionButton
+        -- pattern). Typical raid: ~30-50 active of 96 total.
+        local activeButtons = ActionBarsOwned._activeButtons
+        if next(activeButtons) ~= nil then
+            for btn in pairs(activeButtons) do
+                ActionBarsOwned.UpdateCooldown(btn)
+            end
+            return
+        end
+
+        -- Fallback: full scan before the first SafeUpdate pass has
+        -- populated _activeButtons (fresh login, brief window before
+        -- PLAYER_ENTERING_WORLD-driven refresh).
         for _, barKey in ipairs(STANDARD_BAR_KEYS) do
-            -- Always update even when faded — cooldown state must be current
-            -- so swipes render correctly on fade-in.
             local buttons = ActionBarsOwned.nativeButtons[barKey]
             if buttons then
                 for _, btn in ipairs(buttons) do
-                    -- Skip empty slots at loop level to avoid function call +
-                    -- attribute lookups (UpdateCooldown also checks HasAction
-                    -- internally, but this avoids the overhead for 40-60 empty buttons)
                     if HasAction(btn.action or 0) then
                         ActionBarsOwned.UpdateCooldown(btn)
                     end
@@ -3708,44 +3789,88 @@ ActionBarsOwned.UpdateAllAssistedCombatRotation = UpdateAllAssistedCombatRotatio
 
 end -- do (spell glow / highlight / assisted rotation)
 
+-- Lean checked-state refresh: IsCurrentAction / IsAutoRepeatAction +
+-- SetChecked. Used for ACTIONBAR_UPDATE_STATE which fires frequently in
+-- combat (every autoattack toggle, every current-action change). Avoids
+-- the 20-API-call full SafeUpdate path for events that only affect
+-- the checked state. Mirrors LibActionButton's UpdateButtonState.
+local _lastStateUpdateTime = 0
+function ActionBarsOwned.UpdateAllButtonStates()
+    local now = GetTime()
+    if now == _lastStateUpdateTime then return end
+    _lastStateUpdateTime = now
+
+    for btn in pairs(ActionBarsOwned._activeButtons) do
+        local action = btn.action
+        if action and action ~= 0 then
+            if IsCurrentAction(action) or IsAutoRepeatAction(action) then
+                btn:SetChecked(true)
+            else
+                btn:SetChecked(false)
+            end
+        end
+    end
+end
+
 -- Full visual refresh for all owned action buttons via SafeUpdate.
 -- Uses only truthiness tests on API returns — safe during combat.
 local _lastVisualUpdateTime = 0
+local _visualFirstRunDone = false
 function ActionBarsOwned.UpdateAllButtonVisuals()
     -- Hard throttle: max once per frame
     local now = GetTime()
     if now == _lastVisualUpdateTime then return end
     _lastVisualUpdateTime = now
 
-    for _, barKey in ipairs(STANDARD_BAR_KEYS) do
-        -- Always update even when the bar is faded out.  Mouseover-hidden
-        -- bars still need current icon/action data so they render correctly
-        -- on fade-in.  Events like SPELLS_CHANGED fire after reload and
-        -- must not be silently dropped for hidden bars.
-        local btns = ActionBarsOwned.nativeButtons[barKey]
-        if btns then
-            for _, btn in ipairs(btns) do
-                local action = btn.action or 0
-                if HasAction(action) then
-                    -- Button has an action — always update visuals
-                    local state = GetFrameState(btn)
-                    state.wasEmpty = false
-                    pcall(ActionBarsOwned.SafeUpdate, btn)
-                else
-                    -- Empty slot — run SafeUpdate once to clear visuals
-                    -- on the transition, then skip on subsequent ticks
-                    local state = GetFrameState(btn)
-                    if not state.wasEmpty then
-                        state.wasEmpty = true
+    -- First run needs a full scan: it's where _activeButtons gets populated
+    -- for the first time (SafeUpdate sets the entries). All empty-slot
+    -- visuals are also initialized here. Subsequent runs iterate only the
+    -- active set (typical: 30-50 vs 96).
+    --
+    -- Full scans also run when SPELLS_CHANGED, PLAYER_ENTERING_WORLD, or
+    -- similar "something big happened" events fire — those need to walk
+    -- every button to catch mass action-table shuffles. Those events
+    -- force _visualFirstRunDone = false via ForceFullVisualRescan.
+    if not _visualFirstRunDone then
+        for _, barKey in ipairs(STANDARD_BAR_KEYS) do
+            local btns = ActionBarsOwned.nativeButtons[barKey]
+            if btns then
+                for _, btn in ipairs(btns) do
+                    local action = btn.action or 0
+                    if HasAction(action) then
+                        local state = GetFrameState(btn)
+                        state.wasEmpty = false
                         pcall(ActionBarsOwned.SafeUpdate, btn)
+                    else
+                        local state = GetFrameState(btn)
+                        if not state.wasEmpty then
+                            state.wasEmpty = true
+                            pcall(ActionBarsOwned.SafeUpdate, btn)
+                        end
                     end
                 end
             end
+        end
+        _visualFirstRunDone = true
+    else
+        -- Fast path: iterate only buttons with actions. Active→empty
+        -- transitions are handled by SafeSyncAction/ACTIONBAR_SLOT_CHANGED
+        -- paths calling SafeUpdate directly on the affected button.
+        for btn in pairs(ActionBarsOwned._activeButtons) do
+            local state = GetFrameState(btn)
+            state.wasEmpty = false
+            pcall(ActionBarsOwned.SafeUpdate, btn)
         end
     end
 
     -- Rebuild spell-to-button reverse lookup for glow events
     ActionBarsOwned.RebuildSpellIdMap()
+end
+
+-- Force the next UpdateAllButtonVisuals call to do a full scan (covers
+-- mass action-table shuffles where individual slot events aren't reliable).
+function ActionBarsOwned.ForceFullVisualRescan()
+    _visualFirstRunDone = false
 end
 
 ---------------------------------------------------------------------------
@@ -3761,24 +3886,29 @@ end
 -- because cooldown swipes are visually continuous.  Full visual updates
 -- (icon, name, border, glow) use 66ms (~15/sec) since they're discrete
 -- state changes where the extra latency is imperceptible.
-local AB_CD_UPDATE_INTERVAL  = 0.033  -- 33ms for cooldown-only
-local AB_VIS_UPDATE_INTERVAL = 0.066  -- 66ms for full visual refresh
+local AB_CD_UPDATE_INTERVAL    = 0.100  -- 100ms for cooldown-only (10Hz — cooldown swipes self-animate once set, so this only gates detection latency)
+local AB_STATE_UPDATE_INTERVAL = 0.066  -- 66ms for checked-state (autoattack/current-action toggle)
+local AB_VIS_UPDATE_INTERVAL   = 0.100  -- 100ms for full visual refresh (10Hz — discrete state changes tolerate this)
 
--- Unified update frame: merges cooldown and visual update into a single
--- OnUpdate handler with dirty flags.  When visuals are dirty, SafeUpdate
--- already calls UpdateCooldown() internally (line 259), so we skip the
--- separate cooldown pass.  When only cooldowns are dirty (most common in
--- combat), the lightweight UpdateAllCooldowns runs alone.
+-- Unified update frame: merges cooldown, state and visual update into a
+-- single OnUpdate handler with dirty flags. When visuals are dirty,
+-- SafeUpdate already covers checked state + cooldown internally, so those
+-- flags are subsumed. When only state is dirty (common in combat from
+-- ACTIONBAR_UPDATE_STATE), a lean per-button SetChecked pass runs instead
+-- of the 20-API-call SafeUpdate chain.
 local abUpdateFrame = CreateFrame("Frame")
 abUpdateFrame:Hide()
 abUpdateFrame._lastCd = 0
+abUpdateFrame._lastState = 0
 abUpdateFrame._lastVis = 0
 abUpdateFrame._dirtyCooldowns = false
+abUpdateFrame._dirtyStates = false
 abUpdateFrame._dirtyVisuals = false
 
 abUpdateFrame:SetScript("OnUpdate", function(self)
     local now = GetTime()
     local doVis = self._dirtyVisuals
+    local doState = self._dirtyStates
     local doCd  = self._dirtyCooldowns
 
     if doVis then
@@ -3786,10 +3916,25 @@ abUpdateFrame:SetScript("OnUpdate", function(self)
         self:Hide()
         self._lastVis = now
         self._lastCd = now
+        self._lastState = now
         self._dirtyCooldowns = false
+        self._dirtyStates = false
         self._dirtyVisuals = false
-        -- SafeUpdate includes cooldown update internally
+        -- SafeUpdate includes cooldown + checked state internally
         ActionBarsOwned.UpdateAllButtonVisuals()
+    elseif doState then
+        if now - self._lastState < AB_STATE_UPDATE_INTERVAL then return end
+        -- State is lean; if cooldowns are also dirty, run them in the same
+        -- tick to avoid a second OnUpdate wake-up.
+        self:Hide()
+        self._lastState = now
+        self._dirtyStates = false
+        ActionBarsOwned.UpdateAllButtonStates()
+        if doCd and (now - self._lastCd >= AB_CD_UPDATE_INTERVAL) then
+            self._lastCd = now
+            self._dirtyCooldowns = false
+            ActionBarsOwned.UpdateAllCooldowns()
+        end
     elseif doCd then
         if now - self._lastCd < AB_CD_UPDATE_INTERVAL then return end
         self:Hide()
@@ -3801,13 +3946,48 @@ abUpdateFrame:SetScript("OnUpdate", function(self)
     end
 end)
 
+-- Profiler: split cooldown-path vs state-path vs visual-path work so we
+-- can see which is hot. We wrap the update functions at the SetScript
+-- handler level rather than the OnUpdate tick, so the measurement
+-- reflects only the actual refresh cost (not throttled no-op ticks).
+do
+    local origAllCd    = ActionBarsOwned.UpdateAllCooldowns
+    local origAllVis   = ActionBarsOwned.UpdateAllButtonVisuals
+    local origAllState = ActionBarsOwned.UpdateAllButtonStates
+    local cdProbeFrame    = CreateFrame("Frame")
+    local visProbeFrame   = CreateFrame("Frame")
+    local stateProbeFrame = CreateFrame("Frame")
+    cdProbeFrame:SetScript("OnEvent",    function() origAllCd()    end)
+    visProbeFrame:SetScript("OnEvent",   function() origAllVis()   end)
+    stateProbeFrame:SetScript("OnEvent", function() origAllState() end)
+    ActionBarsOwned.UpdateAllCooldowns     = function() cdProbeFrame:GetScript("OnEvent")()    end
+    ActionBarsOwned.UpdateAllButtonVisuals = function() visProbeFrame:GetScript("OnEvent")()   end
+    ActionBarsOwned.UpdateAllButtonStates  = function() stateProbeFrame:GetScript("OnEvent")() end
+    ns.QUI_PerfRegistry = ns.QUI_PerfRegistry or {}
+    ns.QUI_PerfRegistry[#ns.QUI_PerfRegistry + 1] = { name = "AB_Cooldowns", frame = cdProbeFrame,    scriptType = "OnEvent" }
+    ns.QUI_PerfRegistry[#ns.QUI_PerfRegistry + 1] = { name = "AB_States",    frame = stateProbeFrame, scriptType = "OnEvent" }
+    ns.QUI_PerfRegistry[#ns.QUI_PerfRegistry + 1] = { name = "AB_Visuals",   frame = visProbeFrame,   scriptType = "OnEvent" }
+end
+
 local function ScheduleABCooldownUpdate()
     abUpdateFrame._dirtyCooldowns = true
     abUpdateFrame:Show()
 end
 
-local function ScheduleABVisualUpdate()
+local function ScheduleABVisualUpdate(full)
     abUpdateFrame._dirtyVisuals = true
+    if full then
+        -- Mass action-table shuffles (shapeshift, vehicle swap, fresh world,
+        -- spell learn/unlearn) need a full scan because the old _activeButtons
+        -- set is stale — the same button handle may now point at a different
+        -- action and some active→empty transitions aren't event-signalled.
+        ActionBarsOwned.ForceFullVisualRescan()
+    end
+    abUpdateFrame:Show()
+end
+
+local function ScheduleABStateUpdate()
+    abUpdateFrame._dirtyStates = true
     abUpdateFrame:Show()
 end
 
@@ -4011,6 +4191,10 @@ local function OnOwnedEvent(self, event, ...)
             ActionBarsOwned.pendingSpacing = false
             ApplyAllBarSpacing()
         end
+        if ActionBarsOwned.pendingFlyoutDirection then
+            ActionBarsOwned.pendingFlyoutDirection = false
+            if ApplyAllFlyoutDirections then ApplyAllFlyoutDirections() end
+        end
         -- Post-combat full refresh.  SafeUpdate kept visuals live during
         -- combat.  Now call the mixin's full ActionButton_Update (safe out
         -- of combat — no secret values) so the hooksecurefunc on
@@ -4103,6 +4287,9 @@ local function OnOwnedEvent(self, event, ...)
                 RestoreContainerPosition(barKey)
             end
             RefreshAllNativeVisuals()
+            -- PEW covers zone/arena/BG entry — action set may differ,
+            -- force a full scan so the active button set rebuilds.
+            ActionBarsOwned.ForceFullVisualRescan()
             ActionBarsOwned.UpdateAllButtonVisuals()
             ActionBarsOwned.UpdateAllCooldowns()
             UpdatePetBarVisibility()
@@ -4144,10 +4331,15 @@ local function OnOwnedEvent(self, event, ...)
         -- Debounced: fires 20+/sec in combat, coalesced to ~20/sec max.
         ScheduleABCooldownUpdate()
 
-    elseif event == "ACTIONBAR_UPDATE_STATE"
-        or event == "SPELL_UPDATE_ICON" then
-        -- Checked state or icon changes.  Per-button events are
-        -- unregistered, so dispatch centrally via SafeUpdate.
+    elseif event == "ACTIONBAR_UPDATE_STATE" then
+        -- Checked state only (autoattack, toggle abilities, current action).
+        -- This event fires very frequently in combat — dispatch via the
+        -- lean SetChecked-only pass instead of the full SafeUpdate chain.
+        ScheduleABStateUpdate()
+
+    elseif event == "SPELL_UPDATE_ICON" then
+        -- Icon texture changed (rare — spell morphs, glyphs, etc).
+        -- Needs full SafeUpdate to refresh the icon texture.
         ScheduleABVisualUpdate()
 
     elseif event == "ACTIONBAR_UPDATE_USABLE" then
@@ -4223,7 +4415,7 @@ local function OnOwnedEvent(self, event, ...)
         -- Talent swap, respec, new spell learned — full refresh of icons,
         -- usability, cooldowns, flyouts, and empty slot visibility.
         -- Coalesced: SPELLS_CHANGED fires more often than expected in 12.0+.
-        ScheduleABVisualUpdate()
+        ScheduleABVisualUpdate(true)  -- force full scan: action table reshuffled
         ScheduleABCooldownUpdate()
         ActionBarsOwned.UpdateAllOverlayGlows()
         -- Update flyout data on all buttons
@@ -4279,7 +4471,7 @@ local function OnOwnedEvent(self, event, ...)
 
     elseif event == "UPDATE_VEHICLE_ACTIONBAR" then
         -- Vehicle action bar data changed — full refresh (coalesced)
-        ScheduleABVisualUpdate()
+        ScheduleABVisualUpdate(true)  -- force full scan: vehicle swaps whole action set
         ScheduleABCooldownUpdate()
         ActionBarsOwned.UpdateAllOverlayGlows()
         ApplyBar1OverrideBindings()
@@ -4292,7 +4484,7 @@ local function OnOwnedEvent(self, event, ...)
         -- Equipment changed — items on action bars may need icon/cooldown refresh
         local unit = ...
         if unit == "player" then
-            ScheduleABVisualUpdate()
+            ScheduleABVisualUpdate(true)  -- force full scan: item slots may have gained/lost actions
             ScheduleABCooldownUpdate()
         end
 
@@ -4333,6 +4525,9 @@ end
 
 -- Event handler is set here; events are registered in Initialize().
 ownedEventFrame:SetScript("OnEvent", OnOwnedEvent)
+
+ns.QUI_PerfRegistry = ns.QUI_PerfRegistry or {}
+ns.QUI_PerfRegistry[#ns.QUI_PerfRegistry + 1] = { name = "ActionBars", frame = ownedEventFrame }
 
 ---------------------------------------------------------------------------
 -- EXTRA BUTTON CUSTOMIZATION (Extra Action Button & Zone Ability)
@@ -5206,6 +5401,14 @@ UpdateKeybindText = function(button, settings)
             num = buttonName:match("^QUI_Bar8Button(%d+)$")
             if num then bindingName = "MULTIACTIONBAR7BUTTON" .. num end
         end
+        if not bindingName then
+            num = buttonName:match("^QUI_PetButton(%d+)$")
+            if num then bindingName = "BONUSACTIONBUTTON" .. num end
+        end
+        if not bindingName then
+            num = buttonName:match("^QUI_StanceButton(%d+)$")
+            if num then bindingName = "SHAPESHIFTBUTTON" .. num end
+        end
 
         -- Blizzard button names (fallback for reparented buttons)
         if not bindingName then
@@ -6070,6 +6273,43 @@ ApplyAllBarSpacing = function()
 
     for barKey, _ in pairs(BUTTON_PATTERNS) do
         ApplyButtonSpacing(barKey)
+    end
+end
+
+-- Apply the user's flyoutDirection setting to each button on a standard bar.
+-- "AUTO" clears the attribute so Blizzard's position-based auto-detect runs.
+-- Writing secure attributes on tainted addon buttons during combat causes
+-- taint, so defer to PLAYER_REGEN_ENABLED when locked down.
+local VALID_FLYOUT_DIRS = { UP = true, DOWN = true, LEFT = true, RIGHT = true }
+
+ApplyFlyoutDirection = function(barKey)
+    local buttons = ActionBarsOwned.nativeButtons and ActionBarsOwned.nativeButtons[barKey]
+    if not buttons or #buttons == 0 then return end
+
+    local db = GetDB()
+    local barDB = db and db.bars and db.bars[barKey]
+    local layout = barDB and barDB.ownedLayout
+    if not layout then return end
+
+    if InCombatLockdown() then
+        ActionBarsOwned.pendingFlyoutDirection = true
+        return
+    end
+
+    local dir = layout.flyoutDirection
+    if not VALID_FLYOUT_DIRS[dir] then dir = nil end -- AUTO / unset
+
+    for _, btn in ipairs(buttons) do
+        if btn and btn.SetAttribute then
+            btn:SetAttribute("flyoutDirection", dir)
+            if btn.UpdateFlyout then pcall(btn.UpdateFlyout, btn) end
+        end
+    end
+end
+
+ApplyAllFlyoutDirections = function()
+    for _, barKey in ipairs(STANDARD_BAR_KEYS) do
+        ApplyFlyoutDirection(barKey)
     end
 end
 
@@ -7094,35 +7334,27 @@ function ActionBarsOwned:Initialize()
         BuildBar(barKey)
     end
 
-    -- Hide OverrideActionBar entirely.
-    -- QUI bar1 already pages to override/vehicle action indices via the
-    -- secure _onstate-page handler, so the Blizzard OverrideActionBar is
-    -- redundant.  Leaving it active causes taint: its buttons share the
-    -- ActionBarButtonEventsFrame dispatch with QUI's tainted buttons,
-    -- and the iteration context propagates taint to the secure buttons.
+    -- Let Blizzard's OverrideActionBar display natively during vehicle /
+    -- override / possess states.  QUI's bar1 is hidden during those states
+    -- by a secure visibility state driver (see HideBar1DuringOverride
+    -- below), so there's no visual conflict.  Keybinds pass through to
+    -- Blizzard's native override bar because ApplyBarOverrideBindings bails
+    -- for bar1 when IsVehicleBarActive() is true, leaving the default
+    -- ACTIONBUTTON1..6 -> OverrideActionBarButton1..6 remap intact.
+    --
+    -- We still clean isShownExternal on OverrideActionBar to prevent
+    -- Edit Mode from writing a tainted show flag that could propagate
+    -- through ActionBarController on re-show.
     local overrideBar = _G.OverrideActionBar
-    if overrideBar then
-        if overrideBar.system then
-            overrideBar.isShownExternal = nil
-            local c = 42
-            repeat
-                if overrideBar[c] == nil then
-                    overrideBar[c] = nil
-                end
-                c = c + 1
-            until issecurevariable(overrideBar, "isShownExternal")
-        end
-        overrideBar:UnregisterAllEvents()
-        if overrideBar.HideBase then
-            overrideBar:HideBase()
-        else
-            overrideBar:Hide()
-        end
-        overrideBar:SetParent(hiddenBarParent)
-        -- Do NOT touch button scripts — SetScript on secure frames taints
-        -- them, poisoning the dispatch.  The bar is hidden with events
-        -- unregistered; buttons stay in the dispatch with their secure
-        -- handlers which run harmlessly in untainted context.
+    if overrideBar and overrideBar.system then
+        overrideBar.isShownExternal = nil
+        local c = 42
+        repeat
+            if overrideBar[c] == nil then
+                overrideBar[c] = nil
+            end
+            c = c + 1
+        until issecurevariable(overrideBar, "isShownExternal")
     end
 
     -- Suppress PossessActionBar (mind control bar) — can overlap QUI bars
@@ -7338,7 +7570,10 @@ function ActionBarsOwned:Initialize()
         local barDB = GetBarSettings(barKey)
         if barDB and barDB.enabled == false then
             local container = self.containers[barKey]
-            if container then container:Hide() end
+            if container then
+                container:SetAttribute("qui-user-shown", false)
+                container:Hide()
+            end
         end
     end
 end
@@ -7391,13 +7626,17 @@ function ActionBarsOwned:Refresh()
 
     -- Apply bar layout settings (spacing, empty slot visibility)
     ApplyAllBarSpacing()
+    ApplyAllFlyoutDirections()
 
     -- Hide bars that are disabled in DB
     for _, barKey in ipairs(ALL_MANAGED_BAR_KEYS) do
         local barDB = GetBarSettings(barKey)
         if barDB and barDB.enabled == false then
             local container = self.containers[barKey]
-            if container then container:Hide() end
+            if container then
+                container:SetAttribute("qui-user-shown", false)
+                container:Hide()
+            end
         end
     end
 
@@ -7454,24 +7693,21 @@ initFrame:SetScript("OnEvent", function(self, event, addonName)
                 ApplyPageArrowVisibility(db.bars.bar1.hidePageArrow)
             end)
         end
-        -- OverrideActionBar buttons are created by Blizzard_ActionBar.
-        -- Suppress them now that they exist — the Initialize() pass
-        -- may have run before this addon loaded.
+        -- OverrideActionBar is intentionally left visible so Blizzard can
+        -- display vehicle/override abilities natively; QUI bar1 hides
+        -- during those states via its qui_overridevisibility state driver.
+        -- Clean isShownExternal here (Blizzard_ActionBar may have just
+        -- created it) so Edit Mode writes don't taint ActionBarController.
         local overrideBar = _G.OverrideActionBar
-        if overrideBar then
-            if not overrideBar:GetParent() or overrideBar:GetParent() == hiddenBarParent then
-                -- Already hidden by Initialize
-            else
-                overrideBar:UnregisterAllEvents()
-                if overrideBar.HideBase then
-                    overrideBar:HideBase()
-                else
-                    overrideBar:Hide()
+        if overrideBar and overrideBar.system then
+            overrideBar.isShownExternal = nil
+            local c = 42
+            repeat
+                if overrideBar[c] == nil then
+                    overrideBar[c] = nil
                 end
-                overrideBar:SetParent(hiddenBarParent)
-            end
-            -- Do NOT touch OverrideActionBar button scripts — SetScript on
-            -- a secure frame taints it, poisoning the dispatch iteration.
+                c = c + 1
+            until issecurevariable(overrideBar, "isShownExternal")
         end
     end
 end)
@@ -7573,6 +7809,7 @@ do
                     barDB.enabled = val
                     local container = ActionBarsOwned.containers and ActionBarsOwned.containers[containerKey]
                     if container then
+                        container:SetAttribute("qui-user-shown", val and true or false)
                         if val then
                             container:Show()
                         else
@@ -7609,6 +7846,7 @@ do
                 setGameplayHidden = function(hide)
                     local container = ActionBarsOwned.containers and ActionBarsOwned.containers[containerKey]
                     if not container then return end
+                    container:SetAttribute("qui-user-shown", (not hide) and true or false)
                     if hide then
                         container:Hide()
                     else
@@ -7688,6 +7926,19 @@ do
             pet = true, stance = true, microbar = true, bags = true,
         }
 
+        local FLYOUT_BARS = {
+            bar1 = true, bar2 = true, bar3 = true, bar4 = true,
+            bar5 = true, bar6 = true, bar7 = true, bar8 = true,
+        }
+
+        local flyoutDirectionOptions = {
+            {value = "AUTO",  text = "Auto"},
+            {value = "UP",    text = "Up"},
+            {value = "DOWN",  text = "Down"},
+            {value = "LEFT",  text = "Left"},
+            {value = "RIGHT", text = "Right"},
+        }
+
         local SETTINGS_DB_KEY_MAP = {
             petBar = "pet", stanceBar = "stance",
             microMenu = "microbar", bagBar = "bags",
@@ -7758,6 +8009,7 @@ do
                 local maxButtons = BUTTON_COUNTS[dbKey] or (dbKey == "microbar" and 12 or (dbKey == "bags" and 6 or 12))
                 local extraRows = isMicroBag and 1 or 2
                 if barKey == "bar1" then extraRows = extraRows + 1 end
+                if FLYOUT_BARS[barKey] then extraRows = extraRows + 1 end
                 local numRows = 7 + extraRows
                 local descHeight = isMicroBag and 0 or 16
                 CreateCollapsible(content, "Layout", numRows * FORM_ROW + descHeight + 8, function(body)
@@ -7867,8 +8119,19 @@ do
                     sy = P(GUI:CreateFormCheckbox(body, "Grow Upward",
                         "growUp", layout, RefreshActionBars), body, sy)
 
-                    P(GUI:CreateFormCheckbox(body, "Grow Left",
-                        "growLeft", layout, RefreshActionBars), body, sy)
+                    if FLYOUT_BARS[barKey] then
+                        sy = P(GUI:CreateFormCheckbox(body, "Grow Left",
+                            "growLeft", layout, RefreshActionBars), body, sy)
+
+                        P(GUI:CreateFormDropdown(body, "Flyout Direction",
+                            flyoutDirectionOptions, "flyoutDirection", layout,
+                            function()
+                                ApplyFlyoutDirection(barKey)
+                            end), body, sy)
+                    else
+                        P(GUI:CreateFormCheckbox(body, "Grow Left",
+                            "growLeft", layout, RefreshActionBars), body, sy)
+                    end
                 end, sections, relayout)
             end
 
