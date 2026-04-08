@@ -13,9 +13,9 @@ ns.PartyTracker_SpecCache = SpecCache
 
 local UnitGUID = UnitGUID
 local IsSecretValue = Helpers.IsSecretValue
+local SafeCompare = Helpers.SafeCompare
 local UnitClass = UnitClass
 local UnitExists = UnitExists
-local UnitIsUnit = UnitIsUnit
 local UnitIsConnected = UnitIsConnected
 local GetInspectSpecialization = GetInspectSpecialization
 local NotifyInspect = NotifyInspect
@@ -33,6 +33,33 @@ local inspectPending = nil  -- unit currently being inspected
 local inspectStartTime = 0
 local inspectTicker = nil
 
+local function HasSafeGuid(guid)
+    return not IsSecretValue(guid) and guid ~= nil
+end
+
+local function IsPlayerUnit(unit, guid)
+    if unit == "player" then
+        return true
+    end
+
+    local unitGuid = guid
+    if not HasSafeGuid(unitGuid) then
+        unitGuid = UnitGUID(unit)
+        if not HasSafeGuid(unitGuid) then
+            return false
+        end
+    end
+
+    local playerGuid = UnitGUID("player")
+    if not HasSafeGuid(playerGuid) then
+        return false
+    end
+
+    -- Compare GUIDs instead of calling UnitIsUnit(), which can return a
+    -- secret boolean for units like targettarget during restricted combat paths.
+    return SafeCompare(unitGuid, playerGuid) == true
+end
+
 ---------------------------------------------------------------------------
 -- PUBLIC API
 ---------------------------------------------------------------------------
@@ -40,13 +67,13 @@ local inspectTicker = nil
 function SpecCache.GetSpec(unit)
     if not unit or not UnitExists(unit) then return nil end
 
-    -- Fast path for the player — no inspection needed.
-    -- NOTE: do not call UnitIsUnit here. UnitIsUnit returns a SECRET BOOLEAN
-    -- in combat for restricted unit tokens (target/targettarget/focus/etc.)
-    -- which taints any caller that tests it. Match the literal "player"
-    -- token instead — callers that pass party1..4 will fall through to the
-    -- GUID cache below, which is the only path we want for party members.
-    if unit == "player" then
+    local guid = UnitGUID(unit)
+
+    -- Fast path for the player — avoid UnitIsUnit(), which can return a
+    -- secret boolean on restricted unit tokens during combat. Use GUID
+    -- comparison instead so player aliases like targettarget -> player still
+    -- resolve correctly without touching secret booleans.
+    if IsPlayerUnit(unit, guid) then
         local spec = GetSpecialization and GetSpecialization()
         if spec then
             local specId = GetSpecializationInfo(spec)
@@ -54,8 +81,7 @@ function SpecCache.GetSpec(unit)
         end
     end
 
-    local guid = UnitGUID(unit)
-    if not guid or IsSecretValue(guid) then return nil end
+    if not HasSafeGuid(guid) then return nil end
     local entry = cache[guid]
     if entry and entry.specId and GetTime() < entry.expiry then
         return entry.specId
@@ -72,7 +98,7 @@ end
 function SpecCache.SetSpec(unit, specId)
     if not unit or not specId or specId == 0 then return end
     local guid = UnitGUID(unit)
-    if not guid or IsSecretValue(guid) then return end
+    if not HasSafeGuid(guid) then return end
     cache[guid] = {
         specId = specId,
         classToken = select(2, UnitClass(unit)),
@@ -87,11 +113,11 @@ function SpecCache.Clear()
 end
 
 function SpecCache.RequestInspect(unit)
-    if not unit or not UnitExists(unit) or UnitIsUnit(unit, "player") then return end
+    if not unit or not UnitExists(unit) then return end
     if not UnitIsConnected(unit) then return end
 
     local guid = UnitGUID(unit)
-    if not guid or IsSecretValue(guid) then return end
+    if IsPlayerUnit(unit, guid) or not HasSafeGuid(guid) then return end
 
     -- Already cached and fresh
     local entry = cache[guid]
@@ -121,10 +147,12 @@ local function ProcessInspectQueue()
     -- Find next valid unit
     while #inspectQueue > 0 do
         local unit = table.remove(inspectQueue, 1)
-        if UnitExists(unit) and not UnitIsUnit(unit, "player") and UnitIsConnected(unit) then
+        if UnitExists(unit) and UnitIsConnected(unit) then
             local guid = UnitGUID(unit)
-            local entry = guid and not IsSecretValue(guid) and cache[guid]
-            if not entry or not entry.specId or GetTime() >= entry.expiry then
+            local isPlayer = IsPlayerUnit(unit, guid)
+            local hasSafeGuid = HasSafeGuid(guid)
+            local entry = hasSafeGuid and not isPlayer and cache[guid] or nil
+            if hasSafeGuid and not isPlayer and (not entry or not entry.specId or GetTime() >= entry.expiry) then
                 local ok = pcall(NotifyInspect, unit)
                 if ok then
                     inspectPending = unit
@@ -187,7 +215,7 @@ C_Timer.After(0, function()
             -- cached spec and re-inspect. Fires for any unit in the group.
             if arg1 and UnitExists(arg1) then
                 local guid = UnitGUID(arg1)
-                if guid and not IsSecretValue(guid) then cache[guid] = nil end
+                if HasSafeGuid(guid) then cache[guid] = nil end
                 SpecCache.RequestInspect(arg1)
             else
                 -- No unit arg or unknown — re-inspect all party members
