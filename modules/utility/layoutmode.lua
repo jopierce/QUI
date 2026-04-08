@@ -429,6 +429,16 @@ function QUI_LayoutMode:Open()
     -- Snapshot current positions for revert
     SnapshotPositions()
 
+    -- Snapshot hidden-handle state for revert on discard
+    local hiddenSnap = {}
+    local hiddenDB = GetHiddenHandlesDB()
+    if hiddenDB then
+        for k, v in pairs(hiddenDB) do
+            hiddenSnap[k] = v
+        end
+    end
+    self._snapshotHiddenHandles = hiddenSnap
+
     -- Fire enter callbacks BEFORE handle creation — callbacks like
     -- QUI_OnEditModeEnterCDM show/populate CDM containers so their frames
     -- are visible when CreateHandle runs (enabling child overlays instead
@@ -807,6 +817,7 @@ function QUI_LayoutMode:Close(skipSaveCheck)
     self._selectedKey = nil
     self._pendingPositions = {}
     self._snapshotPositions = {}
+    self._snapshotHiddenHandles = nil
 end
 
 function QUI_LayoutMode:SaveAndClose()
@@ -828,6 +839,17 @@ end
 
 function QUI_LayoutMode:DiscardAndClose()
     RevertPositions()
+    -- Revert hidden-handle state to snapshot
+    local snap = self._snapshotHiddenHandles
+    if snap then
+        local hidden = GetHiddenHandlesDB()
+        if hidden then
+            wipe(hidden)
+            for k, v in pairs(snap) do
+                hidden[k] = v
+            end
+        end
+    end
     self._hasChanges = false
     self:Close(true)
     -- Re-apply anchors after Close() for the same reason as SaveAndClose.
