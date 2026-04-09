@@ -5,6 +5,34 @@ All notable changes to QUI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
+
+## v3.2.1 - 2026-04-10
+
+### Added
+- now hiding selective import/export selection tables in collapsible sections by default to reduce UI clutter
+- layoutmode: add CDM Spells, Party Composer, Raid Composer buttons to toolbar
+- layoutmode/settings: add QUI Settings button to edit mode toolbar, fix panel z-order
+- aura_events: add "roster" filter for player + party/raid subscribers
+
+### Changed
+- uihider: stop auto-hiding CompactRaidFrameManager when QUI group frames are enabled
+
+### Fixed
+- restored spellbook lazy-load refresh for action bars, they should now show automatically again on spellbook open
+- hardened mythic+ auto combat logging detection
+- cdm/bars: skip redundant SetTimerDuration when C-side fill is active
+- anchoring: fall back to configured width for castbars with no anchor parent
+- cdm: fix spellbook scan skipping non-spec tabs
+- actionbars/anchoring: coalesce AssistedCombat events, deregister managed-container reparents
+- groupframes: scan-time defensive classification (mirror of dispel set)
+- groupframes: scan-time dispel classification + set-change short-circuit + raidbuffs UNIT_FLAGS drop
+- perf/taint: drop non-group units in private aura sub, early-out atonement non-Disc, skip forbidden tooltips
+- actionbars: empower support, cast-on-up timing, pet bar drag, one-time hook install
+- actionbars: drive charge swipes even when primary cooldown is idle
+- layoutmode: solo toggle off, skip layer buttons on master rows, sync show/hide-all state
+- skinning/inspect: inherit parent strata for custom background
+- groupframes: avoid redundant SetBackdrop calls to stay under script budget
+- groupframes: stop suppressing CompactRaidFrameManager from blizzard hider
 ## v3.2.0 - 2026-04-09
 
 ### Added
