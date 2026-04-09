@@ -539,6 +539,11 @@ eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
 -- UNIT_AURA: subscribe to centralized dispatcher instead of global RegisterEvent.
 -- Avoids duplicate Lua dispatch for every unit aura event in raids.
 ns.AuraEvents:Subscribe("all", function(unit)
+    -- Hard early-out for non-Disc. The refresh path itself already bails on
+    -- non-Disc, but in raids this callback fires hundreds of times per second
+    -- and the string.match cost in IsRelevantUnit adds up. Spec changes are
+    -- handled via PLAYER_SPECIALIZATION_CHANGED on eventFrame.
+    if not IsDisciplinePriest() then return end
     if IsRelevantUnit(unit) then
         QueueRefresh()
     end
