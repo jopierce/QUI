@@ -682,6 +682,18 @@ if ns.AuraEvents then
         local frame = GF.unitFrameMap and GF.unitFrameMap[unit]
         if not frame then return end
 
+        -- Skip the pcall-heavy GetAuraSlots scan when the aura set didn't
+        -- change (pure stack/duration updates). Private dispel state is keyed
+        -- by aura instance ID, so it can only change when auras are added or
+        -- removed — not when existing auras update in place.
+        if type(updateInfo) == "table"
+            and not updateInfo.isFullUpdate
+            and not updateInfo.addedAuras
+            and not updateInfo.removedAuraInstanceIDs
+        then
+            return
+        end
+
         RefreshPrivateDispelState(unit)
 
         -- Private aura anchor APIs are restricted in combat (12.0.5+)

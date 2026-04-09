@@ -1487,8 +1487,11 @@ local function UpdateDispelOverlay(frame)
     local unit = frame.unit
     local overlay = frame.dispelOverlay
 
-    -- Check shared aura cache first to avoid redundant full aura scans.
-    -- The cache was just populated by the aura dispatcher before this function runs.
+    -- Fast path: the aura scan already classified every harmful aura against
+    -- HARMFUL|RAID_PLAYER_DISPELLABLE and stashed the matching instance IDs
+    -- in cache.playerDispellable. Probe the set directly — this replaces a
+    -- per-aura pcall+filter-check loop with a single next() call, which is
+    -- the biggest raid-perf win on this path.
     local GFA = ns.QUI_GroupFrameAuras
     local cache = GFA and GFA.unitAuraCache and GFA.unitAuraCache[unit]
     local hasDispellable = false
@@ -1496,59 +1499,23 @@ local function UpdateDispelOverlay(frame)
     local firstDispellableType = nil
     local fromPrivateSlots = false
 
-    if cache and cache.harmful then
-        for _, auraData in ipairs(cache.harmful) do
-            local matched = false
-            local instID = auraData.auraInstanceID
-
-            -- Preferred path: ask the client directly whether this aura is
-            -- dispellable by the player using the HARMFUL|RAID_PLAYER_DISPELLABLE
-            -- classification filter. This is more reliable than trusting that
-            -- `dispelName` was populated on the cached aura payload.
-            if instID and not IsSecretValue(instID)
-               and C_UnitAuras and C_UnitAuras.IsAuraFilteredOutByInstanceID then
-                local ok, filteredOut = pcall(
-                    C_UnitAuras.IsAuraFilteredOutByInstanceID,
-                    unit,
-                    instID,
-                    "HARMFUL|RAID_PLAYER_DISPELLABLE"
-                )
-                if ok and not IsSecretValue(filteredOut) and filteredOut == false then
-                    matched = true
-                end
-            end
-
-            -- Fallback: legacy/raw dispel type from the cached aura payload.
-            if not matched and auraData.dispelName and not IsSecretValue(auraData.dispelName) then
-                local dType = SafeValue(auraData.dispelName, nil)
-                if dType then
-                    matched = true
-                    firstDispellableType = dType
-                end
-            end
-
-            -- Extra fallback: refresh directly from the aura instance in case
-            -- the shared cache entry is missing dispel metadata.
-            if not matched and instID and C_UnitAuras and C_UnitAuras.GetAuraDataByAuraInstanceID then
-                local ok, liveAura = pcall(C_UnitAuras.GetAuraDataByAuraInstanceID, unit, instID)
-                if ok and liveAura and liveAura.dispelName and not IsSecretValue(liveAura.dispelName) then
-                    local dType = SafeValue(liveAura.dispelName, nil)
-                    if dType then
-                        matched = true
-                        firstDispellableType = dType
+    if cache and cache.playerDispellable then
+        local instID = next(cache.playerDispellable)
+        if instID then
+            hasDispellable = true
+            firstDispellableInstID = instID
+            -- Best-effort dispel type for the legacy color fallback path.
+            -- We only need to inspect the one matching aura, not the list.
+            if cache.harmful then
+                for i = 1, #cache.harmful do
+                    local ad = cache.harmful[i]
+                    if ad.auraInstanceID == instID then
+                        if ad.dispelName and not IsSecretValue(ad.dispelName) then
+                            firstDispellableType = SafeValue(ad.dispelName, nil)
+                        end
+                        break
                     end
                 end
-            end
-
-            if matched then
-                hasDispellable = true
-                firstDispellableInstID = instID
-
-                if not firstDispellableType and auraData.dispelName and not IsSecretValue(auraData.dispelName) then
-                    firstDispellableType = SafeValue(auraData.dispelName, nil)
-                end
-
-                break
             end
         end
     end
