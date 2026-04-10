@@ -118,6 +118,13 @@ end
 ---------------------------------------------------------------------------
 local CDMContainers_API  -- forward declaration; table created in CONTAINER MANAGEMENT API section
 local _previousSpecID = nil  -- Track outgoing spec for save-on-switch
+local specTrackingReady = false
+local specTrackingPendingRefresh = false
+local specTrackingRetryToken = 0
+local RefreshAll  -- forward declaration; finalized in REFRESH ALL section
+
+local SPEC_TRACKING_RETRY_DELAY = 0.5
+local SPEC_TRACKING_MAX_RETRIES = 6
 
 local function GetCurrentSpecID()
     if not GetSpecialization then return nil end
@@ -128,6 +135,59 @@ local function GetCurrentSpecID()
         return specID
     end
     return nil
+end
+
+local function ClearContainerSpecState(containerDB)
+    if not containerDB then
+        return
+    end
+    containerDB.ownedSpells = nil
+    containerDB.removedSpells = {}
+    containerDB.dormantSpells = {}
+end
+
+local function TrySnapshotBuiltInContainers(containerKeys)
+    if not ns.CDMSpellData then
+        return false
+    end
+
+    ns.CDMSpellData:ForceScan()
+
+    local allReady = true
+    for _, key in ipairs(containerKeys) do
+        if key == "essential" or key == "utility" or key == "buff" or key == "trackedBar" then
+            local containerDB = GetTrackerSettings(key)
+            if containerDB and containerDB.ownedSpells == nil then
+                ns.CDMSpellData:SnapshotBlizzardCDM(key)
+                if containerDB.ownedSpells == nil then
+                    allReady = false
+                end
+            end
+        end
+    end
+
+    return allReady
+end
+
+local function FinalizeSpecTracking()
+    specTrackingReady = true
+
+    if not specTrackingPendingRefresh then
+        return
+    end
+
+    if InCombatLockdown() or not RefreshAll then
+        return
+    end
+
+    specTrackingPendingRefresh = false
+
+    if ns.CDMSpellData then
+        ns.CDMSpellData:CheckAllDormantSpells()
+        ns.CDMSpellData:ReconcileAllContainers()
+    end
+
+    RefreshAll()
 end
 
 local function SaveSpecProfile(specID)
@@ -170,14 +230,16 @@ local function SaveCurrentSpecProfile()
     SaveSpecProfile(_previousSpecID)
 end
 
-local function LoadOrSnapshotSpecProfile(specID)
+local function LoadOrSnapshotSpecProfile(specID, attempt, retryToken)
     if not specID then
-        return
+        return false
     end
+
+    attempt = attempt or 1
 
     local db = GetDB()
     if not db then
-        return
+        return false
     end
 
     local containerKeys = CDMContainers_API:GetAllContainerKeys()
@@ -198,7 +260,7 @@ local function LoadOrSnapshotSpecProfile(specID)
                     -- (e.g. custom container created after the profile was
                     -- saved). Clear it so stale spells from the previous
                     -- spec don't leak through.
-                    containerDB.ownedSpells = nil
+                    ClearContainerSpecState(containerDB)
                 end
             end
         end
@@ -210,22 +272,42 @@ local function LoadOrSnapshotSpecProfile(specID)
         if ns.CDMSpellData then
             ns.CDMSpellData:CheckAllDormantSpells()
         end
+        return true
     else
         -- No saved profile for this spec — fresh snapshot from Blizzard CDM
         if ns.CDMSpellData then
             for _, key in ipairs(containerKeys) do
                 local containerDB = GetTrackerSettings(key)
                 if containerDB then
-                    -- Clear ownedSpells so SnapshotBlizzardCDM will re-snapshot
-                    containerDB.ownedSpells = nil
+                    -- Clear all spec-scoped state so a first-time snapshot never
+                    -- inherits removals/dormant entries from a different class/spec.
+                    ClearContainerSpecState(containerDB)
                 end
             end
-            -- Force scan so snapshot has data
-            ns.CDMSpellData:ForceScan()
-            for _, key in ipairs(containerKeys) do
-                ns.CDMSpellData:SnapshotBlizzardCDM(key)
+            local snapshotReady = TrySnapshotBuiltInContainers(containerKeys)
+            if snapshotReady or attempt >= SPEC_TRACKING_MAX_RETRIES then
+                return true
             end
+
+            C_Timer.After(SPEC_TRACKING_RETRY_DELAY, function()
+                if retryToken ~= specTrackingRetryToken then
+                    return
+                end
+                if InCombatLockdown() then
+                    return
+                end
+                local currentSpecID = GetCurrentSpecID()
+                if currentSpecID ~= specID then
+                    return
+                end
+                local readyNow = LoadOrSnapshotSpecProfile(specID, attempt + 1, retryToken)
+                if readyNow then
+                    FinalizeSpecTracking()
+                end
+            end)
+            return false
         end
+        return true
     end
 end
 
@@ -238,9 +320,11 @@ end
 -- Returns true if a spec mismatch was detected and profiles were swapped.
 local function RunCrossSessionDetection(specID)
     local db = GetDB()
-    if not db or not specID or specID == 0 then return false end
+    if not db or not specID or specID == 0 then return false, false end
 
     local lastSpecID = db._lastSpecID
+    local detected = lastSpecID ~= nil and lastSpecID ~= specID
+    local readyNow = true
     if lastSpecID and lastSpecID ~= specID then
         -- Save stale ownedSpells under the old spec before overwriting
         local oldPrevious = _previousSpecID
@@ -255,40 +339,60 @@ local function RunCrossSessionDetection(specID)
         end
 
         -- Load the correct spec profile (or fresh snapshot if first time)
-        LoadOrSnapshotSpecProfile(specID)
+        specTrackingRetryToken = specTrackingRetryToken + 1
+        readyNow = LoadOrSnapshotSpecProfile(specID, 1, specTrackingRetryToken)
     end
     -- Persist the current spec ID for next session
     db._lastSpecID = specID
-    return lastSpecID ~= nil and lastSpecID ~= specID
+    return readyNow, detected
+end
+
+local function ScheduleInitialSpecTrackingRetry(attempt, retryToken)
+    C_Timer.After(1.0, function()
+        if retryToken ~= specTrackingRetryToken then
+            return
+        end
+
+        if not _previousSpecID or _previousSpecID == 0 then
+            _previousSpecID = GetCurrentSpecID()
+        end
+
+        if _previousSpecID and _previousSpecID ~= 0 then
+            local readyNow = RunCrossSessionDetection(_previousSpecID)
+            specTrackingReady = readyNow
+            if readyNow then
+                FinalizeSpecTracking()
+            end
+            return
+        end
+
+        if attempt >= SPEC_TRACKING_MAX_RETRIES then
+            FinalizeSpecTracking()
+            return
+        end
+
+        ScheduleInitialSpecTrackingRetry(attempt + 1, retryToken)
+    end)
 end
 
 local function InitSpecTracking()
+    specTrackingReady = false
+    specTrackingPendingRefresh = false
     _previousSpecID = GetCurrentSpecID()
 
     if _previousSpecID and _previousSpecID ~= 0 then
-        RunCrossSessionDetection(_previousSpecID)
+        local readyNow = RunCrossSessionDetection(_previousSpecID)
+        specTrackingReady = readyNow
+        return readyNow
     else
         -- GetSpecializationInfo isn't ready yet (returns 0 or nil during early
         -- load). Retry after a short delay — and re-run cross-session detection
         -- so character/spec switches across sessions are still caught.
-        C_Timer.After(1.0, function()
-            if not _previousSpecID or _previousSpecID == 0 then
-                _previousSpecID = GetCurrentSpecID()
-            end
-            if _previousSpecID and _previousSpecID ~= 0 then
-                local detected = RunCrossSessionDetection(_previousSpecID)
-                if detected then
-                    -- Delayed detection: run dormant cleanup and refresh
-                    if ns.CDMSpellData then
-                        ns.CDMSpellData:CheckAllDormantSpells()
-                        ns.CDMSpellData:ReconcileAllContainers()
-                    end
-                    if ns.CDMContainers and ns.CDMContainers.RefreshAll then
-                        ns.CDMContainers.RefreshAll()
-                    end
-                end
-            end
-        end)
+        specTrackingPendingRefresh = true
+        specTrackingRetryToken = specTrackingRetryToken + 1
+        local retryToken = specTrackingRetryToken
+        ScheduleInitialSpecTrackingRetry(1, retryToken)
+        return false
     end
 end
 
@@ -1577,8 +1681,13 @@ end
 ---------------------------------------------------------------------------
 -- REFRESH ALL
 ---------------------------------------------------------------------------
-local function RefreshAll(forceSync)
+RefreshAll = function(forceSync)
     if not initialized then
+        return
+    end
+
+    if not specTrackingReady then
+        specTrackingPendingRefresh = true
         return
     end
 
@@ -2237,8 +2346,10 @@ function ownedEngine:Initialize()
     initialized = true
     NCDM.initialized = true
 
-    -- Initialize spec tracking for save-on-switch
-    InitSpecTracking()
+    -- Initialize spec tracking for save-on-switch. If the current spec is not
+    -- available yet, delay the first meaningful layout until the profile swap
+    -- / fresh snapshot has finished to avoid rendering another character's CDs.
+    local specReadyNow = InitSpecTracking()
 
     -- Invalidate visibility frame cache so hud_visibility picks up new containers
     if ns.InvalidateCDMFrameCache then
@@ -2249,7 +2360,11 @@ function ownedEngine:Initialize()
     -- combat /reload (InCombatLockdown() returns false).  If Blizzard viewers
     -- aren't populated yet (first login), layout produces empty containers —
     -- the deferred re-layout below fills them once spell data arrives.
-    RefreshAll(true)
+    if specReadyNow then
+        RefreshAll(true)
+    else
+        specTrackingPendingRefresh = true
+    end
 
     -- Synchronous post-layout: apply frame anchoring overrides NOW while
     -- still in the ADDON_LOADED safe window (InCombatLockdown=false).
@@ -2333,6 +2448,10 @@ function ownedEngine:Initialize()
                 -- so cross-class/spec spells are removed before the first
                 -- meaningful RefreshAll fires from the deferred timer.
                 C_Timer.After(0.5, function()
+                    if not specTrackingReady then
+                        specTrackingPendingRefresh = true
+                        return
+                    end
                     if not InCombatLockdown() and ns.CDMSpellData then
                         ns.CDMSpellData:CheckAllDormantSpells()
                         ns.CDMSpellData:ReconcileAllContainers()
@@ -2359,7 +2478,10 @@ function ownedEngine:Initialize()
                 -- Load the new spec profile synchronously so the DB is never in a
                 -- stale state. This eliminates the race where SPELLS_CHANGED fires
                 -- before the profile swap and corrupts spell lists.
-                LoadOrSnapshotSpecProfile(newSpecID)
+                specTrackingReady = false
+                specTrackingPendingRefresh = true
+                specTrackingRetryToken = specTrackingRetryToken + 1
+                local readyNow = LoadOrSnapshotSpecProfile(newSpecID, 1, specTrackingRetryToken)
                 _previousSpecID = newSpecID
                 -- Persist for cross-session detection
                 local specDB = GetDB()
@@ -2367,7 +2489,11 @@ function ownedEngine:Initialize()
                 -- Profile is now correct — SPELLS_CHANGED can safely run
                 -- dormant/reconcile on the new spec's data.
                 buffFingerprint = nil
-                RefreshAll()
+                if readyNow then
+                    specTrackingReady = true
+                    specTrackingPendingRefresh = false
+                    RefreshAll()
+                end
             end
         elseif event == "CHALLENGE_MODE_START" then
             -- Restore dormant spells before refreshing — SPELLS_CHANGED
