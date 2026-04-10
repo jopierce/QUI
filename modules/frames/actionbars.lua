@@ -3006,7 +3006,8 @@ local function BuildBar(barKey)
                 -- OnReceiveDrag: same double-wrap pattern.
                 btn:SetScript("OnReceiveDrag", nil)
                 SecureHandlerWrapScript(btn, "OnReceiveDrag", btn, [[
-                    if self:GetAttribute("LABdisableDragNDrop") then
+                    if self:GetAttribute("buttonlock")
+                        or self:GetAttribute("LABdisableDragNDrop") then
                         return false
                     end
                     return "action", self:GetAttribute("action")
@@ -4537,8 +4538,9 @@ local function OnOwnedEvent(self, event, ...)
         -- Full post-drag refresh: the drag may have moved spells (including
         -- the one-button rotation action) between slots.  Some action types
         -- don't fire per-slot ACTIONBAR_SLOT_CHANGED, so we refresh
-        -- everything here to guarantee correctness.
-        ScheduleABVisualUpdate()
+        -- everything here to guarantee correctness.  Force a full scan so
+        -- newly-populated empty slots are caught immediately.
+        ScheduleABVisualUpdate(true)
         ScheduleABCooldownUpdate()
         -- Assisted combat rotation and highlights must also refresh — the
         -- rotation action may have moved to a new button.

@@ -1006,6 +1006,12 @@ local function HookBlizzStackText(icon, blizzChild)
                 if not s or not s.icon then return end
                 local entry = s.icon._spellEntry
                 if entry and entry._blizzChild ~= blizzChild then return end
+                -- Charged entries: StackText is driven by the FWD path
+                -- (cooldownChargesCount), not ChargeCount visibility.
+                -- Blizzard hides ChargeCount when the aura is active
+                -- (switches to Applications), but FWD still writes
+                -- charges every tick — let it be the authority.
+                if entry and entry.hasCharges then return end
                 ChargeDebug(entry and entry.name, "HOOK ChargeCount.Hide",
                     "spellID=", entry and entry.spellID, "overrideSpellID=", entry and entry.overrideSpellID)
                 s.icon.StackText:Hide()
