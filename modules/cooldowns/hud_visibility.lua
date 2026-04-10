@@ -774,6 +774,41 @@ local function StartActionBarsFade(targetAlpha)
     ActionBarsVisibility.fadeFrame:SetScript("OnUpdate", OnActionBarsFadeUpdate)
 end
 
+local function StopActionBarsFade()
+    ActionBarsVisibility.isFading = false
+    if ActionBarsVisibility.fadeFrame then
+        ActionBarsVisibility.fadeFrame:SetScript("OnUpdate", nil)
+    end
+end
+
+local function IsActionBarMouseoverFadeEnabled()
+    if not (QUICore and QUICore.db and QUICore.db.profile) then return false end
+
+    local actionBars = QUICore.db.profile.actionBars
+    if type(actionBars) ~= "table" then return false end
+
+    local fade = actionBars.fade
+    local globalFadeEnabled = type(fade) == "table" and fade.enabled == true
+    local bars = actionBars.bars
+    local containers = ns.ActionBarsOwned and ns.ActionBarsOwned.containers
+
+    if type(containers) == "table" and next(containers) ~= nil then
+        for barKey in pairs(containers) do
+            local barSettings = type(bars) == "table" and bars[barKey]
+            local fadeEnabled = type(barSettings) == "table" and barSettings.fadeEnabled
+            if fadeEnabled == nil then
+                fadeEnabled = globalFadeEnabled
+            end
+            if fadeEnabled then
+                return true
+            end
+        end
+        return false
+    end
+
+    return globalFadeEnabled
+end
+
 local function UpdateActionBarsVisibility()
     if Helpers.IsEditModeActive() or Helpers.IsLayoutModeActive() then
         StartActionBarsFade(1)
@@ -784,7 +819,15 @@ local function UpdateActionBarsVisibility()
     local vis = GetActionBarsVisibilitySettings()
 
     if shouldShow then
-        StartActionBarsFade(1)
+        if IsActionBarMouseoverFadeEnabled() then
+            StopActionBarsFade()
+            ActionBarsVisibility.currentlyHidden = false
+            if type(_G.QUI_RefreshActionBarFade) == "function" then
+                _G.QUI_RefreshActionBarFade()
+            end
+        else
+            StartActionBarsFade(1)
+        end
     else
         StartActionBarsFade(vis and vis.fadeOutAlpha or 0)
     end

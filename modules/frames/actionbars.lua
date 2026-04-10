@@ -1866,9 +1866,13 @@ local function SetupOwnedBarMouseover(barKey)
     state.isFading = false
     CancelOwnedBarFadeTimers(state)
 
-    if not IsMouseOverOwnedBar(barKey) then
-        SetOwnedBarAlpha(barKey, fadeOutAlpha)
+    local isMouseOver = IsMouseOverOwnedBar(barKey)
+    if fadeSettings and fadeSettings.linkBars1to8 and IsLinkedBar(barKey) then
+        isMouseOver = IsMouseOverAnyLinkedOwnedBar()
     end
+
+    state.isMouseOver = isMouseOver
+    SetOwnedBarAlpha(barKey, isMouseOver and 1 or fadeOutAlpha)
 end
 
 ---------------------------------------------------------------------------
