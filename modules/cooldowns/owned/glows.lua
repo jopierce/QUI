@@ -43,6 +43,11 @@ local function IsSpellCastable(icon)
     return SafeIsSpellUsable(spellID)
 end
 
+-- Forward declarations — HookBlizzPandemic is defined after StartGlow/StopGlow
+local HookBlizzPandemic
+
+-- Stubs called from RefreshAllGlows (pandemic is hook-driven, not scan-driven)
+
 -- Track which icons currently have active glows
 local activeGlowIcons = {}  -- [icon] = true
 
@@ -319,6 +324,54 @@ StopGlow = function(icon)
 end
 
 ---------------------------------------------------------------------------
+-- PANDEMIC GLOW: hook Blizzard CDM children's ShowPandemicStateFrame /
+-- HidePandemicStateFrame. Blizzard calls these every OnUpdate tick.
+-- Zero polling, zero API queries, zero secret value issues.
+---------------------------------------------------------------------------
+local PANDEMIC_LINGER = 0.1
+local _pandemicState = {}
+local _pandemicGlowIcons = {}  -- [icon] = true when glow is pandemic-driven
+
+HookBlizzPandemic = function(icon, blizzChild)
+    if not blizzChild or not blizzChild.ShowPandemicStateFrame then return end
+
+    local state = _pandemicState[blizzChild]
+    if not state then
+        state = {}
+        _pandemicState[blizzChild] = state
+    end
+    state.icon = icon
+
+    if state.hooked then return end
+    state.hooked = true
+
+    hooksecurefunc(blizzChild, "ShowPandemicStateFrame", function(self)
+        local s = _pandemicState[self]
+        if not s or not s.icon then return end
+        s.lastFire = GetTime()
+        if not s.active then
+            s.active = true
+            _pandemicGlowIcons[s.icon] = true
+            if not activeGlowIcons[s.icon] then
+                StartGlow(s.icon)
+            end
+        end
+    end)
+
+    hooksecurefunc(blizzChild, "HidePandemicStateFrame", function(self)
+        local s = _pandemicState[self]
+        if not s or not s.active then return end
+        local last = s.lastFire
+        if last and (GetTime() - last) < PANDEMIC_LINGER then return end
+        s.active = nil
+        _pandemicGlowIcons[s.icon] = nil
+        if s.icon and activeGlowIcons[s.icon] then
+            StopGlow(s.icon)
+        end
+    end)
+end
+
+---------------------------------------------------------------------------
 -- CHECK OVERLAY STATE: query API + event-based tracking
 ---------------------------------------------------------------------------
 local function IsOverlayed(spellID)
@@ -390,7 +443,7 @@ local function ScanAllGlows()
 
                 if shouldGlow and not activeGlowIcons[icon] then
                     StartGlow(icon, spellOvr)
-                elseif not shouldGlow and activeGlowIcons[icon] then
+                elseif not shouldGlow and activeGlowIcons[icon] and not _pandemicGlowIcons[icon] then
                     StopGlow(icon)
                 end
             end
@@ -461,7 +514,7 @@ local function ScanGlowsForSpell(spellID)
 
                         if shouldGlow and not activeGlowIcons[icon] then
                             StartGlow(icon, spellOvr)
-                        elseif not shouldGlow and activeGlowIcons[icon] then
+                        elseif not shouldGlow and activeGlowIcons[icon] and not _pandemicGlowIcons[icon] then
                             StopGlow(icon)
                         end
                     end
@@ -502,6 +555,7 @@ eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 eventFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
 eventFrame:RegisterEvent("SPELL_UPDATE_USABLE")
+eventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
 
 -- Coalesced usability glow scan: 100ms delay lets CDM's 50ms update finish first
 -- so icon._hasCooldownActive is current when we check IsSpellCastable.
@@ -517,6 +571,10 @@ end
 
 eventFrame:SetScript("OnEvent", function(_, event, spellID)
     if event == "SPELL_UPDATE_COOLDOWN" or event == "SPELL_UPDATE_USABLE" then
+        ScheduleUsabilityGlowScan()
+        return
+    end
+    if event == "PLAYER_TARGET_CHANGED" then
         ScheduleUsabilityGlowScan()
         return
     end
@@ -568,6 +626,7 @@ ns._OwnedGlows = {
     activeGlowIcons = activeGlowIcons,
     ScheduleGlowScan = ScanAllGlows,
     IsSpellCastable = IsSpellCastable,
+    HookBlizzPandemic = HookBlizzPandemic,
     GetGlowState = function(icon)
         return activeGlowIcons[icon] and { active = true } or nil
     end,
