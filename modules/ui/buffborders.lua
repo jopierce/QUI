@@ -138,6 +138,8 @@ local previewDebuffIcons = {}
 local PA_MAX_SLOTS = 3
 local paSlots = {}
 local paAnchorIDs = {}
+local paScaleFrames = {}       -- tiny scaled frames for duration text sizing
+local paScaleAnchorIDs = {}    -- second anchor IDs for scaled duration text
 local paPendingSetup = false   -- deferred AddPrivateAuraAnchor after combat
 
 ---------------------------------------------------------------------------
@@ -502,7 +504,9 @@ local function LayoutIcons(container, sortedIcons, settings, prefix)
     local bottomPadding = settings[prefix .. "BottomPadding"] or 10
     local totalH = numRows * iconSize + math.max(0, numRows - 1) * rowSpacing + bottomPadding
 
-    container:SetSize(totalW, totalH)
+    -- SetSize on named containers can be blocked by taint propagation when
+    -- the call stack has touched secret aura values during combat.
+    pcall(container.SetSize, container, totalW, totalH)
     -- Cache the natural size so layout mode proxy movers can read it
     -- (frame.GetSize returns handle size when reparented via SetAllPoints).
     container._naturalW = totalW
@@ -522,7 +526,9 @@ local function LayoutIcons(container, sortedIcons, settings, prefix)
             faKey = "debuffFrame"
         end
         if faKey and _G.QUI_ApplyFrameAnchor then
-            _G.QUI_ApplyFrameAnchor(faKey)
+            if not InCombatLockdown() then
+                _G.QUI_ApplyFrameAnchor(faKey)
+            end
         end
     end
 
@@ -840,6 +846,11 @@ local function ClearPrivateAuraAnchors()
         if id then pcall(RemovePrivateAuraAnchor, id) end
     end
     wipe(paAnchorIDs)
+    for i = 1, #paScaleAnchorIDs do
+        local id = paScaleAnchorIDs[i]
+        if id then pcall(RemovePrivateAuraAnchor, id) end
+    end
+    wipe(paScaleAnchorIDs)
     -- Hide any stale WoW-rendered children left on anchor slots
     for i = 1, PA_MAX_SLOTS do
         local slot = paSlots[i]
@@ -849,6 +860,8 @@ local function ClearPrivateAuraAnchors()
                 if child then child:Hide() end
             end
         end
+        local sf = paScaleFrames[i]
+        if sf then sf:Hide() end
     end
 end
 
@@ -900,60 +913,6 @@ local function StyleSlotBorders(slot, settings)
     slot.BorderRight:SetShown(visible)
 end
 
-local function StyleSlotTextRecursive(node, settings, depth)
-    if not node or depth > 5 then return end
-
-    local font = GetGeneralFont()
-    local outline = GetGeneralFontOutline()
-    local fontSize = settings.fontSize or 12
-
-    -- Style FontString regions on this node
-    for i = 1, (node.GetNumRegions and node:GetNumRegions() or 0) do
-        local region = select(i, node:GetRegions())
-        if region and region.IsObjectType and region:IsObjectType("FontString") and region.SetFont then
-            pcall(region.SetFont, region, font, fontSize, outline)
-            -- Reposition duration/stack text using debuff settings
-            local text = region:GetText()
-            if text then
-                local anchor = settings.debuffDurationTextAnchor or "CENTER"
-                local offX = settings.debuffDurationTextOffsetX or 0
-                local offY = settings.debuffDurationTextOffsetY or 0
-                pcall(region.ClearAllPoints, region)
-                pcall(region.SetPoint, region, anchor, region:GetParent(), anchor, offX, offY)
-            end
-        end
-    end
-
-    -- Style Cooldown countdown FontStrings
-    if node.IsObjectType and node:IsObjectType("Cooldown") and node.GetCountdownFontString then
-        local cdText = node:GetCountdownFontString()
-        if cdText and cdText.SetFont then
-            pcall(cdText.SetFont, cdText, font, fontSize, outline)
-            local anchor = settings.debuffDurationTextAnchor or "CENTER"
-            local offX = settings.debuffDurationTextOffsetX or 0
-            local offY = settings.debuffDurationTextOffsetY or 0
-            pcall(cdText.ClearAllPoints, cdText)
-            pcall(cdText.SetPoint, cdText, anchor, node, anchor, offX, offY)
-        end
-    end
-
-    -- Recurse into children
-    for i = 1, (node.GetNumChildren and node:GetNumChildren() or 0) do
-        local child = select(i, node:GetChildren())
-        if child then
-            StyleSlotTextRecursive(child, settings, depth + 1)
-        end
-    end
-end
-
-local function DeferStyleSlotText(slot, settings)
-    C_Timer.After(0, function()
-        if not slot:IsShown() then return end
-        StyleSlotBorders(slot, settings)
-        StyleSlotTextRecursive(slot, settings, 1)
-    end)
-end
-
 local function SetupPrivateAuras()
     if not AddPrivateAuraAnchor or not debuffContainer then return end
     if InCombatLockdown() then
@@ -970,6 +929,14 @@ local function SetupPrivateAuras()
     end
 
     local borderSize = settings and settings.borderSize or 2
+    local fontSize = settings and settings.fontSize or 12
+
+    -- Text scale: use fontSize relative to a base of 12 to control the
+    -- countdown text size via the scaled frame approach.
+    local textScale = math.max(0.1, fontSize / 12)
+    local durationAnchor = settings and settings.debuffDurationTextAnchor or "CENTER"
+    local durationOffX = settings and settings.debuffDurationTextOffsetX or 0
+    local durationOffY = settings and settings.debuffDurationTextOffsetY or 0
 
     for i = 1, PA_MAX_SLOTS do
         local slot = paSlots[i]
@@ -987,13 +954,14 @@ local function SetupPrivateAuras()
         EnsureSlotBorders(slot)
         StyleSlotBorders(slot, settings)
 
-        -- Inset the icon by borderSize so the border is visible around it
+        -- Primary anchor: icon + countdown swipe, no countdown numbers
+        -- (numbers are handled by the scaled secondary anchor below)
         local ok, anchorID = pcall(AddPrivateAuraAnchor, {
             unitToken = "player",
             auraIndex = i,
             parent = slot,
             showCountdownFrame = true,
-            showCountdownNumbers = true,
+            showCountdownNumbers = false,
             iconInfo = {
                 iconWidth = iconSize - borderSize * 2,
                 iconHeight = iconSize - borderSize * 2,
@@ -1008,11 +976,49 @@ local function SetupPrivateAuras()
             },
         })
         paAnchorIDs[i] = ok and anchorID or nil
-    end
 
-    -- Defer text styling — client creates children asynchronously
-    for _, slot in ipairs(paSlots) do
-        DeferStyleSlotText(slot, settings)
+        -- Secondary anchor: tiny scaled frame for duration text sizing.
+        -- The scaled parent controls text size; offset compensation keeps
+        -- the text positioned correctly despite the parent's scale.
+        local scaleFrame = paScaleFrames[i]
+        if not scaleFrame then
+            scaleFrame = CreateFrame("Frame", nil, debuffContainer)
+            paScaleFrames[i] = scaleFrame
+        end
+        scaleFrame:SetSize(0.001, 0.001)
+        scaleFrame:SetScale(textScale)
+        scaleFrame:SetFrameStrata("DIALOG")
+        scaleFrame:ClearAllPoints()
+        scaleFrame:SetPoint("CENTER", slot, "CENTER", 0, 0)
+        scaleFrame:Show()
+
+        local scaleOk, scaleAnchorID = pcall(AddPrivateAuraAnchor, {
+            unitToken = "player",
+            auraIndex = i,
+            parent = scaleFrame,
+            showCountdownFrame = true,
+            showCountdownNumbers = true,
+            iconInfo = {
+                iconWidth = 0.001,
+                iconHeight = 0.001,
+                borderScale = -1000,
+                iconAnchor = {
+                    point = durationAnchor,
+                    relativeTo = slot,
+                    relativePoint = durationAnchor,
+                    offsetX = durationOffX / textScale,
+                    offsetY = durationOffY / textScale,
+                },
+            },
+            durationAnchor = {
+                point = durationAnchor,
+                relativeTo = slot,
+                relativePoint = durationAnchor,
+                offsetX = durationOffX / textScale,
+                offsetY = durationOffY / textScale,
+            },
+        })
+        paScaleAnchorIDs[i] = scaleOk and scaleAnchorID or nil
     end
 end
 

@@ -24,8 +24,7 @@ local MAX_SLOTS = MAX_TOTEMS or 4
 local BASE_CROP = 0.08
 
 ---------------------------------------------------------------------------
--- COMBAT-SAFE SHOW / HIDE FOR SECURE BUTTONS
--- SecureActionButtonTemplate frames can't call Show()/Hide() in combat.
+-- COMBAT-SAFE SHOW / HIDE
 -- Use SetAlpha as a visual stand-in, then reconcile on combat end.
 ---------------------------------------------------------------------------
 local pendingReconcile = false
@@ -143,9 +142,8 @@ TotemBar.enabled = false
 
 -- Create one button per totem slot
 for i = 1, MAX_SLOTS do
-    local btn = CreateFrame("Button", "QUI_TotemBarButton" .. i, container, "SecureActionButtonTemplate")
+    local btn = CreateFrame("Button", "QUI_TotemBarButton" .. i, container)
     btn:SetSize(36, 36)
-    btn:RegisterForClicks("RightButtonUp")
     btn:SetAlpha(0)
     btn.active = false
 
@@ -177,11 +175,6 @@ for i = 1, MAX_SLOTS do
         GameTooltip:Hide()
     end)
 
-    -- Right-click dismiss is handled via secure click-through to
-    -- Blizzard's totem buttons (DestroyTotem is protected; the secure
-    -- handler performs it natively even during combat).
-    -- Attributes are set in UpdateTotems when OOC.
-
     btn.slot = nil
     TotemBar.buttons[i] = btn
 end
@@ -194,8 +187,7 @@ local function StyleButton(btn)
     if not db or not btn then return end
 
     local size = db.iconSize or 36
-    -- Buttons carry secure attributes (click-through to Blizzard totem
-    -- buttons), so SetSize is protected during combat.
+    -- Avoid SetSize during combat (can cause layout issues).
     if not InCombatLockdown() then
         btn:SetSize(size, size)
     end
@@ -338,16 +330,8 @@ local function UpdateTotems()
         local btn = TotemBar.buttons[displayIndex]
         btn.slot = slot
 
-        -- OOC: set up secure click-through to Blizzard's totem button
-        -- so right-click dismiss works even during combat
-        if not InCombatLockdown() then
-            local blizzBtns = TotemFrame and TotemFrame.totemButtons
-            local blizzBtn = blizzBtns and blizzBtns[displayIndex]
-            if blizzBtn then
-                btn:SetAttribute("type2", "click")
-                btn:SetAttribute("clickbutton2", blizzBtn)
-            end
-        end
+        -- DestroyTotem() is fully protected — no addon can call it.
+        -- Blizzard's own totem UI no longer supports click-to-dismiss.
 
         local haveTotem, name, startTime, duration, icon = GetTotemInfo(slot)
         -- Detect active totem: OOC values are readable, combat values are secret.
@@ -497,8 +481,7 @@ end
 local function StealEvents()
     local tf = TotemFrame
     if not tf then return end
-    -- Keep PLAYER_TOTEM_UPDATE so Blizzard's buttons maintain their .slot
-    -- values (needed for secure click-through DestroyTotem)
+    -- Keep PLAYER_TOTEM_UPDATE so Blizzard's TotemFrame stays internally consistent
     for _, event in ipairs(STOLEN_EVENTS) do
         if event ~= "PLAYER_TOTEM_UPDATE" then
             pcall(tf.UnregisterEvent, tf, event)
@@ -725,7 +708,7 @@ initFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
 initFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 initFrame:SetScript("OnEvent", function(self, event)
     if event == "PLAYER_REGEN_ENABLED" then
-        -- Reconcile secure button Show/Hide state after combat
+        -- Reconcile button layout after combat
         if pendingReconcile and TotemBar.enabled then
             pendingReconcile = false
             UpdateTotems()
