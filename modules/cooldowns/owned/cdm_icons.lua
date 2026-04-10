@@ -1006,6 +1006,12 @@ local function HookBlizzStackText(icon, blizzChild)
                 if not s or not s.icon then return end
                 local entry = s.icon._spellEntry
                 if entry and entry._blizzChild ~= blizzChild then return end
+                -- Charged entries: StackText is driven by the FWD path
+                -- (cooldownChargesCount), not ChargeCount visibility.
+                -- Blizzard hides ChargeCount when the aura is active
+                -- (switches to Applications), but FWD still writes
+                -- charges every tick — let it be the authority.
+                if entry and entry.hasCharges then return end
                 ChargeDebug(entry and entry.name, "HOOK ChargeCount.Hide",
                     "spellID=", entry and entry.spellID, "overrideSpellID=", entry and entry.overrideSpellID)
                 s.icon.StackText:Hide()
@@ -1229,17 +1235,7 @@ local function CreateIcon(parent, spellEntry)
         -- Resolve current spell from the viewer child (reflects dynamic
         -- transforms like Glacial Spike ↔ Frostbolt that GetOverrideSpell
         -- does not).  Fall back to entry IDs when no child exists.
-        local sid = nil
-        if entry._blizzChild and entry._blizzChild.GetSpellID then
-            local ok, childSid = pcall(entry._blizzChild.GetSpellID, entry._blizzChild)
-            if ok and childSid then
-                local cmpOk, gt = pcall(function() return childSid > 0 end)
-                if cmpOk and gt then sid = childSid end
-            end
-        end
-        if not sid then
-            sid = entry.overrideSpellID or entry.spellID or entry.id
-        end
+        local sid = ns.CDMSpellData:ResolveDisplaySpellID(entry)
         if sid then
             if entry.type == "trinket" or entry.type == "slot" then
                 local itemID = entry.itemID or GetInventoryItemID("player", entry.id)

@@ -223,18 +223,37 @@ function ActionBarsOwned.SafeUpdate(self)
 
     if HasAction(action) then
         ActionBarsOwned._activeButtons[self] = true
-        -- Icon
-        local texture = GetActionTexture(action)
-        -- Assisted combat rotation slots return nil texture when the
-        -- rotation has no current recommendation (e.g. no target).  Fall
-        -- back to the next-cast spell texture so the button isn't blank.
-        if not texture and C_AssistedCombat and C_AssistedCombat.GetNextCastSpell then
-            local aOk, isAssisted = pcall(C_ActionBar.IsAssistedCombatAction, action)
-            if aOk and isAssisted then
-                local sOk, spellID = pcall(C_AssistedCombat.GetNextCastSpell, true)
-                if sOk and spellID then
-                    local tOk, tex = pcall(C_Spell.GetSpellTexture, spellID)
-                    if tOk and tex then texture = tex end
+        -- Icon — GSE override buttons use the sequence macro icon instead
+        -- of the action slot texture, so SafeUpdate doesn't overwrite it.
+        local gseSeq = self:GetAttribute("gse-button")
+        local texture
+        if gseSeq then
+            -- Prefer the compiled macro icon registered by GSE
+            if GetMacroIndexByName then
+                local idx = GetMacroIndexByName(gseSeq)
+                if idx and idx > 0 then
+                    local _, macTex = GetMacroInfo(idx)
+                    texture = macTex
+                end
+            end
+            -- Fall back to the action slot texture (may be the original
+            -- spell icon, which is still a reasonable fallback)
+            if not texture then
+                texture = GetActionTexture(action)
+            end
+        else
+            texture = GetActionTexture(action)
+            -- Assisted combat rotation slots return nil texture when the
+            -- rotation has no current recommendation (e.g. no target).  Fall
+            -- back to the next-cast spell texture so the button isn't blank.
+            if not texture and C_AssistedCombat and C_AssistedCombat.GetNextCastSpell then
+                local aOk, isAssisted = pcall(C_ActionBar.IsAssistedCombatAction, action)
+                if aOk and isAssisted then
+                    local sOk, spellID = pcall(C_AssistedCombat.GetNextCastSpell, true)
+                    if sOk and spellID then
+                        local tOk, tex = pcall(C_Spell.GetSpellTexture, spellID)
+                        if tOk and tex then texture = tex end
+                    end
                 end
             end
         end
@@ -256,16 +275,10 @@ function ActionBarsOwned.SafeUpdate(self)
             self:SetChecked(false)
         end
 
-        -- Usability (basic vertex color — QUI's own tint overlay handles
-        -- detailed range/mana coloring via its polling timer)
-        local isUsable, notEnoughMana = IsUsableAction(action)
-        if isUsable then
-            self.icon:SetVertexColor(1, 1, 1)
-        elseif notEnoughMana then
-            self.icon:SetVertexColor(0.5, 0.5, 1)
-        else
-            self.icon:SetVertexColor(0.4, 0.4, 0.4)
-        end
+        -- Usability coloring is handled entirely by the QUI tint overlay
+        -- system (UpdateButtonUsability).  Keep icon vertex color neutral
+        -- so the overlay is the sole source of range/mana/unusable tinting.
+        self.icon:SetVertexColor(1, 1, 1)
 
         -- Equipped border
         if IsEquippedAction(action) then
@@ -1552,6 +1565,10 @@ local function SetOwnedBarAlpha(barKey, alpha)
     GetOwnedBarFadeState(barKey).currentAlpha = alpha
 end
 
+-- Expose for HUD visibility system (hud_visibility.lua) so it can fade
+-- bars through the proper path that hides MOD-blend textures.
+ActionBarsOwned.SetBarAlpha = SetOwnedBarAlpha
+
 local fadeFrame = nil
 local fadeFrameUpdate = nil
 
@@ -1849,9 +1866,13 @@ local function SetupOwnedBarMouseover(barKey)
     state.isFading = false
     CancelOwnedBarFadeTimers(state)
 
-    if not IsMouseOverOwnedBar(barKey) then
-        SetOwnedBarAlpha(barKey, fadeOutAlpha)
+    local isMouseOver = IsMouseOverOwnedBar(barKey)
+    if fadeSettings and fadeSettings.linkBars1to8 and IsLinkedBar(barKey) then
+        isMouseOver = IsMouseOverAnyLinkedOwnedBar()
     end
+
+    state.isMouseOver = isMouseOver
+    SetOwnedBarAlpha(barKey, isMouseOver and 1 or fadeOutAlpha)
 end
 
 ---------------------------------------------------------------------------
@@ -2184,6 +2205,24 @@ local function BuildBar(barKey)
                 --     click response for normal spells.  Imperceptible
                 --     in practice; keybinds are unaffected.
                 btn:SetAttribute("useOnKeyDown", false)
+                -- Popup direction support for spell flyouts.
+                -- BaseActionButtonMixin:UpdateFlyout bails at
+                -- "if not self.HasPopup" without these methods,
+                -- so the flyoutDirection attribute is never read.
+                if not btn.HasPopup then
+                    local popupDir
+                    btn.HasPopup = true
+                    btn.SetPopupDirection = function(_, dir) popupDir = dir end
+                    btn.GetPopupDirection = function() return popupDir end
+                    btn.SetPopup = function(self2, popup)
+                        if popup then
+                            rawset(self2, "_quiPopup", popup)
+                        end
+                    end
+                    btn.ClearPopup = function(self2)
+                        rawset(self2, "_quiPopup", nil)
+                    end
+                end
                 btn.flashing = 0
                 btn.flashtime = 0
                 btn:SetAttribute("index", i)
@@ -2759,6 +2798,21 @@ local function BuildBar(barKey)
                 -- path above for full rationale.
                 btn:RegisterForClicks("AnyDown", "AnyUp")
                 btn:SetAttribute("useOnKeyDown", false)
+                -- Popup direction support — see bar1 creation path.
+                if not btn.HasPopup then
+                    local popupDir
+                    btn.HasPopup = true
+                    btn.SetPopupDirection = function(_, dir) popupDir = dir end
+                    btn.GetPopupDirection = function() return popupDir end
+                    btn.SetPopup = function(self2, popup)
+                        if popup then
+                            rawset(self2, "_quiPopup", popup)
+                        end
+                    end
+                    btn.ClearPopup = function(self2)
+                        rawset(self2, "_quiPopup", nil)
+                    end
+                end
                 btn.flashing = 0
                 btn.flashtime = 0
                 local action = offset + i
@@ -2956,7 +3010,8 @@ local function BuildBar(barKey)
                 -- OnReceiveDrag: same double-wrap pattern.
                 btn:SetScript("OnReceiveDrag", nil)
                 SecureHandlerWrapScript(btn, "OnReceiveDrag", btn, [[
-                    if self:GetAttribute("LABdisableDragNDrop") then
+                    if self:GetAttribute("buttonlock")
+                        or self:GetAttribute("LABdisableDragNDrop") then
                         return false
                     end
                     return "action", self:GetAttribute("action")
@@ -4315,26 +4370,9 @@ local function OnOwnedEvent(self, event, ...)
             ActionBarsOwned.pendingFlyoutDirection = false
             if ApplyAllFlyoutDirections then ApplyAllFlyoutDirections() end
         end
-        -- Post-combat full refresh.  SafeUpdate kept visuals live during
-        -- combat.  Now call the mixin's full ActionButton_Update (safe out
-        -- of combat — no secret values) so the hooksecurefunc on
-        -- ActionButton_Update fires and re-applies QUI skinning/text.
-        -- Shadows stay in place — the global ActionButton_Update call
-        -- triggers the hook regardless, and internal self:Method() calls
-        -- safely hit our shadows.
-        for _, barKey in ipairs(STANDARD_BAR_KEYS) do
-            local btns = ActionBarsOwned.nativeButtons[barKey]
-            if btns then
-                for _, btn in ipairs(btns) do
-                    if ActionButton_Update then
-                        pcall(ActionButton_Update, btn)
-                    end
-                    ActionBarsOwned.UpdateCooldown(btn)
-                    ActionBarsOwned.UpdateOverlayGlow(btn)
-                end
-            end
-        end
-        UpdateAllAssistedHighlights()
+        -- SafeUpdate keeps all visuals live during combat (icon, cooldown,
+        -- glow, usability, count, checked state).  Skinning state does not
+        -- drift in combat, so no post-combat re-skin pass is needed.
 
     elseif event == "PET_BAR_UPDATE" or event == "PET_BAR_UPDATE_COOLDOWN" then
         -- PetActionBarMixin:Update on the suppressed bar won't fire, so QUI
@@ -4392,6 +4430,7 @@ local function OnOwnedEvent(self, event, ...)
         ActionBarsOwned.UpdateAllCooldowns()
         UpdatePetBarVisibility()
         UpdateStanceBarLayout()
+        ApplyAllFlyoutDirections()
         inInitSafeWindow = false
         ns._inInitSafeWindow = false
         -- Second pass after Blizzard frames settle; defer if safe period ended
@@ -4414,6 +4453,7 @@ local function OnOwnedEvent(self, event, ...)
             ActionBarsOwned.UpdateAllCooldowns()
             UpdatePetBarVisibility()
             UpdateStanceBarLayout()
+            ApplyAllFlyoutDirections()
         end)
         local db = GetDB()
         if db and db.bars and db.bars.bar1 then
@@ -4502,8 +4542,9 @@ local function OnOwnedEvent(self, event, ...)
         -- Full post-drag refresh: the drag may have moved spells (including
         -- the one-button rotation action) between slots.  Some action types
         -- don't fire per-slot ACTIONBAR_SLOT_CHANGED, so we refresh
-        -- everything here to guarantee correctness.
-        ScheduleABVisualUpdate()
+        -- everything here to guarantee correctness.  Force a full scan so
+        -- newly-populated empty slots are caught immediately.
+        ScheduleABVisualUpdate(true)
         ScheduleABCooldownUpdate()
         -- Assisted combat rotation and highlights must also refresh — the
         -- rotation action may have moved to a new button.
@@ -4547,6 +4588,7 @@ local function OnOwnedEvent(self, event, ...)
                 end
             end
         end
+        ApplyAllFlyoutDirections()
         -- Refresh empty slot visibility (slots may have gained/lost actions)
         if not InCombatLockdown() then
             for _, barKey in ipairs(STANDARD_BAR_KEYS) do
@@ -4574,6 +4616,7 @@ local function OnOwnedEvent(self, event, ...)
                 end
             end
         end
+        ApplyAllFlyoutDirections()
 
     elseif event == "SPELL_UPDATE_USABLE" then
         -- Spell usability changed (e.g. resource gained/spent, GCD ended).
@@ -5919,7 +5962,7 @@ local function UpdateButtonUsability(button, settings)
         return
     end
 
-    if not action then
+    if not action or not SafeHasAction(action) then
         if state.tinted then
             if state.tintOverlay then state.tintOverlay:Hide() end
             state.tinted = nil
@@ -5981,12 +6024,8 @@ local function UpdateButtonUsability(button, settings)
     elseif newTint == "unusable" then
         local overlay = GetTintOverlay(button)
         if overlay then
-            if settings.usabilityDesaturate then
-                overlay:SetColorTexture(0.4, 0.4, 0.4, 1)
-            else
-                local c = settings.usabilityColor
-                overlay:SetColorTexture(c and c[1] or 0.4, c and c[2] or 0.4, c and c[3] or 0.4, c and c[4] or 1)
-            end
+            local c = settings.usabilityColor
+            overlay:SetColorTexture(c and c[1] or 0.4, c and c[2] or 0.4, c and c[3] or 0.4, c and c[4] or 1)
             overlay:Show()
         end
         state.tinted = "unusable"
@@ -6069,6 +6108,8 @@ local function UpdateUsabilityPolling()
         checkFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
         checkFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
         checkFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+        checkFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+        checkFrame:RegisterEvent("ZONE_CHANGED_INDOORS")
 
         checkFrame:SetScript("OnEvent", function(self, event, ...)
             if event == "PLAYER_REGEN_DISABLED" then
@@ -6431,6 +6472,10 @@ ApplyFlyoutDirection = function(barKey)
     for _, btn in ipairs(buttons) do
         if btn and btn.SetAttribute then
             btn:SetAttribute("flyoutDirection", dir)
+            -- Explicitly sync popup direction: UpdateFlyout only calls
+            -- SetPopupDirection when the value is non-nil, so switching
+            -- back to AUTO would leave the old direction stuck.
+            if btn.SetPopupDirection then btn:SetPopupDirection(dir) end
             if btn.UpdateFlyout then pcall(btn.UpdateFlyout, btn) end
         end
     end

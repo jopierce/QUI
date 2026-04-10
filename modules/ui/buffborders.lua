@@ -138,6 +138,8 @@ local previewDebuffIcons = {}
 local PA_MAX_SLOTS = 3
 local paSlots = {}
 local paAnchorIDs = {}
+local paScaleFrames = {}       -- tiny scaled frames for duration text sizing
+local paScaleAnchorIDs = {}    -- second anchor IDs for scaled duration text
 local paPendingSetup = false   -- deferred AddPrivateAuraAnchor after combat
 
 ---------------------------------------------------------------------------
@@ -314,6 +316,7 @@ end
 
 local function ReleaseIcon(icon)
     if not icon then return end
+    if icon._cancelBtn then icon._cancelBtn:Hide() end
     icon:Hide()
     icon:ClearAllPoints()
     icon._auraInstanceID = nil
@@ -501,7 +504,9 @@ local function LayoutIcons(container, sortedIcons, settings, prefix)
     local bottomPadding = settings[prefix .. "BottomPadding"] or 10
     local totalH = numRows * iconSize + math.max(0, numRows - 1) * rowSpacing + bottomPadding
 
-    container:SetSize(totalW, totalH)
+    -- SetSize on named containers can be blocked by taint propagation when
+    -- the call stack has touched secret aura values during combat.
+    pcall(container.SetSize, container, totalW, totalH)
     -- Cache the natural size so layout mode proxy movers can read it
     -- (frame.GetSize returns handle size when reparented via SetAllPoints).
     container._naturalW = totalW
@@ -521,7 +526,9 @@ local function LayoutIcons(container, sortedIcons, settings, prefix)
             faKey = "debuffFrame"
         end
         if faKey and _G.QUI_ApplyFrameAnchor then
-            _G.QUI_ApplyFrameAnchor(faKey)
+            if not InCombatLockdown() then
+                _G.QUI_ApplyFrameAnchor(faKey)
+            end
         end
     end
 
@@ -839,6 +846,11 @@ local function ClearPrivateAuraAnchors()
         if id then pcall(RemovePrivateAuraAnchor, id) end
     end
     wipe(paAnchorIDs)
+    for i = 1, #paScaleAnchorIDs do
+        local id = paScaleAnchorIDs[i]
+        if id then pcall(RemovePrivateAuraAnchor, id) end
+    end
+    wipe(paScaleAnchorIDs)
     -- Hide any stale WoW-rendered children left on anchor slots
     for i = 1, PA_MAX_SLOTS do
         local slot = paSlots[i]
@@ -848,7 +860,57 @@ local function ClearPrivateAuraAnchors()
                 if child then child:Hide() end
             end
         end
+        local sf = paScaleFrames[i]
+        if sf then sf:Hide() end
     end
+end
+
+local function EnsureSlotBorders(slot)
+    if slot.BorderTop then return end
+    slot.BorderTop = slot:CreateTexture(nil, "OVERLAY", nil, 7)
+    slot.BorderBottom = slot:CreateTexture(nil, "OVERLAY", nil, 7)
+    slot.BorderLeft = slot:CreateTexture(nil, "OVERLAY", nil, 7)
+    slot.BorderRight = slot:CreateTexture(nil, "OVERLAY", nil, 7)
+
+    slot.BorderTop:SetPoint("TOPLEFT", slot, "TOPLEFT", 0, 0)
+    slot.BorderTop:SetPoint("TOPRIGHT", slot, "TOPRIGHT", 0, 0)
+    slot.BorderBottom:SetPoint("BOTTOMLEFT", slot, "BOTTOMLEFT", 0, 0)
+    slot.BorderBottom:SetPoint("BOTTOMRIGHT", slot, "BOTTOMRIGHT", 0, 0)
+    slot.BorderLeft:SetPoint("TOPLEFT", slot, "TOPLEFT", 0, 0)
+    slot.BorderLeft:SetPoint("BOTTOMLEFT", slot, "BOTTOMLEFT", 0, 0)
+    slot.BorderRight:SetPoint("TOPRIGHT", slot, "TOPRIGHT", 0, 0)
+    slot.BorderRight:SetPoint("BOTTOMRIGHT", slot, "BOTTOMRIGHT", 0, 0)
+end
+
+local function SlotHasVisibleAura(slot)
+    for i = 1, slot:GetNumChildren() do
+        local child = select(i, slot:GetChildren())
+        if child and child:IsShown() then return true end
+    end
+    return false
+end
+
+local function StyleSlotBorders(slot, settings)
+    if not slot.BorderTop then return end
+    local borderSize = settings and settings.borderSize or 2
+    local r, g, b = BORDER_COLOR_DEBUFF_DEFAULT[1], BORDER_COLOR_DEBUFF_DEFAULT[2], BORDER_COLOR_DEBUFF_DEFAULT[3]
+
+    slot.BorderTop:SetColorTexture(r, g, b, 1)
+    slot.BorderBottom:SetColorTexture(r, g, b, 1)
+    slot.BorderLeft:SetColorTexture(r, g, b, 1)
+    slot.BorderRight:SetColorTexture(r, g, b, 1)
+
+    slot.BorderTop:SetHeight(borderSize)
+    slot.BorderBottom:SetHeight(borderSize)
+    slot.BorderLeft:SetWidth(borderSize)
+    slot.BorderRight:SetWidth(borderSize)
+
+    -- Only show borders when the client has rendered a visible aura child
+    local visible = SlotHasVisibleAura(slot)
+    slot.BorderTop:SetShown(visible)
+    slot.BorderBottom:SetShown(visible)
+    slot.BorderLeft:SetShown(visible)
+    slot.BorderRight:SetShown(visible)
 end
 
 local function SetupPrivateAuras()
@@ -866,6 +928,16 @@ local function SetupPrivateAuras()
         if s > 0 then iconSize = s end
     end
 
+    local borderSize = settings and settings.borderSize or 2
+    local fontSize = settings and settings.fontSize or 12
+
+    -- Text scale: use fontSize relative to a base of 12 to control the
+    -- countdown text size via the scaled frame approach.
+    local textScale = math.max(0.1, fontSize / 12)
+    local durationAnchor = settings and settings.debuffDurationTextAnchor or "CENTER"
+    local durationOffX = settings and settings.debuffDurationTextOffsetX or 0
+    local durationOffY = settings and settings.debuffDurationTextOffsetY or 0
+
     for i = 1, PA_MAX_SLOTS do
         local slot = paSlots[i]
         if not slot then
@@ -878,16 +950,22 @@ local function SetupPrivateAuras()
         slot:SetFrameLevel(debuffContainer:GetFrameLevel() + 5)
         slot:Show()
 
+        -- Add and style border textures to match normal debuff icons
+        EnsureSlotBorders(slot)
+        StyleSlotBorders(slot, settings)
+
+        -- Primary anchor: icon + countdown swipe, no countdown numbers
+        -- (numbers are handled by the scaled secondary anchor below)
         local ok, anchorID = pcall(AddPrivateAuraAnchor, {
             unitToken = "player",
             auraIndex = i,
             parent = slot,
             showCountdownFrame = true,
-            showCountdownNumbers = true,
+            showCountdownNumbers = false,
             iconInfo = {
-                iconWidth = iconSize,
-                iconHeight = iconSize,
-                borderScale = 1,
+                iconWidth = iconSize - borderSize * 2,
+                iconHeight = iconSize - borderSize * 2,
+                borderScale = -1000,
                 iconAnchor = {
                     point = "CENTER",
                     relativeTo = slot,
@@ -898,6 +976,49 @@ local function SetupPrivateAuras()
             },
         })
         paAnchorIDs[i] = ok and anchorID or nil
+
+        -- Secondary anchor: tiny scaled frame for duration text sizing.
+        -- The scaled parent controls text size; offset compensation keeps
+        -- the text positioned correctly despite the parent's scale.
+        local scaleFrame = paScaleFrames[i]
+        if not scaleFrame then
+            scaleFrame = CreateFrame("Frame", nil, debuffContainer)
+            paScaleFrames[i] = scaleFrame
+        end
+        scaleFrame:SetSize(0.001, 0.001)
+        scaleFrame:SetScale(textScale)
+        scaleFrame:SetFrameStrata("DIALOG")
+        scaleFrame:ClearAllPoints()
+        scaleFrame:SetPoint("CENTER", slot, "CENTER", 0, 0)
+        scaleFrame:Show()
+
+        local scaleOk, scaleAnchorID = pcall(AddPrivateAuraAnchor, {
+            unitToken = "player",
+            auraIndex = i,
+            parent = scaleFrame,
+            showCountdownFrame = true,
+            showCountdownNumbers = true,
+            iconInfo = {
+                iconWidth = 0.001,
+                iconHeight = 0.001,
+                borderScale = -1000,
+                iconAnchor = {
+                    point = durationAnchor,
+                    relativeTo = slot,
+                    relativePoint = durationAnchor,
+                    offsetX = durationOffX / textScale,
+                    offsetY = durationOffY / textScale,
+                },
+            },
+            durationAnchor = {
+                point = durationAnchor,
+                relativeTo = slot,
+                relativePoint = durationAnchor,
+                offsetX = durationOffX / textScale,
+                offsetY = durationOffY / textScale,
+            },
+        })
+        paScaleAnchorIDs[i] = scaleOk and scaleAnchorID or nil
     end
 end
 
@@ -942,6 +1063,7 @@ local function LayoutPrivateAuraSlots()
         slot:SetSize(iconSize, iconSize)
         slot:ClearAllPoints()
         slot:SetPoint(anchor, debuffContainer, anchor, xOff, yOff)
+        StyleSlotBorders(slot, settings)
         slot:Show()
     end
 end
@@ -1048,15 +1170,31 @@ local function UpdateWeaponEnchantIcons()
                     container:SetAlpha(s and s.fadeOutAlpha or 0)
                 end
             end)
-            -- Right-click to cancel weapon temp enchant (out of combat only).
-            -- CancelItemTempEnchantment uses 1 = mainhand, 2 = offhand.
-            icon:SetScript("OnMouseUp", function(self, button)
-                if button ~= "RightButton" then return end
-                if InCombatLockdown() then return end
-                if not CancelItemTempEnchantment then return end
-                local enchantIndex = (self._enchantSlot == 17) and 2 or 1
-                CancelItemTempEnchantment(enchantIndex)
-            end)
+            -- CancelItemTempEnchantment is protected, so we overlay a secure
+            -- button whose cancelaura action calls it via Blizzard's own
+            -- SECURE_ACTIONS handler (target-slot → CANCELABLE_ITEMS lookup).
+            if not icon._cancelBtn then
+                local btn = CreateFrame("Button", nil, icon, "SecureActionButtonTemplate")
+                btn:SetAllPoints(icon)
+                btn:RegisterForClicks("RightButtonUp")
+                btn:SetAttribute("type2", "cancelaura")
+                -- Pass tooltip events through to the underlying icon
+                btn:SetScript("OnEnter", function(self)
+                    local parent = self:GetParent()
+                    if parent and parent:GetScript("OnEnter") then
+                        parent:GetScript("OnEnter")(parent)
+                    end
+                end)
+                btn:SetScript("OnLeave", function(self)
+                    local parent = self:GetParent()
+                    if parent and parent:GetScript("OnLeave") then
+                        parent:GetScript("OnLeave")(parent)
+                    end
+                end)
+                icon._cancelBtn = btn
+            end
+            icon._cancelBtn:SetAttribute("target-slot2", slot)
+            icon._cancelBtn:Show()
         else
             ReleaseEnchantIcon(slot)
         end

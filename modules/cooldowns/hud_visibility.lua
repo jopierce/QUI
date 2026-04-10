@@ -172,21 +172,33 @@ local function ShouldCDMBeVisible()
     local vis = GetCDMVisibilitySettings()
     if not vis then return true end
 
-    local ignoreHideRules = vis.dontHideInDungeonsRaids and Helpers.IsPlayerInDungeonOrRaid and Helpers.IsPlayerInDungeonOrRaid()
-    if not ignoreHideRules then
-        if vis.hideWhenMounted and Helpers.IsPlayerMounted() then return false end
-        if vis.hideWhenFlying and Helpers.IsPlayerFlying() then return false end
-        if vis.hideWhenSkyriding and Helpers.IsPlayerSkyriding() then return false end
-        if vis.hideWhenInVehicle and Helpers.IsPlayerInVehicle and Helpers.IsPlayerInVehicle() then return false end
+    if vis.showAlways then
+        local ignoreHideRules = vis.dontHideInDungeonsRaids and Helpers.IsPlayerInDungeonOrRaid and Helpers.IsPlayerInDungeonOrRaid()
+        if not ignoreHideRules then
+            if vis.hideWhenMounted and not vis.showWhenMounted and Helpers.IsPlayerMounted() then return false end
+            if vis.hideWhenFlying and Helpers.IsPlayerFlying() then return false end
+            if vis.hideWhenSkyriding and Helpers.IsPlayerSkyriding() then return false end
+            if vis.hideWhenInVehicle and Helpers.IsPlayerInVehicle and Helpers.IsPlayerInVehicle() then return false end
+        end
+        return true
     end
 
-    if vis.showAlways then return true end
-
+    -- Active show conditions override hide rules
     if vis.showWhenTargetExists and UnitExists("target") then return true end
     if vis.showInCombat and UnitAffectingCombat("player") then return true end
     if vis.showInGroup and IsPlayerInGroup() then return true end
     if vis.showInInstance and IsPlayerInInstance() then return true end
     if vis.showOnMouseover and CDMVisibility.mouseOver then return true end
+    if vis.showWhenMounted and Helpers.IsPlayerMounted() then return true end
+
+    -- No active show condition — apply hide rules
+    local ignoreHideRules = vis.dontHideInDungeonsRaids and Helpers.IsPlayerInDungeonOrRaid and Helpers.IsPlayerInDungeonOrRaid()
+    if not ignoreHideRules then
+        if vis.hideWhenMounted and not vis.showWhenMounted and Helpers.IsPlayerMounted() then return false end
+        if vis.hideWhenFlying and Helpers.IsPlayerFlying() then return false end
+        if vis.hideWhenSkyriding and Helpers.IsPlayerSkyriding() then return false end
+        if vis.hideWhenInVehicle and Helpers.IsPlayerInVehicle and Helpers.IsPlayerInVehicle() then return false end
+    end
 
     return false
 end
@@ -459,20 +471,31 @@ local function ShouldUnitframesBeVisible()
         return true
     end
 
-    local ignoreHideRules = vis.dontHideInDungeonsRaids and Helpers.IsPlayerInDungeonOrRaid and Helpers.IsPlayerInDungeonOrRaid()
-    if not ignoreHideRules then
-        if vis.hideWhenMounted and Helpers.IsPlayerMounted() then return false end
-        if vis.hideWhenFlying and Helpers.IsPlayerFlying() then return false end
-        if vis.hideWhenSkyriding and Helpers.IsPlayerSkyriding() then return false end
+    if vis.showAlways then
+        local ignoreHideRules = vis.dontHideInDungeonsRaids and Helpers.IsPlayerInDungeonOrRaid and Helpers.IsPlayerInDungeonOrRaid()
+        if not ignoreHideRules then
+            if vis.hideWhenMounted and not vis.showWhenMounted and Helpers.IsPlayerMounted() then return false end
+            if vis.hideWhenFlying and Helpers.IsPlayerFlying() then return false end
+            if vis.hideWhenSkyriding and Helpers.IsPlayerSkyriding() then return false end
+        end
+        return true
     end
 
-    if vis.showAlways then return true end
-
+    -- Active show conditions override hide rules
     if vis.showWhenTargetExists and UnitExists("target") then return true end
     if vis.showInCombat and UnitAffectingCombat("player") then return true end
     if vis.showInGroup and IsPlayerInGroup() then return true end
     if vis.showInInstance and IsPlayerInInstance() then return true end
     if vis.showOnMouseover and UnitframesVisibility.mouseOver then return true end
+    if vis.showWhenMounted and Helpers.IsPlayerMounted() then return true end
+
+    -- No active show condition — apply hide rules
+    local ignoreHideRules = vis.dontHideInDungeonsRaids and Helpers.IsPlayerInDungeonOrRaid and Helpers.IsPlayerInDungeonOrRaid()
+    if not ignoreHideRules then
+        if vis.hideWhenMounted and not vis.showWhenMounted and Helpers.IsPlayerMounted() then return false end
+        if vis.hideWhenFlying and Helpers.IsPlayerFlying() then return false end
+        if vis.hideWhenSkyriding and Helpers.IsPlayerSkyriding() then return false end
+    end
 
     return false
 end
@@ -654,10 +677,10 @@ end
 local function GetActionBarFrames()
     local frames = {}
     -- Action bar containers from the owned action bar system
-    if ns.QUI_ActionBars and ns.QUI_ActionBars.containers then
-        for _, container in pairs(ns.QUI_ActionBars.containers) do
+    if ns.ActionBarsOwned and ns.ActionBarsOwned.containers then
+        for barKey, container in pairs(ns.ActionBarsOwned.containers) do
             if container then
-                frames[#frames + 1] = container
+                frames[#frames + 1] = { barKey = barKey, container = container }
             end
         end
     end
@@ -668,21 +691,34 @@ local function ShouldActionBarsBeVisible()
     local vis = GetActionBarsVisibilitySettings()
     if not vis then return true end
 
-    local ignoreHideRules = vis.dontHideInDungeonsRaids and Helpers.IsPlayerInDungeonOrRaid and Helpers.IsPlayerInDungeonOrRaid()
-    if not ignoreHideRules then
-        if vis.hideWhenMounted and Helpers.IsPlayerMounted() then return false end
-        if vis.hideWhenInVehicle and Helpers.IsPlayerInVehicle and Helpers.IsPlayerInVehicle() then return false end
-        if vis.hideWhenFlying and Helpers.IsPlayerFlying() then return false end
-        if vis.hideWhenSkyriding and Helpers.IsPlayerSkyriding() then return false end
+    if vis.showAlways then
+        -- "Always show" still respects hide rules (mounted/flying/etc.)
+        local ignoreHideRules = vis.dontHideInDungeonsRaids and Helpers.IsPlayerInDungeonOrRaid and Helpers.IsPlayerInDungeonOrRaid()
+        if not ignoreHideRules then
+            if vis.hideWhenMounted and not vis.showWhenMounted and Helpers.IsPlayerMounted() then return false end
+            if vis.hideWhenInVehicle and Helpers.IsPlayerInVehicle and Helpers.IsPlayerInVehicle() then return false end
+            if vis.hideWhenFlying and Helpers.IsPlayerFlying() then return false end
+            if vis.hideWhenSkyriding and Helpers.IsPlayerSkyriding() then return false end
+        end
+        return true
     end
 
-    if vis.showAlways then return true end
-
+    -- Active show conditions (target, combat, etc.) override hide rules
     if vis.showWhenTargetExists and UnitExists("target") then return true end
     if vis.showInCombat and UnitAffectingCombat("player") then return true end
     if vis.showInGroup and IsPlayerInGroup() then return true end
     if vis.showInInstance and IsPlayerInInstance() then return true end
     if vis.showOnMouseover and ActionBarsVisibility.mouseOver then return true end
+    if vis.showWhenMounted and Helpers.IsPlayerMounted() then return true end
+
+    -- No active show condition matched — apply hide rules
+    local ignoreHideRules = vis.dontHideInDungeonsRaids and Helpers.IsPlayerInDungeonOrRaid and Helpers.IsPlayerInDungeonOrRaid()
+    if not ignoreHideRules then
+        if vis.hideWhenMounted and not vis.showWhenMounted and Helpers.IsPlayerMounted() then return false end
+        if vis.hideWhenInVehicle and Helpers.IsPlayerInVehicle and Helpers.IsPlayerInVehicle() then return false end
+        if vis.hideWhenFlying and Helpers.IsPlayerFlying() then return false end
+        if vis.hideWhenSkyriding and Helpers.IsPlayerSkyriding() then return false end
+    end
 
     return false
 end
@@ -700,9 +736,12 @@ local function OnActionBarsFadeUpdate(self, elapsed)
         (ActionBarsVisibility.fadeTargetAlpha - ActionBarsVisibility.fadeStartAlpha) * progress
 
     local frames = GetActionBarFrames()
-    for _, frame in ipairs(frames) do
-        if frame and frame.SetAlpha then
-            pcall(frame.SetAlpha, frame, alpha)
+    local setBarAlpha = ns.ActionBarsOwned and ns.ActionBarsOwned.SetBarAlpha
+    for _, entry in ipairs(frames) do
+        if setBarAlpha then
+            pcall(setBarAlpha, entry.barKey, alpha)
+        elseif entry.container and entry.container.SetAlpha then
+            pcall(entry.container.SetAlpha, entry.container, alpha)
         end
     end
 
@@ -717,7 +756,7 @@ local function StartActionBarsFade(targetAlpha)
     local frames = GetActionBarFrames()
     if #frames == 0 then return end
 
-    local currentAlpha = frames[1]:GetAlpha()
+    local currentAlpha = frames[1].container:GetAlpha()
 
     if math.abs(currentAlpha - targetAlpha) < 0.01 then
         ActionBarsVisibility.currentlyHidden = (targetAlpha < 1)
@@ -735,6 +774,41 @@ local function StartActionBarsFade(targetAlpha)
     ActionBarsVisibility.fadeFrame:SetScript("OnUpdate", OnActionBarsFadeUpdate)
 end
 
+local function StopActionBarsFade()
+    ActionBarsVisibility.isFading = false
+    if ActionBarsVisibility.fadeFrame then
+        ActionBarsVisibility.fadeFrame:SetScript("OnUpdate", nil)
+    end
+end
+
+local function IsActionBarMouseoverFadeEnabled()
+    if not (QUICore and QUICore.db and QUICore.db.profile) then return false end
+
+    local actionBars = QUICore.db.profile.actionBars
+    if type(actionBars) ~= "table" then return false end
+
+    local fade = actionBars.fade
+    local globalFadeEnabled = type(fade) == "table" and fade.enabled == true
+    local bars = actionBars.bars
+    local containers = ns.ActionBarsOwned and ns.ActionBarsOwned.containers
+
+    if type(containers) == "table" and next(containers) ~= nil then
+        for barKey in pairs(containers) do
+            local barSettings = type(bars) == "table" and bars[barKey]
+            local fadeEnabled = type(barSettings) == "table" and barSettings.fadeEnabled
+            if fadeEnabled == nil then
+                fadeEnabled = globalFadeEnabled
+            end
+            if fadeEnabled then
+                return true
+            end
+        end
+        return false
+    end
+
+    return globalFadeEnabled
+end
+
 local function UpdateActionBarsVisibility()
     if Helpers.IsEditModeActive() or Helpers.IsLayoutModeActive() then
         StartActionBarsFade(1)
@@ -745,7 +819,15 @@ local function UpdateActionBarsVisibility()
     local vis = GetActionBarsVisibilitySettings()
 
     if shouldShow then
-        StartActionBarsFade(1)
+        if IsActionBarMouseoverFadeEnabled() then
+            StopActionBarsFade()
+            ActionBarsVisibility.currentlyHidden = false
+            if type(_G.QUI_RefreshActionBarFade) == "function" then
+                _G.QUI_RefreshActionBarFade()
+            end
+        else
+            StartActionBarsFade(1)
+        end
     else
         StartActionBarsFade(vis and vis.fadeOutAlpha or 0)
     end
@@ -773,7 +855,8 @@ local function SetupActionBarsMouseoverDetector()
     local abFrames = GetActionBarFrames()
     local hoverCount = 0
 
-    for _, frame in ipairs(abFrames) do
+    for _, entry in ipairs(abFrames) do
+        local frame = entry.container
         if frame and not _mouseoverHooked[frame] then
             _mouseoverHooked[frame] = true
 
@@ -795,7 +878,7 @@ local function SetupActionBarsMouseoverDetector()
                     if ActionBarsVisibility.leaveTimer then
                         ActionBarsVisibility.leaveTimer:Cancel()
                     end
-                    ActionBarsVisibility.leaveTimer = C_Timer.NewTimer(0.5, function()
+                    ActionBarsVisibility.leaveTimer = C_Timer.NewTimer(0.3, function()
                         ActionBarsVisibility.leaveTimer = nil
                         if hoverCount == 0 then
                             ActionBarsVisibility.mouseOver = false
@@ -807,8 +890,32 @@ local function SetupActionBarsMouseoverDetector()
         end
     end
 
+    -- Polling detector: catches mouseover when bars are fully faded out
+    -- and OnEnter may not fire reliably on transparent containers
     local detector = CreateFrame("Frame", nil, UIParent)
     detector:EnableMouse(false)
+    local pollInterval = 0
+    detector:SetScript("OnUpdate", function(self, elapsed)
+        pollInterval = pollInterval + elapsed
+        if pollInterval < 0.1 then return end
+        pollInterval = 0
+
+        if ActionBarsVisibility.mouseOver then return end
+
+        local frames = GetActionBarFrames()
+        for _, entry in ipairs(frames) do
+            if entry.container and entry.container:IsMouseOver() then
+                if ActionBarsVisibility.leaveTimer then
+                    ActionBarsVisibility.leaveTimer:Cancel()
+                    ActionBarsVisibility.leaveTimer = nil
+                end
+                hoverCount = 1
+                ActionBarsVisibility.mouseOver = true
+                UpdateActionBarsVisibility()
+                return
+            end
+        end
+    end)
     ActionBarsVisibility.mouseoverDetector = detector
 end
 
@@ -854,21 +961,33 @@ local function ShouldChatBeVisible()
     local vis = GetChatVisibilitySettings()
     if not vis then return true end
 
-    local ignoreHideRules = vis.dontHideInDungeonsRaids and Helpers.IsPlayerInDungeonOrRaid and Helpers.IsPlayerInDungeonOrRaid()
-    if not ignoreHideRules then
-        if vis.hideWhenMounted and Helpers.IsPlayerMounted() then return false end
-        if vis.hideWhenInVehicle and Helpers.IsPlayerInVehicle and Helpers.IsPlayerInVehicle() then return false end
-        if vis.hideWhenFlying and Helpers.IsPlayerFlying() then return false end
-        if vis.hideWhenSkyriding and Helpers.IsPlayerSkyriding() then return false end
+    if vis.showAlways then
+        local ignoreHideRules = vis.dontHideInDungeonsRaids and Helpers.IsPlayerInDungeonOrRaid and Helpers.IsPlayerInDungeonOrRaid()
+        if not ignoreHideRules then
+            if vis.hideWhenMounted and not vis.showWhenMounted and Helpers.IsPlayerMounted() then return false end
+            if vis.hideWhenInVehicle and Helpers.IsPlayerInVehicle and Helpers.IsPlayerInVehicle() then return false end
+            if vis.hideWhenFlying and Helpers.IsPlayerFlying() then return false end
+            if vis.hideWhenSkyriding and Helpers.IsPlayerSkyriding() then return false end
+        end
+        return true
     end
 
-    if vis.showAlways then return true end
-
+    -- Active show conditions override hide rules
     if vis.showWhenTargetExists and UnitExists("target") then return true end
     if vis.showInCombat and UnitAffectingCombat("player") then return true end
     if vis.showInGroup and IsPlayerInGroup() then return true end
     if vis.showInInstance and IsPlayerInInstance() then return true end
     if vis.showOnMouseover and ChatVisibility.mouseOver then return true end
+    if vis.showWhenMounted and Helpers.IsPlayerMounted() then return true end
+
+    -- No active show condition — apply hide rules
+    local ignoreHideRules = vis.dontHideInDungeonsRaids and Helpers.IsPlayerInDungeonOrRaid and Helpers.IsPlayerInDungeonOrRaid()
+    if not ignoreHideRules then
+        if vis.hideWhenMounted and not vis.showWhenMounted and Helpers.IsPlayerMounted() then return false end
+        if vis.hideWhenInVehicle and Helpers.IsPlayerInVehicle and Helpers.IsPlayerInVehicle() then return false end
+        if vis.hideWhenFlying and Helpers.IsPlayerFlying() then return false end
+        if vis.hideWhenSkyriding and Helpers.IsPlayerSkyriding() then return false end
+    end
 
     return false
 end
