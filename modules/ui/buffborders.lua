@@ -138,8 +138,6 @@ local previewDebuffIcons = {}
 local PA_MAX_SLOTS = 3
 local paSlots = {}
 local paAnchorIDs = {}
-local paScaleFrames = {}       -- tiny scaled frames for duration text sizing
-local paScaleAnchorIDs = {}    -- second anchor IDs for scaled duration text
 local paPendingSetup = false   -- deferred AddPrivateAuraAnchor after combat
 
 ---------------------------------------------------------------------------
@@ -147,8 +145,9 @@ local paPendingSetup = false   -- deferred AddPrivateAuraAnchor after combat
 ---------------------------------------------------------------------------
 local function CreateAuraIcon(parent)
     iconCounter = iconCounter + 1
+    local frameName = "QUIAuraIcon" .. iconCounter
 
-    local icon = CreateFrame("Frame", nil, parent)
+    local icon = CreateFrame("Frame", frameName, parent)
     icon:SetSize(DEFAULT_ICON_SIZE, DEFAULT_ICON_SIZE)
 
     -- .Icon texture (ARTWORK layer)
@@ -157,7 +156,7 @@ local function CreateAuraIcon(parent)
     icon.Icon:SetTexCoord(BASE_CROP, 1 - BASE_CROP, BASE_CROP, 1 - BASE_CROP)
 
     -- .Cooldown frame (CooldownFrameTemplate for swipe + countdown)
-    icon.Cooldown = CreateFrame("Cooldown", nil, icon, "CooldownFrameTemplate")
+    icon.Cooldown = CreateFrame("Cooldown", frameName .. "Cooldown", icon, "CooldownFrameTemplate")
     icon.Cooldown:SetAllPoints(icon)
     icon.Cooldown:EnableMouse(false)
     icon.Cooldown:SetDrawSwipe(true)
@@ -207,6 +206,8 @@ local function CreateAuraIcon(parent)
     icon._auraSlot = nil
     icon._spellId = nil
     icon._filter = nil
+    icon._rawDuration = nil
+    icon._rawExpirationTime = nil
     icon._baseSwipeReverse = baseSwipeReverse
     icon._isQUIAuraIcon = true
 
@@ -320,6 +321,8 @@ local function ReleaseIcon(icon)
     icon._auraSlot = nil
     icon._spellId = nil
     icon._filter = nil
+    icon._rawDuration = nil
+    icon._rawExpirationTime = nil
     if icon.Icon then
         icon.Icon:SetTexture(nil)
         icon.Icon:SetDesaturated(false)
@@ -482,47 +485,15 @@ local function LayoutIcons(container, sortedIcons, settings, prefix)
         return
     end
 
-    -- Determine the FA key for this container so we can read its pinned corner.
-    local faKey
-    do
-        local cname = container:GetName()
-        if cname == "QUI_BuffIconContainer" then
-            faKey = "buffFrame"
-        elseif cname == "QUI_DebuffIconContainer" then
-            faKey = "debuffFrame"
-        end
-    end
-
-    -- Icon #1 must sit at the container's actual pinned corner (entry.point),
-    -- otherwise it drifts as the container resizes. Matters for chain-anchored
-    -- containers where the pin corner is dictated by the chain anchor, not
-    -- the user's growLeft/growUp preference; UpdateGrowAnchor keeps them in
-    -- sync for free-position entries. Fall back to growLeft/growUp for
-    -- legacy CENTER-format entries (pre-self-heal).
+    -- Growth-direction anchor — the corner that should stay fixed on screen.
+    -- Used to position icons within the container. The container itself is
+    -- positioned by ApplyFrameAnchor's growAnchor branch.
     local anchor
-    do
-        local entry
-        if faKey then
-            local profile = QUI and QUI.db and QUI.db.profile
-            local fa = profile and profile.frameAnchoring
-            entry = fa and fa[faKey]
-        end
-        local epoint = entry and entry.point
-        if epoint == "TOPLEFT" or epoint == "TOPRIGHT"
-            or epoint == "BOTTOMLEFT" or epoint == "BOTTOMRIGHT"
-        then
-            anchor = epoint
-        elseif growUp then
-            anchor = growLeft and "BOTTOMRIGHT" or "BOTTOMLEFT"
-        else
-            anchor = growLeft and "TOPRIGHT" or "TOPLEFT"
-        end
+    if growUp then
+        anchor = growLeft and "BOTTOMRIGHT" or "BOTTOMLEFT"
+    else
+        anchor = growLeft and "TOPRIGHT" or "TOPLEFT"
     end
-
-    -- Derive flow direction from the pinned corner so icons extend away from
-    -- it (keeps icon #1 fixed in place as count changes).
-    local flowLeft = (anchor == "TOPRIGHT" or anchor == "BOTTOMRIGHT")
-    local flowUp   = (anchor == "BOTTOMLEFT" or anchor == "BOTTOMRIGHT")
 
     -- Compute grid dimensions and resize the container.
     local numCols = math.min(count, iconsPerRow)
@@ -531,9 +502,7 @@ local function LayoutIcons(container, sortedIcons, settings, prefix)
     local bottomPadding = settings[prefix .. "BottomPadding"] or 10
     local totalH = numRows * iconSize + math.max(0, numRows - 1) * rowSpacing + bottomPadding
 
-    -- SetSize on named containers can be blocked by taint propagation when
-    -- the call stack has touched secret aura values during combat.
-    pcall(container.SetSize, container, totalW, totalH)
+    container:SetSize(totalW, totalH)
     -- Cache the natural size so layout mode proxy movers can read it
     -- (frame.GetSize returns handle size when reparented via SetAllPoints).
     container._naturalW = totalW
@@ -545,10 +514,15 @@ local function LayoutIcons(container, sortedIcons, settings, prefix)
     -- icons stable as the container grows/shrinks. Skip during layout mode —
     -- the handle system owns the container position there.
     if not Helpers.IsLayoutModeActive() then
+        local faKey
+        local name = container:GetName()
+        if name == "QUI_BuffIconContainer" then
+            faKey = "buffFrame"
+        elseif name == "QUI_DebuffIconContainer" then
+            faKey = "debuffFrame"
+        end
         if faKey and _G.QUI_ApplyFrameAnchor then
-            if not InCombatLockdown() then
-                _G.QUI_ApplyFrameAnchor(faKey)
-            end
+            _G.QUI_ApplyFrameAnchor(faKey)
         end
     end
 
@@ -560,8 +534,8 @@ local function LayoutIcons(container, sortedIcons, settings, prefix)
         local col = idx % iconsPerRow
         local row = math.floor(idx / iconsPerRow)
 
-        local xOff = flowLeft and -(col * colStep) or (col * colStep)
-        local yOff = flowUp and (row * rowStep) or -(row * rowStep)
+        local xOff = growLeft and -(col * colStep) or (col * colStep)
+        local yOff = growUp and (row * rowStep) or -(row * rowStep)
 
         icon:SetSize(iconSize, iconSize)
         icon:ClearAllPoints()
@@ -734,9 +708,25 @@ local function UpdateAuraIcons(container, activeIcons, sortedList, filter, isBuf
         icon._spellId = auraData.spellId
         icon._filter = filter
 
-        if icon.Icon and C_Spell and C_Spell.GetSpellTexture then
-            pcall(icon.Icon.SetTexture, icon.Icon, C_Spell.GetSpellTexture(auraData.spellId))
+        -- Texture: prefer spell-specific lookup — auraData.icon can return
+        -- the granting spell's icon instead of the buff's own icon for some auras
+        local texID
+        if auraData.spellId and C_Spell and C_Spell.GetSpellTexture then
+            local ok, tex = pcall(C_Spell.GetSpellTexture, auraData.spellId)
+            if ok and tex then texID = tex end
         end
+        texID = texID or auraData.icon
+        if texID and icon.Icon then
+            icon.Icon:SetTexture(texID)
+        end
+
+        -- Cooldown swipe (secret-safe via pcall to C-side)
+        local duration = auraData.duration
+        local expirationTime = auraData.expirationTime
+
+        -- Store raw values (may be secret) — C-side functions handle them
+        icon._rawDuration = duration
+        icon._rawExpirationTime = expirationTime
 
         -- Optional inversion so users can choose whether darkening ramps up
         -- toward expiration or ramps down from full duration.
@@ -748,11 +738,23 @@ local function UpdateAuraIcons(container, activeIcons, sortedList, filter, isBuf
             pcall(icon.Cooldown.SetReverse, icon.Cooldown, targetReverse)
         end
 
-        if icon.Cooldown and icon.Cooldown.SetCooldownFromDurationObject
-           and C_UnitAuras and C_UnitAuras.GetAuraDuration then
-            local ok, durObj = pcall(C_UnitAuras.GetAuraDuration, "player", id)
-            if ok and durObj then
-                pcall(icon.Cooldown.SetCooldownFromDurationObject, icon.Cooldown, durObj, true)
+        -- Cooldown swipe: prefer numeric path (correct remaining-time display),
+        -- fall back to DurationObject only when values are secret (combat).
+        if expirationTime and duration then
+            if not IsSecretValue(expirationTime) and not IsSecretValue(duration) then
+                -- Non-secret: SetCooldown with computed start time — always
+                -- shows correct remaining time for long-duration auras.
+                local startTime = expirationTime - duration
+                pcall(icon.Cooldown.SetCooldown, icon.Cooldown, startTime, duration)
+            elseif icon._auraInstanceID and C_UnitAuras and C_UnitAuras.GetAuraDuration
+                   and icon.Cooldown.SetCooldownFromDurationObject then
+                -- Combat (secret values): DurationObject is C-side safe
+                local ok, durObj = pcall(C_UnitAuras.GetAuraDuration, "player", icon._auraInstanceID)
+                if ok and durObj then
+                    pcall(icon.Cooldown.SetCooldownFromDurationObject, icon.Cooldown, durObj, true)
+                else
+                    icon.Cooldown:Clear()
+                end
             else
                 icon.Cooldown:Clear()
             end
@@ -760,16 +762,37 @@ local function UpdateAuraIcons(container, activeIcons, sortedList, filter, isBuf
             icon.Cooldown:Clear()
         end
 
-        -- Stacks: TruncateWhenZero is C-side, returns "" for 0/1 stacks
+        -- Stacks
         if settings.showStacks ~= false then
-            pcall(icon.Stacks.SetText, icon.Stacks, C_StringUtil.TruncateWhenZero(auraData.applications))
-            icon.Stacks:Show()
+            local applications = auraData.applications
+            if applications then
+                if not IsSecretValue(applications) then
+                    -- Out of combat: filter single-stack display
+                    if applications > 1 then
+                        icon.Stacks:SetText(applications)
+                        icon.Stacks:Show()
+                    else
+                        icon.Stacks:SetText("")
+                        icon.Stacks:Hide()
+                    end
+                else
+                    -- Combat secret: C_StringUtil.TruncateWhenZero is C-side,
+                    -- accepts secret values and returns "" for zero stacks
+                    pcall(icon.Stacks.SetText, icon.Stacks, C_StringUtil.TruncateWhenZero(applications))
+                    icon.Stacks:Show()
+                end
+            else
+                icon.Stacks:SetText("")
+                icon.Stacks:Hide()
+            end
         else
             icon.Stacks:SetText("")
             icon.Stacks:Hide()
         end
 
-        StyleIcon(icon, settings, isBuff, auraData.dispelName)
+        -- Style (borders, font)
+        local debuffType = not isBuff and (auraData.dispelName or "") or nil
+        StyleIcon(icon, settings, isBuff, debuffType)
 
         icon:Show()
     end
@@ -817,11 +840,6 @@ local function ClearPrivateAuraAnchors()
         if id then pcall(RemovePrivateAuraAnchor, id) end
     end
     wipe(paAnchorIDs)
-    for i = 1, #paScaleAnchorIDs do
-        local id = paScaleAnchorIDs[i]
-        if id then pcall(RemovePrivateAuraAnchor, id) end
-    end
-    wipe(paScaleAnchorIDs)
     -- Hide any stale WoW-rendered children left on anchor slots
     for i = 1, PA_MAX_SLOTS do
         local slot = paSlots[i]
@@ -831,38 +849,24 @@ local function ClearPrivateAuraAnchors()
                 if child then child:Hide() end
             end
         end
-        local sf = paScaleFrames[i]
-        if sf then sf:Hide() end
     end
 end
 
-local function EnsureSlotBorders(slot, iconSize, borderSize)
-    local size = iconSize or DEFAULT_ICON_SIZE
-    local bSize = borderSize or 2
-    local half = size / 2
+local function EnsureSlotBorders(slot)
+    if slot.BorderTop then return end
+    slot.BorderTop = slot:CreateTexture(nil, "OVERLAY", nil, 7)
+    slot.BorderBottom = slot:CreateTexture(nil, "OVERLAY", nil, 7)
+    slot.BorderLeft = slot:CreateTexture(nil, "OVERLAY", nil, 7)
+    slot.BorderRight = slot:CreateTexture(nil, "OVERLAY", nil, 7)
 
-    if not slot.BorderTop then
-        slot.BorderTop = slot:CreateTexture(nil, "OVERLAY", nil, 7)
-        slot.BorderBottom = slot:CreateTexture(nil, "OVERLAY", nil, 7)
-        slot.BorderLeft = slot:CreateTexture(nil, "OVERLAY", nil, 7)
-        slot.BorderRight = slot:CreateTexture(nil, "OVERLAY", nil, 7)
-    end
-
-    slot.BorderTop:ClearAllPoints()
-    slot.BorderTop:SetPoint("BOTTOMLEFT", slot, "CENTER", -half, half - bSize)
-    slot.BorderTop:SetSize(size, bSize)
-
-    slot.BorderBottom:ClearAllPoints()
-    slot.BorderBottom:SetPoint("TOPLEFT", slot, "CENTER", -half, -half)
-    slot.BorderBottom:SetSize(size, bSize)
-
-    slot.BorderLeft:ClearAllPoints()
-    slot.BorderLeft:SetPoint("TOPRIGHT", slot, "CENTER", -half + bSize, half)
-    slot.BorderLeft:SetSize(bSize, size)
-
-    slot.BorderRight:ClearAllPoints()
-    slot.BorderRight:SetPoint("TOPLEFT", slot, "CENTER", half - bSize, half)
-    slot.BorderRight:SetSize(bSize, size)
+    slot.BorderTop:SetPoint("TOPLEFT", slot, "TOPLEFT", 0, 0)
+    slot.BorderTop:SetPoint("TOPRIGHT", slot, "TOPRIGHT", 0, 0)
+    slot.BorderBottom:SetPoint("BOTTOMLEFT", slot, "BOTTOMLEFT", 0, 0)
+    slot.BorderBottom:SetPoint("BOTTOMRIGHT", slot, "BOTTOMRIGHT", 0, 0)
+    slot.BorderLeft:SetPoint("TOPLEFT", slot, "TOPLEFT", 0, 0)
+    slot.BorderLeft:SetPoint("BOTTOMLEFT", slot, "BOTTOMLEFT", 0, 0)
+    slot.BorderRight:SetPoint("TOPRIGHT", slot, "TOPRIGHT", 0, 0)
+    slot.BorderRight:SetPoint("BOTTOMRIGHT", slot, "BOTTOMRIGHT", 0, 0)
 end
 
 local function SlotHasVisibleAura(slot)
@@ -875,6 +879,7 @@ end
 
 local function StyleSlotBorders(slot, settings)
     if not slot.BorderTop then return end
+    local borderSize = settings and settings.borderSize or 2
     local r, g, b = BORDER_COLOR_DEBUFF_DEFAULT[1], BORDER_COLOR_DEBUFF_DEFAULT[2], BORDER_COLOR_DEBUFF_DEFAULT[3]
 
     slot.BorderTop:SetColorTexture(r, g, b, 1)
@@ -882,11 +887,71 @@ local function StyleSlotBorders(slot, settings)
     slot.BorderLeft:SetColorTexture(r, g, b, 1)
     slot.BorderRight:SetColorTexture(r, g, b, 1)
 
+    slot.BorderTop:SetHeight(borderSize)
+    slot.BorderBottom:SetHeight(borderSize)
+    slot.BorderLeft:SetWidth(borderSize)
+    slot.BorderRight:SetWidth(borderSize)
+
+    -- Only show borders when the client has rendered a visible aura child
     local visible = SlotHasVisibleAura(slot)
     slot.BorderTop:SetShown(visible)
     slot.BorderBottom:SetShown(visible)
     slot.BorderLeft:SetShown(visible)
     slot.BorderRight:SetShown(visible)
+end
+
+local function StyleSlotTextRecursive(node, settings, depth)
+    if not node or depth > 5 then return end
+
+    local font = GetGeneralFont()
+    local outline = GetGeneralFontOutline()
+    local fontSize = settings.fontSize or 12
+
+    -- Style FontString regions on this node
+    for i = 1, (node.GetNumRegions and node:GetNumRegions() or 0) do
+        local region = select(i, node:GetRegions())
+        if region and region.IsObjectType and region:IsObjectType("FontString") and region.SetFont then
+            pcall(region.SetFont, region, font, fontSize, outline)
+            -- Reposition duration/stack text using debuff settings
+            local text = region:GetText()
+            if text then
+                local anchor = settings.debuffDurationTextAnchor or "CENTER"
+                local offX = settings.debuffDurationTextOffsetX or 0
+                local offY = settings.debuffDurationTextOffsetY or 0
+                pcall(region.ClearAllPoints, region)
+                pcall(region.SetPoint, region, anchor, region:GetParent(), anchor, offX, offY)
+            end
+        end
+    end
+
+    -- Style Cooldown countdown FontStrings
+    if node.IsObjectType and node:IsObjectType("Cooldown") and node.GetCountdownFontString then
+        local cdText = node:GetCountdownFontString()
+        if cdText and cdText.SetFont then
+            pcall(cdText.SetFont, cdText, font, fontSize, outline)
+            local anchor = settings.debuffDurationTextAnchor or "CENTER"
+            local offX = settings.debuffDurationTextOffsetX or 0
+            local offY = settings.debuffDurationTextOffsetY or 0
+            pcall(cdText.ClearAllPoints, cdText)
+            pcall(cdText.SetPoint, cdText, anchor, node, anchor, offX, offY)
+        end
+    end
+
+    -- Recurse into children
+    for i = 1, (node.GetNumChildren and node:GetNumChildren() or 0) do
+        local child = select(i, node:GetChildren())
+        if child then
+            StyleSlotTextRecursive(child, settings, depth + 1)
+        end
+    end
+end
+
+local function DeferStyleSlotText(slot, settings)
+    C_Timer.After(0, function()
+        if not slot:IsShown() then return end
+        StyleSlotBorders(slot, settings)
+        StyleSlotTextRecursive(slot, settings, 1)
+    end)
 end
 
 local function SetupPrivateAuras()
@@ -905,40 +970,30 @@ local function SetupPrivateAuras()
     end
 
     local borderSize = settings and settings.borderSize or 2
-    local fontSize = settings and settings.fontSize or 12
-
-    -- Text scale: use fontSize relative to a base of 12 to control the
-    -- countdown text size via the scaled frame approach.
-    local textScale = math.max(0.1, fontSize / 12)
-    local durationAnchor = settings and settings.debuffDurationTextAnchor or "CENTER"
-    local durationOffX = settings and settings.debuffDurationTextOffsetX or 0
-    local durationOffY = settings and settings.debuffDurationTextOffsetY or 0
 
     for i = 1, PA_MAX_SLOTS do
         local slot = paSlots[i]
         if not slot then
-            -- Parent to UIParent (not debuffContainer) so protected frame
-            -- inheritance from AddPrivateAuraAnchor does not propagate into
-            -- the buff/debuff container anchor chain and taint SetSize.
-            slot = CreateFrame("Frame", "QUI_PlayerPrivateAura" .. i, UIParent)
+            slot = CreateFrame("Frame", "QUI_PlayerPrivateAura" .. i, debuffContainer)
             slot:SetIgnoreParentAlpha(true)
-            slot:SetFrameStrata("HIGH")
             paSlots[i] = slot
         end
+        slot:SetParent(debuffContainer)
+        slot:SetSize(iconSize, iconSize)
+        slot:SetFrameLevel(debuffContainer:GetFrameLevel() + 5)
         slot:Show()
 
         -- Add and style border textures to match normal debuff icons
-        EnsureSlotBorders(slot, iconSize, borderSize)
+        EnsureSlotBorders(slot)
         StyleSlotBorders(slot, settings)
 
-        -- Primary anchor: icon + countdown swipe, no countdown numbers
-        -- (numbers are handled by the scaled secondary anchor below)
+        -- Inset the icon by borderSize so the border is visible around it
         local ok, anchorID = pcall(AddPrivateAuraAnchor, {
             unitToken = "player",
             auraIndex = i,
             parent = slot,
             showCountdownFrame = true,
-            showCountdownNumbers = false,
+            showCountdownNumbers = true,
             iconInfo = {
                 iconWidth = iconSize - borderSize * 2,
                 iconHeight = iconSize - borderSize * 2,
@@ -953,55 +1008,16 @@ local function SetupPrivateAuras()
             },
         })
         paAnchorIDs[i] = ok and anchorID or nil
+    end
 
-        -- Secondary anchor: tiny scaled frame for duration text sizing.
-        -- Parented to UIParent and anchored to slot (which is also parented
-        -- to UIParent), keeping the entire private aura subtree out of the
-        -- buff/debuff container anchor chain.
-        local scaleFrame = paScaleFrames[i]
-        if not scaleFrame then
-            scaleFrame = CreateFrame("Frame", nil, UIParent)
-            paScaleFrames[i] = scaleFrame
-        end
-        scaleFrame:SetSize(0.001, 0.001)
-        scaleFrame:SetScale(textScale)
-        scaleFrame:SetFrameStrata("DIALOG")
-        scaleFrame:ClearAllPoints()
-        scaleFrame:SetPoint("CENTER", slot, "CENTER", 0, 0)
-        scaleFrame:Show()
-
-        local scaleOk, scaleAnchorID = pcall(AddPrivateAuraAnchor, {
-            unitToken = "player",
-            auraIndex = i,
-            parent = scaleFrame,
-            showCountdownFrame = true,
-            showCountdownNumbers = true,
-            iconInfo = {
-                iconWidth = 0.001,
-                iconHeight = 0.001,
-                borderScale = -1000,
-                iconAnchor = {
-                    point = durationAnchor,
-                    relativeTo = slot,
-                    relativePoint = durationAnchor,
-                    offsetX = durationOffX / textScale,
-                    offsetY = durationOffY / textScale,
-                },
-            },
-            durationAnchor = {
-                point = durationAnchor,
-                relativeTo = slot,
-                relativePoint = durationAnchor,
-                offsetX = durationOffX / textScale,
-                offsetY = durationOffY / textScale,
-            },
-        })
-        paScaleAnchorIDs[i] = scaleOk and scaleAnchorID or nil
+    -- Defer text styling — client creates children asynchronously
+    for _, slot in ipairs(paSlots) do
+        DeferStyleSlotText(slot, settings)
     end
 end
 
 local function LayoutPrivateAuraSlots()
-    if not AddPrivateAuraAnchor or #paSlots == 0 or not debuffContainer then return end
+    if not AddPrivateAuraAnchor or #paSlots == 0 then return end
 
     local settings = GetSettings()
     if not settings or not settings.enableDebuffs or settings.hideDebuffFrame then
@@ -1020,58 +1036,27 @@ local function LayoutPrivateAuraSlots()
     local growLeft = settings.debuffGrowLeft
     local growUp = settings.debuffGrowUp
 
-    -- Read debuffContainer position in UIParent coordinates. The slots are
-    -- parented to UIParent (to keep them out of the container anchor chain),
-    -- so we compute absolute positions instead of using SetPoint relativeTo.
-    local dcLeft = debuffContainer:GetLeft()
-    local dcRight = debuffContainer:GetRight()
-    local dcTop = debuffContainer:GetTop()
-    local dcBottom = debuffContainer:GetBottom()
-    if not (dcLeft and dcRight and dcTop and dcBottom) then
-        -- Container not positioned yet; hide slots and bail.
-        for _, slot in ipairs(paSlots) do
-            slot:Hide()
-        end
-        return
-    end
-
-    -- Convert effective pixels to slot-local coordinates (slot is a UIParent
-    -- child, so its effective scale equals UIParent's).
-    local scale = UIParent:GetEffectiveScale()
-    local dcScale = debuffContainer:GetEffectiveScale()
-    local scaleRatio = dcScale / scale
-
-    local cornerX, cornerY
+    local anchor
     if growUp then
-        cornerY = dcBottom / scale
-        cornerX = growLeft and (dcRight / scale) or (dcLeft / scale)
+        anchor = growLeft and "BOTTOMRIGHT" or "BOTTOMLEFT"
     else
-        cornerY = dcTop / scale
-        cornerX = growLeft and (dcRight / scale) or (dcLeft / scale)
+        anchor = growLeft and "TOPRIGHT" or "TOPLEFT"
     end
-
-    -- First icon center inset from the growth corner
-    local halfShiftX = growLeft and -(iconSize / 2) or (iconSize / 2)
-    local halfShiftY = growUp and (iconSize / 2) or -(iconSize / 2)
-    halfShiftX = halfShiftX * scaleRatio
-    halfShiftY = halfShiftY * scaleRatio
 
     local debuffCount = #debuffSortedIcons
-    local step = (iconSize + spacing) * scaleRatio
+    local step = iconSize + spacing
 
     for i, slot in ipairs(paSlots) do
         local idx = debuffCount + i - 1
         local col = idx % iconsPerRow
         local row = math.floor(idx / iconsPerRow)
 
-        local xGrow = growLeft and -(col * step) or (col * step)
-        local yGrow = growUp and (row * step) or -(row * step)
+        local xOff = growLeft and -(col * step) or (col * step)
+        local yOff = growUp and (row * step) or -(row * step)
 
-        local centerX = cornerX + halfShiftX + xGrow
-        local centerY = cornerY + halfShiftY + yGrow
-
-        pcall(slot.ClearAllPoints, slot)
-        pcall(slot.SetPoint, slot, "CENTER", UIParent, "BOTTOMLEFT", centerX, centerY)
+        slot:SetSize(iconSize, iconSize)
+        slot:ClearAllPoints()
+        slot:SetPoint(anchor, debuffContainer, anchor, xOff, yOff)
         StyleSlotBorders(slot, settings)
         slot:Show()
     end
@@ -1535,12 +1520,10 @@ local function UpdateGrowAnchor(faKey)
         and entry.relative == oldCorner
         and GROW_ANCHOR_FRAC_X[oldCorner] ~= nil
 
-    -- Free-position entries (pinned to the screen itself): recompute corner
-    -- offsets so the NEW corner lands at the same screen point the OLD one
-    -- was at. UIParent is the reference frame in both disabled and screen
-    -- parent modes, so the math is identical.
-    local isFreePosition = entry.parent == "disabled" or entry.parent == "screen"
-    if isNewCornerFormat and oldCorner and isFreePosition then
+    if isNewCornerFormat and oldCorner and entry.parent == "disabled" then
+        -- Recompute the corner offsets so the NEW corner lands at the
+        -- same screen point the OLD corner was at. This preserves the
+        -- position of the first icon (the growth origin).
         local pw = UIParent:GetWidth()
         local ph = UIParent:GetHeight()
         local dX = (GROW_ANCHOR_FRAC_X[oldCorner] - GROW_ANCHOR_FRAC_X[newCorner]) * pw
@@ -1550,10 +1533,6 @@ local function UpdateGrowAnchor(faKey)
         entry.point = newCorner
         entry.relative = newCorner
     end
-    -- For chain-anchored entries we intentionally leave point/relative/offsets
-    -- alone — the chain anchor is the user's pinned corner, and LayoutIcons
-    -- derives the icon placement anchor from entry.point directly so icon #1
-    -- always sits at the chain-anchored corner regardless of growLeft/growUp.
     -- For legacy CENTER format: don't touch point/relative/offsets. The
     -- apply path's self-heal will convert on next apply using the current
     -- container size.
