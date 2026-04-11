@@ -545,13 +545,6 @@ local function LayoutIcons(container, sortedIcons, settings, prefix)
     -- icons stable as the container grows/shrinks. Skip during layout mode —
     -- the handle system owns the container position there.
     if not Helpers.IsLayoutModeActive() then
-        local faKey
-        local name = container:GetName()
-        if name == "QUI_BuffIconContainer" then
-            faKey = "buffFrame"
-        elseif name == "QUI_DebuffIconContainer" then
-            faKey = "debuffFrame"
-        end
         if faKey and _G.QUI_ApplyFrameAnchor then
             if not InCombatLockdown() then
                 _G.QUI_ApplyFrameAnchor(faKey)
@@ -567,8 +560,8 @@ local function LayoutIcons(container, sortedIcons, settings, prefix)
         local col = idx % iconsPerRow
         local row = math.floor(idx / iconsPerRow)
 
-        local xOff = growLeft and -(col * colStep) or (col * colStep)
-        local yOff = growUp and (row * rowStep) or -(row * rowStep)
+        local xOff = flowLeft and -(col * colStep) or (col * colStep)
+        local yOff = flowUp and (row * rowStep) or -(row * rowStep)
 
         icon:SetSize(iconSize, iconSize)
         icon:ClearAllPoints()
@@ -1542,10 +1535,12 @@ local function UpdateGrowAnchor(faKey)
         and entry.relative == oldCorner
         and GROW_ANCHOR_FRAC_X[oldCorner] ~= nil
 
-    if isNewCornerFormat and oldCorner and entry.parent == "disabled" then
-        -- Recompute the corner offsets so the NEW corner lands at the
-        -- same screen point the OLD corner was at. This preserves the
-        -- position of the first icon (the growth origin).
+    -- Free-position entries (pinned to the screen itself): recompute corner
+    -- offsets so the NEW corner lands at the same screen point the OLD one
+    -- was at. UIParent is the reference frame in both disabled and screen
+    -- parent modes, so the math is identical.
+    local isFreePosition = entry.parent == "disabled" or entry.parent == "screen"
+    if isNewCornerFormat and oldCorner and isFreePosition then
         local pw = UIParent:GetWidth()
         local ph = UIParent:GetHeight()
         local dX = (GROW_ANCHOR_FRAC_X[oldCorner] - GROW_ANCHOR_FRAC_X[newCorner]) * pw
@@ -1555,6 +1550,10 @@ local function UpdateGrowAnchor(faKey)
         entry.point = newCorner
         entry.relative = newCorner
     end
+    -- For chain-anchored entries we intentionally leave point/relative/offsets
+    -- alone — the chain anchor is the user's pinned corner, and LayoutIcons
+    -- derives the icon placement anchor from entry.point directly so icon #1
+    -- always sits at the chain-anchored corner regardless of growLeft/growUp.
     -- For legacy CENTER format: don't touch point/relative/offsets. The
     -- apply path's self-heal will convert on next apply using the current
     -- container size.
