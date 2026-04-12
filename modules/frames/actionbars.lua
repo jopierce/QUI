@@ -2671,6 +2671,76 @@ local function BuildBar(barKey)
                     end
                 end)
             end
+
+            -- Reanchor MicroButtonAlert callouts when the microbar is near
+            -- a screen edge so the alert bubble doesn't render off-screen.
+            -- Blizzard's default is BOTTOM-of-alert to TOP-of-button (alert
+            -- above button).  We flip to TOP-of-alert to BOTTOM-of-button
+            -- when the button is in the upper portion of the screen, and
+            -- nudge horizontally when near a side edge.
+            if not ActionBarsOwned._microAlertAnchorHooked then
+                ActionBarsOwned._microAlertAnchorHooked = true
+
+                local EDGE_THRESHOLD_Y = 200  -- px from top before flipping
+                local EDGE_THRESHOLD_X = 60   -- px from side before nudging
+
+                local function ReanchorMicroAlert(button)
+                    if not button then return end
+                    local alert = button.FlashBorder or button.alert
+                    if not alert and button.GetName then
+                        alert = _G[button:GetName() .. "Alert"]
+                    end
+                    if not alert or not alert:IsShown() then return end
+
+                    local screenH = GetScreenHeight()
+                    local screenW = GetScreenWidth()
+                    if not screenH or screenH == 0 then return end
+
+                    local _, btnTop = button:GetCenter()
+                    local btnLeft = button:GetLeft()
+                    local btnRight = button:GetRight()
+                    if not btnTop or not btnLeft then return end
+
+                    -- Determine vertical anchor: flip below if near top
+                    local nearTop = (screenH - btnTop) < EDGE_THRESHOLD_Y
+                    -- Determine horizontal nudge
+                    local xOff = 0
+                    if btnLeft < EDGE_THRESHOLD_X then
+                        xOff = EDGE_THRESHOLD_X - btnLeft
+                    elseif btnRight and (screenW - btnRight) < EDGE_THRESHOLD_X then
+                        xOff = -( EDGE_THRESHOLD_X - (screenW - btnRight) )
+                    end
+
+                    alert:ClearAllPoints()
+                    if nearTop then
+                        -- Alert below button
+                        alert:SetPoint("TOP", button, "BOTTOM", xOff, -4)
+                        -- Flip the arrow to point upward
+                        if alert.Arrow then
+                            alert.Arrow:ClearAllPoints()
+                            alert.Arrow:SetPoint("BOTTOM", alert, "TOP", 0, -2)
+                            alert.Arrow:SetTexCoord(0, 1, 1, 0) -- flip vertically
+                        end
+                    else
+                        -- Alert above button (Blizzard default direction)
+                        alert:SetPoint("BOTTOM", button, "TOP", xOff, 4)
+                        if alert.Arrow then
+                            alert.Arrow:ClearAllPoints()
+                            alert.Arrow:SetPoint("TOP", alert, "BOTTOM", 0, 2)
+                            alert.Arrow:SetTexCoord(0, 1, 0, 1) -- normal
+                        end
+                    end
+                end
+
+                -- Hook the global alert function to reposition after it sets up
+                if type(MainMenuMicroButton_ShowAlert) == "function" then
+                    hooksecurefunc("MainMenuMicroButton_ShowAlert", function(button)
+                        C_Timer.After(0, function()
+                            ReanchorMicroAlert(button)
+                        end)
+                    end)
+                end
+            end
         end
     elseif barKey == "bags" then
         -- BAG BAR: Reparent bag slot buttons into QUI container.

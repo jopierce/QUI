@@ -229,7 +229,52 @@ local function HideTalentMicroButtonAlert(button)
     end
 end
 
+-- Returns true when the microbar is disabled or faded to alpha 0,
+-- meaning alerts anchored to micro buttons would be invisible/off-screen.
+local function IsMicrobarEffectivelyHidden()
+    local db = QUI and QUI.db and QUI.db.profile
+    local bars = db and db.actionBars and db.actionBars.bars
+    local microDB = bars and bars.microbar
+    if not microDB or microDB.enabled == false then return true end
+    -- Check if currently faded to zero (mouseover fade, HUD visibility, etc.)
+    local abOwned = ns.ActionBarsOwned
+    local fs = abOwned and abOwned.fadeState and abOwned.fadeState["microbar"]
+    if fs and fs.currentAlpha <= 0 then return true end
+    -- Check if the container itself is hidden (e.g. HUD visibility system)
+    local cont = abOwned and abOwned.containers and abOwned.containers["microbar"]
+    if cont and not cont:IsShown() then return true end
+    return false
+end
+
+-- All micro buttons that can show alerts (superset of talent candidates)
+local allMicroButtonNames = {
+    "CharacterMicroButton", "ProfessionMicroButton", "PlayerSpellsMicroButton",
+    "AchievementMicroButton", "QuestLogMicroButton", "HousingMicroButton",
+    "GuildMicroButton", "LFDMicroButton", "CollectionsMicroButton",
+    "EJMicroButton", "StoreMicroButton", "MainMenuMicroButton",
+}
+
+local function HideAllMicroButtonAlerts()
+    for _, buttonName in ipairs(allMicroButtonNames) do
+        local button = _G[buttonName]
+        if button then
+            HideTalentMicroButtonAlert(button)
+        end
+        -- Also hide the named alert frame if it exists
+        local alertFrame = _G[buttonName .. "Alert"]
+        if alertFrame and alertFrame:IsShown() then
+            alertFrame:Hide()
+        end
+    end
+end
+
 local function HideTalentReminderAlerts()
+    -- If microbar is hidden, suppress ALL micro button alerts
+    if IsMicrobarEffectivelyHidden() then
+        HideAllMicroButtonAlerts()
+        return
+    end
+
     if not IsPopupBlockEnabled("blockTalentMicroButtonAlerts") then return end
 
     for _, buttonName in ipairs(talentMicroButtonCandidates) do
@@ -252,6 +297,11 @@ local function HookTalentReminderAlerts()
         -- TAINT SAFETY: Defer to break taint chain from secure context.
         hooksecurefunc("MainMenuMicroButton_ShowAlert", function(button)
             C_Timer.After(0, function()
+                -- If microbar is hidden/invisible, suppress ALL micro button alerts
+                if IsMicrobarEffectivelyHidden() then
+                    HideTalentMicroButtonAlert(button)
+                    return
+                end
                 if IsPopupBlockEnabled("blockTalentMicroButtonAlerts") and IsTalentMicroButton(button) then
                     HideTalentMicroButtonAlert(button)
                 end
@@ -268,7 +318,12 @@ local function HookTalentReminderAlerts()
             -- TAINT SAFETY: Defer to break taint chain from secure context.
             alertFrame:HookScript("OnShow", function(self)
                 C_Timer.After(0, function()
-                    if IsPopupBlockEnabled("blockTalentMicroButtonAlerts") and self and self.Hide then
+                    if not self or not self.Hide then return end
+                    if IsMicrobarEffectivelyHidden() then
+                        self:Hide()
+                        return
+                    end
+                    if IsPopupBlockEnabled("blockTalentMicroButtonAlerts") then
                         self:Hide()
                     end
                 end)
