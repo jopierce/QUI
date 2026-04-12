@@ -56,6 +56,22 @@ local function GetSpellGlowOverride(icon)
     return CDMSpellData:GetSpellOverride(entry.viewerType, lookupID)
 end
 
+local function IsPandemicMirroringEnabled(icon)
+    if not icon or not icon._spellEntry then return false end
+
+    local settings = GetSettings()
+    if not settings then return true end
+
+    local viewerType = icon._spellEntry.viewerType
+    if viewerType == "essential" then
+        return settings.essentialPandemicEnabled ~= false
+    elseif viewerType == "utility" then
+        return settings.utilityPandemicEnabled ~= false
+    end
+
+    return false
+end
+
 -- Forward declarations for hook-driven pandemic helpers.
 local HookBlizzPandemic
 local ClearPandemicState
@@ -348,6 +364,7 @@ local _pandemicGlowIcons = setmetatable({}, { __mode = "k" })  -- [icon] = true 
 
 local function StartPandemicGlow(icon)
     if not icon or not icon._spellEntry or not icon:IsShown() then return end
+    if not IsPandemicMirroringEnabled(icon) then return end
 
     local spellOvr = GetSpellGlowOverride(icon)
     if spellOvr and spellOvr.glowEnabled == false then return end

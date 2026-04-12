@@ -3521,9 +3521,11 @@ do
                     local effectsDB = profile.cooldownEffects
                     local glowDB = profile.customGlow
                     local glowPrefix = isEssential and "essential" or "utility"
+                    local pandemicKey = glowPrefix .. "PandemicEnabled"
+                    if glowDB[pandemicKey] == nil then glowDB[pandemicKey] = true end
 
-                    -- Count rows: swipe(3) + overlay(4) + hide(1) + glow header tip(1) + glow controls(9) = 18
-                    local effectsHeight = 18 * FORM_ROW + 4 * 16 + 8  -- 4 section labels + padding
+                    -- Count rows: swipe(4) + overlay(4) + hide(1) + glow controls(10) = 19
+                    local effectsHeight = 19 * FORM_ROW + 4 * 16 + 8  -- 4 section labels + padding
 
                     CreateCollapsible(content, "Effects", effectsHeight, function(body)
                         local sy = -4
@@ -3625,6 +3627,7 @@ do
                         end
 
                         sy = U.PlaceRow(GUI:CreateFormCheckbox(body, "Enable Custom Glow", enabledKey, glowDB, RefreshGlows), body, sy)
+                        sy = U.PlaceRow(GUI:CreateFormCheckbox(body, "Mirror Blizzard Pandemic Refresh Glow", pandemicKey, glowDB, RefreshGlows), body, sy)
 
                         local glowTypeOptions = {
                             {value = "Pixel Glow", text = "Pixel Glow"},
