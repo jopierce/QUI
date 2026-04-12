@@ -1275,6 +1275,7 @@ local function UpdateGrowAnchor(faKey)
 end
 
 local function FullRefresh()
+    if not buffContainer or not debuffContainer then return end
     ManageBlizzardFrames()
 
     -- Sync growAnchor from the user's grow direction settings. This catches
