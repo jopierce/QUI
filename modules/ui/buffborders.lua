@@ -1136,10 +1136,20 @@ UpdateBuffIcons = function()
     if not settings then return end
     if previewActive then return end
     if not settings.enableBuffs or settings.hideBuffFrame then
+        if not InCombatLockdown() then
+            buffContainer:Hide()
+        end
         buffContainer:SetAlpha(0)
         buffContainer:EnableMouse(false)
+        SetDescendantMouse(buffContainer, false)
         return
     end
+    if not buffContainer:IsShown() and not InCombatLockdown() then
+        buffContainer:Show()
+    end
+    buffContainer:SetAlpha(1)
+    buffContainer:EnableMouse(true)
+    SetDescendantMouse(buffContainer, true)
     StyleHeaderChildren(buffContainer, settings, true)
 end
 
@@ -1167,10 +1177,20 @@ UpdateDebuffIcons = function()
     if not settings then return end
     if previewActive then return end
     if not settings.enableDebuffs or settings.hideDebuffFrame then
+        if not InCombatLockdown() then
+            debuffContainer:Hide()
+        end
         debuffContainer:SetAlpha(0)
         debuffContainer:EnableMouse(false)
+        SetDescendantMouse(debuffContainer, false)
         return
     end
+    if not debuffContainer:IsShown() and not InCombatLockdown() then
+        debuffContainer:Show()
+    end
+    debuffContainer:SetAlpha(1)
+    debuffContainer:EnableMouse(true)
+    SetDescendantMouse(debuffContainer, true)
     StyleHeaderChildren(debuffContainer, settings, false)
     RefreshPrivateAuraAnchors()
     LayoutPrivateAuraSlots()
@@ -1376,24 +1396,29 @@ local function Init()
     -- Setup private aura display for player
     SetupPrivateAuras()
 
-    -- Show headers to activate aura tracking
-    -- Show headers to activate aura tracking
-    buffContainer:Show()
-    debuffContainer:Show()
+    -- Show headers to activate aura tracking (only if enabled)
+    if settings and settings.enableBuffs and not settings.hideBuffFrame then
+        buffContainer:Show()
+    end
+    if settings and settings.enableDebuffs and not settings.hideDebuffFrame then
+        debuffContainer:Show()
+    end
 
     -- Hook the header's OnEvent to style children when auras change.
     buffContainer:HookScript("OnEvent", function()
-        if not previewActive then
-            StyleHeaderChildren(buffContainer, GetSettings(), true)
-        end
+        if previewActive then return end
+        local s = GetSettings()
+        if not s or not s.enableBuffs or s.hideBuffFrame then return end
+        StyleHeaderChildren(buffContainer, s, true)
     end)
     buffContainer:RegisterUnitEvent("UNIT_AURA", "player")
 
     debuffContainer:HookScript("OnEvent", function()
-        if not previewActive then
-            StyleHeaderChildren(debuffContainer, GetSettings(), false)
-            LayoutPrivateAuraSlots()
-        end
+        if previewActive then return end
+        local s = GetSettings()
+        if not s or not s.enableDebuffs or s.hideDebuffFrame then return end
+        StyleHeaderChildren(debuffContainer, s, false)
+        LayoutPrivateAuraSlots()
     end)
     debuffContainer:RegisterUnitEvent("UNIT_AURA", "player")
 
