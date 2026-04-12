@@ -539,13 +539,6 @@ local function StyleHeaderChildren(header, settings, isBuff)
     end
 
     -- Visibility (alpha-based, keep :Show() for layout mode overlays).
-    -- EnableMouse and SetAlpha are protected on the secure header during
-    -- combat — skip to avoid ADDON_ACTION_BLOCKED. State self-corrects
-    -- at combat end when the next style pass runs out of combat.
-    -- EnableMouse is protected on secure frames — skip during combat
-    if not InCombatLockdown() then
-        header:EnableMouse(visibleCount > 0)
-    end
     -- SetAlpha is NOT protected — always update so containers become
     -- visible when auras appear during combat
     local fadeKey = isBuff and "fadeBuffFrame" or "fadeDebuffFrame"
@@ -1145,14 +1138,12 @@ UpdateBuffIcons = function()
             buffContainer:Hide()
         end
         buffContainer:SetAlpha(0)
-        buffContainer:EnableMouse(false)
         return
     end
     if not buffContainer:IsShown() and not InCombatLockdown() then
         buffContainer:Show()
     end
     buffContainer:SetAlpha(1)
-    buffContainer:EnableMouse(true)
     StyleHeaderChildren(buffContainer, settings, true)
 end
 
@@ -1184,14 +1175,12 @@ UpdateDebuffIcons = function()
             debuffContainer:Hide()
         end
         debuffContainer:SetAlpha(0)
-        debuffContainer:EnableMouse(false)
         return
     end
     if not debuffContainer:IsShown() and not InCombatLockdown() then
         debuffContainer:Show()
     end
     debuffContainer:SetAlpha(1)
-    debuffContainer:EnableMouse(true)
     StyleHeaderChildren(debuffContainer, settings, false)
     RefreshPrivateAuraAnchors()
     LayoutPrivateAuraSlots()
