@@ -8,6 +8,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
 
+
+## v3.3.0 - 2026-04-12
+
+### Added
+- added Noktarian healing preset
+- added swipe hide options to group frames
+
+### Fixed
+- fixed live spec profile swaps
+- fixed cdm profile/spec switching
+- skip temporary whisper frame styling
+- buffborders: remove EnableMouse calls on secure aura headers
+- buffborders: fix tooltip fallback, use data.applications for stacks, drop SetDescendantMouse
+- buffborders: properly hide/show secure headers based on enable settings
+- buffborders: migrate to SecureAuraHeaderTemplate for zero-taint aura display
+- groupframes/auras: remove incremental updates, always full-scan
+- actionbars: respect alwaysShowInCombat during mouseover fade setup
+- actionbars: reanchor micro button alerts near screen edges
+- actionbars: PreClick drag suppression for useOnKeyDown, zero-alloc assisted combat
+- minimap: stable anchor proxy for external HUD addon compatibility
+- anchoring: resolve minimap to QUI_MinimapAnchor proxy
+- anchoring: allow buff/debuff frame updates during combat
+- qol: suppress all micro button alerts when microbar is hidden
+- remove unnecessary InCombatLockdown guards from non-protected operations
+- perf: aura event fast paths, group frame OnLoad decoration, taint hardening
 ## v3.2.3 - 2026-04-12
 
 ### Fixed
