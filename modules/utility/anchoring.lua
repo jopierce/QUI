@@ -1644,8 +1644,11 @@ local FRAME_RESOLVERS = {
         end
         return GF and GF.headers and GF.headers.raid
     end,
-    -- Display
-    minimap = function() return _G["Minimap"] end,
+    -- Display — return the stable anchor proxy instead of raw Minimap.
+    -- QUI_MinimapAnchor is parented to UIParent and holds the minimap's
+    -- intended position. This makes anchoring-dependent frames immune to
+    -- external addons that reparent/rescale Minimap for full-screen HUDs.
+    minimap = function() return _G["QUI_MinimapAnchor"] or _G["Minimap"] end,
     datatextPanel = function() return _G["QUI_DatatextPanel"] end,
     -- Managed-container frames resolve to their QUI holder once reparented
     -- (see MANAGED_REPARENT_TARGETS above). Before the reparent installs
@@ -2623,6 +2626,7 @@ function QUI_Anchoring:ApplyFrameAnchor(key, settings)
     local entryPoint    = settings.point or "CENTER"
     local entryRelative = settings.relative or "CENTER"
     local isLegacyCenter = entryPoint == "CENTER" and entryRelative == "CENTER"
+
     if isLegacyCenter
         and settings.growAnchor and CORNER_POINTS and CORNER_POINTS[settings.growAnchor]
         and (key == "buffFrame" or key == "debuffFrame")
@@ -3175,10 +3179,15 @@ _G.QUI_UpdateFramesAnchoredTo = function(targetKeyOrFrame)
         if not targetKey then return end
     end
 
-    -- In combat, only process CDM-driven targets. ApplyFrameAnchor keeps its own
-    -- safety checks and will defer unsafe frame types automatically.
+    -- In combat, only process addon-owned targets. ApplyFrameAnchor keeps its
+    -- own safety checks and will defer unsafe frame types automatically.
+    -- buffFrame/debuffFrame are included because LayoutIcons defers to a clean
+    -- timer context where SetSize/SetPoint work, and dependents need to follow.
     if InCombatLockdown() then
-        if targetKey ~= "cdmEssential" and targetKey ~= "cdmUtility" and targetKey ~= "buffIcon" and targetKey ~= "buffBar" then
+        if targetKey ~= "cdmEssential" and targetKey ~= "cdmUtility"
+            and targetKey ~= "buffIcon" and targetKey ~= "buffBar"
+            and targetKey ~= "buffFrame" and targetKey ~= "debuffFrame"
+        then
             return
         end
     end

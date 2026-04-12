@@ -115,7 +115,7 @@ local function CreateActionBarsPage(parent)
         local sections, relayout, CreateCollapsible = Shared.CreateCollapsiblePage(tabContent, PAD)
 
         -- General
-        CreateCollapsible("General", 4 * FORM_ROW + 8, function(body)
+        CreateCollapsible("General", 5 * FORM_ROW + 8, function(body)
             local sy = -4
             sy = P(GUI:CreateFormCheckbox(body, "Enable QUI Action Bars (Req. Reload)", "enabled", actionBars, function()
                 GUI:ShowConfirmation({
@@ -127,8 +127,13 @@ local function CreateActionBarsPage(parent)
             end), body, sy)
             sy = P(GUI:CreateFormCheckbox(body, "Show Tooltips", "showTooltips", global), body, sy)
             sy = P(GUI:CreateFormCheckbox(body, "Hide Empty Slots", "hideEmptySlots", global, RefreshActionBars), body, sy)
-            P(GUI:CreateFormCheckbox(body, "Cast on Key Press", "useOnKeyDown", global, function()
+            sy = P(GUI:CreateFormCheckbox(body, "Cast on Key Press", "useOnKeyDown", global, function()
                 if _G.QUI_ApplyUseOnKeyDown then _G.QUI_ApplyUseOnKeyDown() end
+            end), body, sy)
+            P(GUI:CreateFormCheckbox(body, "Rotation Assist Highlight", "assistedHighlight", global, function()
+                if ns.ActionBarsOwned and ns.ActionBarsOwned.UpdateAllAssistedHighlights then
+                    ns.ActionBarsOwned.UpdateAllAssistedHighlights()
+                end
             end), body, sy)
         end)
 

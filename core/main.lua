@@ -256,6 +256,20 @@ function QUICore:OnProfileChanged(event, db, profileKey)
     -- Helper to apply UIParent scale safely (defers if in combat or protected state)
     -- pcall wraps SetScale because M+ keystone activation can enter a protected
     -- state while InCombatLockdown() still returns false.
+    local profileScaleChanged = false
+    local function FinalizeProfileScale(scale)
+        self.uiscale = scale or UIParent:GetScale()
+        self.screenWidth, self.screenHeight = GetScreenWidth(), GetScreenHeight()
+        if self.RefreshAllFonts then
+            self:RefreshAllFonts()
+        end
+        if ns.UIKit and ns.UIKit.RefreshScaleBoundWidgets then
+            ns.UIKit.RefreshScaleBoundWidgets()
+        end
+        if not InCombatLockdown() and self.UIMult then
+            self:UIMult()
+        end
+    end
     local function DeferUIScale(scale)
         QUICore._pendingUIScale = scale
         if not QUICore._scaleRegenFrame then
@@ -264,6 +278,7 @@ function QUICore:OnProfileChanged(event, db, profileKey)
                 if QUICore._pendingUIScale and not InCombatLockdown() then
                     local ok = pcall(UIParent.SetScale, UIParent, QUICore._pendingUIScale)
                     if ok then
+                        FinalizeProfileScale(QUICore._pendingUIScale)
                         QUICore._pendingUIScale = nil
                         self:UnregisterEvent("PLAYER_REGEN_ENABLED")
                     end
@@ -280,6 +295,8 @@ function QUICore:OnProfileChanged(event, db, profileKey)
             local ok = pcall(UIParent.SetScale, UIParent, scale)
             if not ok then
                 DeferUIScale(scale)
+            else
+                FinalizeProfileScale(scale)
             end
         end
     end
@@ -312,24 +329,16 @@ function QUICore:OnProfileChanged(event, db, profileKey)
             self.db.profile.general.uiScale = scaleToUse
             ApplyUIScale(scaleToUse)
         else
-            -- Scale change invalidates all stored frame offsets — force reload
             local currentScale = UIParent:GetScale()
             if currentScale and math.abs(newProfileScale - currentScale) > 0.001 then
-                self._preservedUIScale = newProfileScale
-                C_Timer.After(0, function()
-                    QUICore:RequestReload()
-                end)
-                return
+                profileScaleChanged = true
             end
-            -- Existing profile has a saved scale - apply it
+
+            -- Profile switches can re-apply positions after a live scale change,
+            -- so continue through the normal refresh path instead of forcing /reload.
             ApplyUIScale(newProfileScale)
             -- Only update preserved scale when switching to a profile with a valid saved scale
             self._preservedUIScale = newProfileScale
-        end
-
-        -- Update pixel perfect calculations (skip if deferred to combat end)
-        if not InCombatLockdown() and self.UIMult then
-            self:UIMult()
         end
     end
     
@@ -400,10 +409,11 @@ function QUICore:OnProfileChanged(event, db, profileKey)
     -- 0.5s for skinning (avoids stacking too much work at once).
     -- Priority ordering within the registry ensures correct refresh sequence
     -- (cooldowns → frames → qol → combat → trackers → anchoring).
+    local refreshGroups = { "cooldowns", "frames", "castbars", "qol", "combat", "trackers", "data", "chat", "character", "utility", "ui", "anchoring" }
     C_Timer.After(0.2, function()
         if ns.Registry then
             -- Refresh all non-skinning modules in priority order
-            for _, group in ipairs({"cooldowns", "frames", "castbars", "qol", "combat", "trackers", "data", "chat", "character", "utility", "ui", "anchoring"}) do
+            for _, group in ipairs(refreshGroups) do
                 ns.Registry:RefreshAll(group)
             end
         end
@@ -434,6 +444,33 @@ function QUICore:OnProfileChanged(event, db, profileKey)
             if RefreshGroupFrames then pcall(RefreshGroupFrames) end
         end
     end)
+
+    -- Profile switches that also change the UI scale need one more pass after
+    -- Blizzard's layout code and scale-dependent widgets have fully settled.
+    if profileScaleChanged then
+        C_Timer.After(1.8, function()
+            if InCombatLockdown() then
+                return
+            end
+
+            if self.UIMult then
+                self:UIMult()
+            end
+
+            if ns.Registry then
+                for _, group in ipairs(refreshGroups) do
+                    ns.Registry:RefreshAll(group)
+                end
+            end
+
+            local ApplyAnchors = _G.QUI_ApplyAllFrameAnchors
+            if ApplyAnchors then pcall(ApplyAnchors, true) end
+            local RefreshUnitFrames = _G.QUI_RefreshUnitFrames
+            if RefreshUnitFrames then pcall(RefreshUnitFrames) end
+            local RefreshGroupFrames = _G.QUI_RefreshGroupFrames
+            if RefreshGroupFrames then pcall(RefreshGroupFrames) end
+        end)
+    end
 end
 
 function QUICore:ShowProfileChangeNotification()
@@ -716,19 +753,31 @@ function QUICore:HookEditMode()
             "ChatFrame1",
         }
 
+        -- PartyFrame is only suppressed when QUI group frames own party frames.
+        -- When disabled, the user needs Blizzard's Edit Mode selection to drag it.
+        local function ShouldSuppressEditModeFrame(name)
+            if name == "PartyFrame" then
+                local gfDB = QUI.db and QUI.db.profile and QUI.db.profile.quiGroupFrames
+                return gfDB and gfDB.enabled ~= false
+            end
+            return true
+        end
+
         local function InstallEditModeSuppression()
             if _editModeSuppressionInstalled then return end
             _editModeSuppressionInstalled = true
             for _, name in ipairs(_editModeSuppressedFrameNames) do
-                local frame = _G[name]
-                if frame and frame.HighlightSystem then
-                    hooksecurefunc(frame, "HighlightSystem", function(f)
-                        if f.ClearHighlight then f:ClearHighlight() end
-                    end)
-                    if frame.SelectSystem then
-                        hooksecurefunc(frame, "SelectSystem", function(f)
+                if ShouldSuppressEditModeFrame(name) then
+                    local frame = _G[name]
+                    if frame and frame.HighlightSystem then
+                        hooksecurefunc(frame, "HighlightSystem", function(f)
                             if f.ClearHighlight then f:ClearHighlight() end
                         end)
+                        if frame.SelectSystem then
+                            hooksecurefunc(frame, "SelectSystem", function(f)
+                                if f.ClearHighlight then f:ClearHighlight() end
+                            end)
+                        end
                     end
                 end
             end
@@ -750,9 +799,11 @@ function QUICore:HookEditMode()
             -- via secureexecuterange after EnterEditMode, so clear on next frame
             C_Timer.After(0, function()
                 for _, name in ipairs(_editModeSuppressedFrameNames) do
-                    local frame = _G[name]
-                    if frame and frame.ClearHighlight then
-                        pcall(frame.ClearHighlight, frame)
+                    if ShouldSuppressEditModeFrame(name) then
+                        local frame = _G[name]
+                        if frame and frame.ClearHighlight then
+                            pcall(frame.ClearHighlight, frame)
+                        end
                     end
                 end
             end)

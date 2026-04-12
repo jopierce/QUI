@@ -67,6 +67,22 @@ local QUI_COLORS = {
 ---------------------------------------------------------------------------
 local GetSettings = Helpers.CreateDBGetter("chat")
 
+local function IsTemporaryChatFrame(chatFrame)
+    if not chatFrame then return false end
+    if chatFrame.isTemporary then return true end
+    if type(FCF_IsTemporaryWindow) == "function" then
+        return FCF_IsTemporaryWindow(chatFrame) and true or false
+    end
+    return false
+end
+
+local function GetTabChatFrame(tab)
+    if not tab or not tab.GetID then return nil end
+    local tabID = tab:GetID()
+    if not tabID then return nil end
+    return _G["ChatFrame" .. tabID]
+end
+
 local function ApplySurfaceStyle(frame, bgColor, borderColor, borderSizePixels)
     if not frame then return end
 
@@ -1060,7 +1076,7 @@ end
 
 -- Initialize chat history for a chat frame
 local function InitializeChatFrameHistory(chatFrame)
-    if not chatFrame then return end
+    if not chatFrame or IsTemporaryChatFrame(chatFrame) then return end
     
     local frameName = chatFrame:GetName()
     if frameName then
@@ -1216,6 +1232,9 @@ local function UpdateTabColors(tab)
     local settings = GetSettings()
     if not settings or not tabBackdrops[tab] then return end
 
+    local chatFrame = GetTabChatFrame(tab)
+    if IsTemporaryChatFrame(chatFrame) then return end
+
     local alpha = settings.glass and settings.glass.bgAlpha or 0.4
 
     -- Check if this tab is selected
@@ -1247,6 +1266,9 @@ end
 
 local function StyleChatTab(tab)
     if not tab then return end
+
+    local chatFrame = GetTabChatFrame(tab)
+    if IsTemporaryChatFrame(chatFrame) then return end
 
     local settings = GetSettings()
     if not settings or not settings.styleTabs then return end
@@ -1349,7 +1371,7 @@ end
 -- Main skin function for a single chat frame
 ---------------------------------------------------------------------------
 local function SkinChatFrame(chatFrame)
-    if not chatFrame or chatFrame:IsForbidden() then return end
+    if not chatFrame or chatFrame:IsForbidden() or IsTemporaryChatFrame(chatFrame) then return end
 
     local settings = GetSettings()
     if not settings or not settings.enabled then return end

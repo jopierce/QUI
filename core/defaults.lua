@@ -1334,6 +1334,7 @@ local defaults = {
                 fastUsabilityUpdates = false, -- 5x faster range/usability checks (50ms vs 250ms)
                 showTooltips = true,        -- Show tooltips when hovering action buttons
                 useOnKeyDown = false,       -- Cast on key press (true) vs key release (false)
+                assistedHighlight = false,  -- Marching-ants glow on Blizzard's next-cast rotation button
             },
             -- Mouseover fade settings
             fade = {
@@ -2552,10 +2553,12 @@ local defaults = {
                     showDebuffs = true, maxDebuffs = 3, debuffIconSize = 16,
                     debuffAnchor = "BOTTOMRIGHT", debuffGrowDirection = "LEFT",
                     debuffSpacing = 2, debuffOffsetX = -2, debuffOffsetY = -18,
+                    debuffHideSwipe = false,
                     debuffReverseSwipe = false,
                     showBuffs = false, maxBuffs = 0, buffIconSize = 14,
                     buffAnchor = "TOPLEFT", buffGrowDirection = "RIGHT",
                     buffSpacing = 2, buffOffsetX = 2, buffOffsetY = 16,
+                    buffHideSwipe = false,
                     buffReverseSwipe = false,
                     showDurationColor = true,
                     showExpiringPulse = true,
@@ -2598,6 +2601,7 @@ local defaults = {
                     growDirection = "RIGHT",
                     spacing = 2,
                     maxIndicators = 5,
+                    hideSwipe = false,
                     reverseSwipe = false,
                     trackedSpells = {},
                     entries = {},
@@ -2764,10 +2768,12 @@ local defaults = {
                     showDebuffs = true, maxDebuffs = 3, debuffIconSize = 16,
                     debuffAnchor = "BOTTOMRIGHT", debuffGrowDirection = "LEFT",
                     debuffSpacing = 2, debuffOffsetX = -2, debuffOffsetY = -18,
+                    debuffHideSwipe = false,
                     debuffReverseSwipe = false,
                     showBuffs = false, maxBuffs = 0, buffIconSize = 14,
                     buffAnchor = "TOPLEFT", buffGrowDirection = "RIGHT",
                     buffSpacing = 2, buffOffsetX = 2, buffOffsetY = 16,
+                    buffHideSwipe = false,
                     buffReverseSwipe = false,
                     showDurationColor = true,
                     showExpiringPulse = true,
@@ -2810,6 +2816,7 @@ local defaults = {
                     growDirection = "RIGHT",
                     spacing = 2,
                     maxIndicators = 5,
+                    hideSwipe = false,
                     reverseSwipe = false,
                     trackedSpells = {},
                     entries = {},
@@ -3152,6 +3159,8 @@ local defaults = {
         buffBorders = {
             enableBuffs = true,
             enableDebuffs = true,
+            showBuffBorders = true,
+            showDebuffBorders = true,
             hideBuffFrame = false,
             hideDebuffFrame = false,
             fadeBuffFrame = false,
