@@ -36,6 +36,8 @@ local function BuildEffectsTab(tabContent)
         if not db.cooldownSwipe then db.cooldownSwipe = {} end
         if not db.cooldownEffects then db.cooldownEffects = {} end
         if not db.customGlow then db.customGlow = {} end
+        if db.customGlow.essentialPandemicEnabled == nil then db.customGlow.essentialPandemicEnabled = true end
+        if db.customGlow.utilityPandemicEnabled == nil then db.customGlow.utilityPandemicEnabled = true end
     end
 
     -- =====================================================
@@ -198,7 +200,7 @@ local function BuildEffectsTab(tabContent)
         sectionHeader:SetPoint("TOPLEFT", PAD, y)
         y = y - sectionHeader.gap
 
-        local sectionDesc = GUI:CreateLabel(tabContent, "Replace Blizzard's glow with a custom glow effect when abilities proc.", 11, C.textMuted)
+        local sectionDesc = GUI:CreateLabel(tabContent, "Replace Blizzard's glow with a custom glow effect when abilities proc, and optionally mirror Blizzard's pandemic refresh highlight for tracked auras.", 11, C.textMuted)
         sectionDesc:SetPoint("TOPLEFT", PAD, y)
         sectionDesc:SetPoint("RIGHT", tabContent, "RIGHT", -PAD, 0)
         sectionDesc:SetJustifyH("LEFT")
@@ -209,6 +211,7 @@ local function BuildEffectsTab(tabContent)
         end
 
         local enabledKey = prefix .. "Enabled"
+        local pandemicKey = prefix .. "PandemicEnabled"
         local glowTypeKey = prefix .. "GlowType"
         local colorKey = prefix .. "Color"
         local linesKey = prefix .. "Lines"
@@ -236,6 +239,11 @@ local function BuildEffectsTab(tabContent)
         local glowEnable = GUI:CreateFormCheckbox(tabContent, "Enable Custom Glow", enabledKey, dbTable, refreshFn)
         glowEnable:SetPoint("TOPLEFT", PAD, y)
         glowEnable:SetPoint("RIGHT", tabContent, "RIGHT", -PAD, 0)
+        y = y - FORM_ROW
+
+        local pandemicEnable = GUI:CreateFormCheckbox(tabContent, "Mirror Blizzard Pandemic Refresh Glow", pandemicKey, dbTable, refreshFn)
+        pandemicEnable:SetPoint("TOPLEFT", PAD, y)
+        pandemicEnable:SetPoint("RIGHT", tabContent, "RIGHT", -PAD, 0)
         y = y - FORM_ROW
 
         -- Glow Type dropdown

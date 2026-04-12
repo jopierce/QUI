@@ -3120,6 +3120,7 @@ local defaults = {
         customGlow = {
             -- Essential Cooldowns
             essentialEnabled = true,
+            essentialPandemicEnabled = true,
             essentialGlowType = "Pixel Glow",  -- "Pixel Glow", "Autocast Shine", "Button Glow"
             essentialColor = {0.95, 0.95, 0.32, 1},  -- Default yellow/gold
             essentialLines = 14,       -- Number of lines for Pixel Glow / spots for Autocast Shine
@@ -3132,6 +3133,7 @@ local defaults = {
 
             -- Utility Cooldowns
             utilityEnabled = true,
+            utilityPandemicEnabled = true,
             utilityGlowType = "Pixel Glow",
             utilityColor = {0.95, 0.95, 0.32, 1},
             utilityLines = 14,

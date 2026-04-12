@@ -43,6 +43,41 @@ local function IsSpellCastable(icon)
     return SafeIsSpellUsable(spellID)
 end
 
+local function GetSpellGlowOverride(icon)
+    if not icon or not icon._spellEntry then return nil end
+
+    local entry = icon._spellEntry
+    local CDMSpellData = ns.CDMSpellData
+    if not CDMSpellData or not entry.viewerType then return nil end
+
+    local lookupID = entry.spellID or entry.id
+    if not lookupID then return nil end
+
+    return CDMSpellData:GetSpellOverride(entry.viewerType, lookupID)
+end
+
+local function IsPandemicMirroringEnabled(icon)
+    if not icon or not icon._spellEntry then return false end
+
+    local settings = GetSettings()
+    if not settings then return true end
+
+    local viewerType = icon._spellEntry.viewerType
+    if viewerType == "essential" then
+        return settings.essentialPandemicEnabled ~= false
+    elseif viewerType == "utility" then
+        return settings.utilityPandemicEnabled ~= false
+    end
+
+    return false
+end
+
+-- Forward declarations for hook-driven pandemic helpers.
+local HookBlizzPandemic
+local ClearPandemicState
+local SyncGlowForIcon
+local ResyncPandemicGlows
+
 -- Track which icons currently have active glows
 local activeGlowIcons = {}  -- [icon] = true
 
@@ -319,6 +354,113 @@ StopGlow = function(icon)
 end
 
 ---------------------------------------------------------------------------
+-- PANDEMIC GLOW: hook Blizzard CDM children's ShowPandemicStateFrame /
+-- HidePandemicStateFrame. Blizzard calls these every OnUpdate tick.
+-- Zero polling, zero API queries, zero secret value issues.
+---------------------------------------------------------------------------
+local PANDEMIC_LINGER = 0.1
+local _pandemicState = setmetatable({}, { __mode = "k" })
+local _pandemicGlowIcons = setmetatable({}, { __mode = "k" })  -- [icon] = true when glow is pandemic-driven
+
+local function StartPandemicGlow(icon)
+    if not icon or not icon._spellEntry or not icon:IsShown() then return end
+    if not IsPandemicMirroringEnabled(icon) then return end
+
+    local spellOvr = GetSpellGlowOverride(icon)
+    if spellOvr and spellOvr.glowEnabled == false then return end
+
+    _pandemicGlowIcons[icon] = true
+    if not activeGlowIcons[icon] then
+        StartGlow(icon, spellOvr)
+    end
+end
+
+HookBlizzPandemic = function(icon, blizzChild)
+    if not blizzChild or not blizzChild.ShowPandemicStateFrame then return end
+
+    local state = _pandemicState[blizzChild]
+    if not state then
+        state = {}
+        _pandemicState[blizzChild] = state
+    end
+    local wasActive = state.active
+    if state.icon and state.icon ~= icon then
+        local oldIcon = state.icon
+        _pandemicGlowIcons[oldIcon] = nil
+        if activeGlowIcons[oldIcon] then
+            if oldIcon._spellEntry then
+                SyncGlowForIcon(oldIcon)
+            else
+                StopGlow(oldIcon)
+            end
+        end
+    end
+    state.icon = icon
+
+    if wasActive then
+        if icon and icon._spellEntry and icon:IsShown() then
+            StartPandemicGlow(icon)
+        else
+            state.active = nil
+            state.lastFire = nil
+        end
+    end
+
+    if state.hooked then return end
+    state.hooked = true
+
+    hooksecurefunc(blizzChild, "ShowPandemicStateFrame", function(self)
+        local s = _pandemicState[self]
+        if not s or not s.icon then return end
+        s.lastFire = GetTime()
+        if not s.active then
+            s.active = true
+            StartPandemicGlow(s.icon)
+            if not _pandemicGlowIcons[s.icon]
+                and (not s.icon._spellEntry or not s.icon:IsShown()) then
+                s.active = nil
+                s.lastFire = nil
+            end
+        end
+    end)
+
+    hooksecurefunc(blizzChild, "HidePandemicStateFrame", function(self)
+        local s = _pandemicState[self]
+        if not s or not s.active then return end
+        local last = s.lastFire
+        if last and (GetTime() - last) < PANDEMIC_LINGER then return end
+        local icon = s.icon
+        s.active = nil
+        if icon then
+            _pandemicGlowIcons[icon] = nil
+            if icon._spellEntry then
+                SyncGlowForIcon(icon)
+            elseif activeGlowIcons[icon] then
+                StopGlow(icon)
+            end
+        end
+    end)
+end
+
+ClearPandemicState = function(icon)
+    if not icon then return end
+
+    _pandemicGlowIcons[icon] = nil
+
+    for _, state in pairs(_pandemicState) do
+        if state.icon == icon then
+            state.icon = nil
+            state.active = nil
+            state.lastFire = nil
+        end
+    end
+
+    if activeGlowIcons[icon] then
+        StopGlow(icon)
+    end
+end
+
+---------------------------------------------------------------------------
 -- CHECK OVERLAY STATE: query API + event-based tracking
 ---------------------------------------------------------------------------
 local function IsOverlayed(spellID)
@@ -332,6 +474,62 @@ local function IsOverlayed(spellID)
     return overlayedSpells[spellID] or false
 end
 
+local function EvaluateGlowForIcon(icon)
+    if not icon or not icon:IsShown() or not icon._spellEntry then
+        return false, nil
+    end
+
+    local entry = icon._spellEntry
+    local viewerType = entry.viewerType
+    local baseID = entry.spellID
+    local overrideID = entry.overrideSpellID
+
+    local spellOvr = GetSpellGlowOverride(icon)
+
+    local shouldGlow
+    if spellOvr and spellOvr.glowEnabled == false then
+        shouldGlow = false
+    elseif spellOvr and spellOvr.glowEnabled == true then
+        shouldGlow = true
+    else
+        shouldGlow = IsOverlayed(baseID)
+            or (overrideID and overrideID ~= baseID and IsOverlayed(overrideID))
+
+        if not shouldGlow and baseID and C_Spell and C_Spell.GetOverrideSpell then
+            local currentOverride = C_Spell.GetOverrideSpell(baseID)
+            if currentOverride and currentOverride ~= baseID
+                and currentOverride ~= overrideID then
+                shouldGlow = IsOverlayed(currentOverride)
+            end
+        end
+    end
+
+    if not shouldGlow and spellOvr and spellOvr.procOnUsable then
+        shouldGlow = IsSpellCastable(icon)
+    end
+
+    return shouldGlow and true or false, spellOvr
+end
+
+SyncGlowForIcon = function(icon)
+    local shouldGlow, spellOvr = EvaluateGlowForIcon(icon)
+
+    if shouldGlow and not activeGlowIcons[icon] then
+        StartGlow(icon, spellOvr)
+    elseif not shouldGlow and activeGlowIcons[icon] and not _pandemicGlowIcons[icon] then
+        StopGlow(icon)
+    end
+end
+
+ResyncPandemicGlows = function()
+    for _, state in pairs(_pandemicState) do
+        local icon = state.icon
+        if state.active and icon and icon._spellEntry and icon:IsShown() then
+            StartPandemicGlow(icon)
+        end
+    end
+end
+
 ---------------------------------------------------------------------------
 -- SCAN ALL ICONS AND SYNC GLOW STATE
 ---------------------------------------------------------------------------
@@ -339,60 +537,13 @@ local function ScanAllGlows()
     local CDMIcons = ns.CDMIcons
     if not CDMIcons then return end
 
-    local CDMSpellData = ns.CDMSpellData
-
     for _, viewerType in ipairs({"essential", "utility"}) do
         local pool = CDMIcons:GetIconPool(viewerType)
         for _, icon in ipairs(pool) do
             if not icon:IsShown() then -- skip hidden icons (glow re-applied on layout refresh)
                 -- noop: skip
             elseif icon._spellEntry then
-                local baseID = icon._spellEntry.spellID
-                local overrideID = icon._spellEntry.overrideSpellID
-
-                -- Per-spell glow override lookup
-                local spellOvr = nil
-                if CDMSpellData then
-                    local lookupID = icon._spellEntry.spellID or icon._spellEntry.id
-                    if lookupID then
-                        spellOvr = CDMSpellData:GetSpellOverride(viewerType, lookupID)
-                    end
-                end
-
-                -- Per-spell glowEnabled override: false suppresses, true forces
-                local shouldGlow
-                if spellOvr and spellOvr.glowEnabled == false then
-                    shouldGlow = false
-                elseif spellOvr and spellOvr.glowEnabled == true then
-                    shouldGlow = true
-                else
-                    -- Default: check proc overlay state
-                    shouldGlow = IsOverlayed(baseID)
-                        or (overrideID and overrideID ~= baseID and IsOverlayed(overrideID))
-
-                    -- Check current runtime override: the spell may be temporarily
-                    -- replaced (e.g., Judgment → Hammer of Wrath via Wake of Ashes).
-                    -- The glow event fires for the override's spell ID, which differs
-                    -- from both baseID and the static scan-time overrideSpellID.
-                    if not shouldGlow and baseID and C_Spell and C_Spell.GetOverrideSpell then
-                        local currentOverride = C_Spell.GetOverrideSpell(baseID)
-                        if currentOverride and currentOverride ~= baseID
-                            and currentOverride ~= overrideID then
-                            shouldGlow = IsOverlayed(currentOverride)
-                        end
-                    end
-                end
-
-                -- Per-spell procOnUsable: glow when spell is castable
-                if not shouldGlow and spellOvr and spellOvr.procOnUsable then
-                    shouldGlow = IsSpellCastable(icon)
-                end
-
-                if shouldGlow and not activeGlowIcons[icon] then
-                    StartGlow(icon, spellOvr)
-                elseif not shouldGlow and activeGlowIcons[icon] then
-                    StopGlow(icon)
-                end
+                SyncGlowForIcon(icon)
             end
         end
     end
@@ -407,7 +558,6 @@ local function ScanGlowsForSpell(spellID)
 
     local CDMIcons = ns.CDMIcons
     if not CDMIcons then return end
-    local CDMSpellData = ns.CDMSpellData
 
     -- Collect all candidate spellIDs to look up
     local candidates = { spellID }
@@ -425,45 +575,7 @@ local function ScanGlowsForSpell(spellID)
                 if not visited[icon] then
                     visited[icon] = true
                     if icon:IsShown() and icon._spellEntry then
-                        local viewerType = icon._spellEntry.viewerType
-                        local baseID = icon._spellEntry.spellID
-                        local overrideID = icon._spellEntry.overrideSpellID
-
-                        local spellOvr = nil
-                        if CDMSpellData and viewerType then
-                            local lookupID = baseID or icon._spellEntry.id
-                            if lookupID then
-                                spellOvr = CDMSpellData:GetSpellOverride(viewerType, lookupID)
-                            end
-                        end
-
-                        local shouldGlow
-                        if spellOvr and spellOvr.glowEnabled == false then
-                            shouldGlow = false
-                        elseif spellOvr and spellOvr.glowEnabled == true then
-                            shouldGlow = true
-                        else
-                            shouldGlow = IsOverlayed(baseID)
-                                or (overrideID and overrideID ~= baseID and IsOverlayed(overrideID))
-                            if not shouldGlow and C_Spell and C_Spell.GetOverrideSpell then
-                                local currentOverride = C_Spell.GetOverrideSpell(baseID)
-                                if currentOverride and currentOverride ~= baseID
-                                    and currentOverride ~= overrideID then
-                                    shouldGlow = IsOverlayed(currentOverride)
-                                end
-                            end
-                        end
-
-                        -- Per-spell procOnUsable: glow when spell is castable
-                        if not shouldGlow and spellOvr and spellOvr.procOnUsable then
-                            shouldGlow = IsSpellCastable(icon)
-                        end
-
-                        if shouldGlow and not activeGlowIcons[icon] then
-                            StartGlow(icon, spellOvr)
-                        elseif not shouldGlow and activeGlowIcons[icon] then
-                            StopGlow(icon)
-                        end
+                        SyncGlowForIcon(icon)
                     end
                 end
             end
@@ -484,10 +596,12 @@ local function RefreshAllGlows()
         StopGlow(icon)
     end
     wipe(activeGlowIcons)
+    wipe(_pandemicGlowIcons)
 
     -- Rebuild reverse lookup and re-scan with current settings
     RebuildGlowSpellMap()
     ScanAllGlows()
+    ResyncPandemicGlows()
 end
 
 ---------------------------------------------------------------------------
@@ -502,6 +616,7 @@ eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 eventFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
 eventFrame:RegisterEvent("SPELL_UPDATE_USABLE")
+eventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
 
 -- Coalesced usability glow scan: 100ms delay lets CDM's 50ms update finish first
 -- so icon._hasCooldownActive is current when we check IsSpellCastable.
@@ -517,6 +632,10 @@ end
 
 eventFrame:SetScript("OnEvent", function(_, event, spellID)
     if event == "SPELL_UPDATE_COOLDOWN" or event == "SPELL_UPDATE_USABLE" then
+        ScheduleUsabilityGlowScan()
+        return
+    end
+    if event == "PLAYER_TARGET_CHANGED" then
         ScheduleUsabilityGlowScan()
         return
     end
@@ -568,6 +687,8 @@ ns._OwnedGlows = {
     activeGlowIcons = activeGlowIcons,
     ScheduleGlowScan = ScanAllGlows,
     IsSpellCastable = IsSpellCastable,
+    HookBlizzPandemic = HookBlizzPandemic,
+    ClearPandemicState = ClearPandemicState,
     GetGlowState = function(icon)
         return activeGlowIcons[icon] and { active = true } or nil
     end,

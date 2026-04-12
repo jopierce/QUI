@@ -2634,6 +2634,9 @@ function CDMIcons:ReleaseIcon(icon)
     UnmirrorBlizzCooldown(icon)
     UnhookBlizzTexture(icon)
     UnhookBlizzStackText(icon)
+    if ns._OwnedGlows and ns._OwnedGlows.ClearPandemicState then
+        ns._OwnedGlows.ClearPandemicState(icon)
+    end
     icon:Hide()
     icon:ClearAllPoints()
     icon._spellEntry = nil
@@ -2889,6 +2892,10 @@ function CDMIcons:BuildIcons(viewerType, container)
             HookBlizzTexture(icon, entry._blizzChild)
             HookBlizzStackText(icon, entry._blizzChild)
 
+            -- Hook pandemic state from Blizzard CDM child
+            if ns._OwnedGlows and ns._OwnedGlows.HookBlizzPandemic then
+                ns._OwnedGlows.HookBlizzPandemic(icon, entry._blizzChild)
+            end
 
             -- Buff icons are always auras — initialize _auraActive so the
             -- swipe module classifies them correctly before the
