@@ -79,6 +79,7 @@ local _state = {
 ---------------------------------------------------------------------------
 local QUI_GF = {}
 ns.QUI_GroupFrames = QUI_GF
+_G.QUI_GroupFrames = QUI_GF  -- bridge for QUIGroupUnitButtonTemplate OnLoad
 
 -- Frame references
 QUI_GF.headers = {}          -- "party", "raid" header frames
@@ -2462,6 +2463,19 @@ end
 -- Expose for spotlight (and any future external headers)
 QUI_GF.DecorateGroupFrame = DecorateGroupFrame
 
+-- Called from QUIGroupUnitButtonTemplate OnLoad the moment the secure header
+-- creates each child. Runs inside the ADDON_LOADED safe window where the
+-- script execution-time budget is effectively unlimited.
+function QUI_GF:InitializeHeaderChild(frame)
+    if not frame then return end
+    DecorateGroupFrame(frame)
+    if not InCombatLockdown() then
+        frame:RegisterForClicks("AnyUp")
+    else
+        _pending.registerClicks = true
+    end
+end
+
 ---------------------------------------------------------------------------
 -- UNIT FRAME MAP: Rebuild unit → frame lookup
 ---------------------------------------------------------------------------
@@ -3210,8 +3224,12 @@ local function CreateHeaders()
 
     -- Party header
     local partyHeader = CreateFrame("Frame", "QUI_PartyHeader", partyRoot, "SecureGroupHeaderTemplate")
-    partyHeader:SetAttribute("template", "SecureUnitButtonTemplate, BackdropTemplate")
+    partyHeader:SetAttribute("template", "QUIGroupUnitButtonTemplate")
     partyHeader:SetAttribute("initialConfigFunction", initConfigFunc)
+    -- Publish header reference BEFORE invisible-show so QUIGroupUnitButtonTemplate's
+    -- OnLoad-triggered DecorateGroupFrame sees correct raid-vs-party context when
+    -- checking frame:GetParent() against QUI_GF.headers.*.
+    QUI_GF.headers.party = partyHeader
     ConfigurePartyHeader(partyHeader)
 
     -- Position: prefer frameAnchoring if available, fall back to legacy db.position
@@ -3245,23 +3263,13 @@ local function CreateHeaders()
     -- Restore correct show* attributes for runtime operation
     ConfigurePartyHeader(partyHeader)
 
-    QUI_GF.headers.party = partyHeader
-    -- Watch for new children added by the secure header (handles late NPC frames)
-    partyHeader:HookScript("OnAttributeChanged", function(self, key, value)
-        if value and type(key) == "string" and key:match("^child") then
-            DecorateGroupFrame(value)
-            if not InCombatLockdown() then
-                value:RegisterForClicks("AnyUp")
-            else
-                _pending.registerClicks = true
-            end
-        end
-    end)
-
     -- Raid header
     local raidHeader = CreateFrame("Frame", "QUI_RaidHeader", raidRoot, "SecureGroupHeaderTemplate")
-    raidHeader:SetAttribute("template", "SecureUnitButtonTemplate, BackdropTemplate")
+    raidHeader:SetAttribute("template", "QUIGroupUnitButtonTemplate")
     raidHeader:SetAttribute("initialConfigFunction", initConfigFunc)
+    -- Publish before invisible-show so OnLoad-triggered DecorateGroupFrame
+    -- correctly identifies raid children via parent comparison.
+    QUI_GF.headers.raid = raidHeader
     ConfigureRaidHeader(raidHeader)
 
     local raidCount = math_max(IsInRaid() and GetNumGroupMembers() or 25, 5)
@@ -3295,25 +3303,16 @@ local function CreateHeaders()
     raidRoot:Hide()
     ConfigureRaidHeader(raidHeader)
 
-    QUI_GF.headers.raid = raidHeader
-    -- Watch for new children on raid header too
-    raidHeader:HookScript("OnAttributeChanged", function(self, key, value)
-        if value and type(key) == "string" and key:match("^child") then
-            DecorateGroupFrame(value)
-            if not InCombatLockdown() then
-                value:RegisterForClicks("AnyUp")
-            else
-                _pending.registerClicks = true
-            end
-        end
-    end)
-
     -- Raid section headers. Reused for grouped raids and for raid self-first mode.
     raidRoot:Show()  -- Parent must be visible for child creation
     for g = 1, MAX_RAID_SECTION_HEADERS do
         local groupHeader = CreateFrame("Frame", "QUI_RaidGroup" .. g .. "Header", raidRoot, "SecureGroupHeaderTemplate")
-        groupHeader:SetAttribute("template", "SecureUnitButtonTemplate, BackdropTemplate")
+        groupHeader:SetAttribute("template", "QUIGroupUnitButtonTemplate")
         groupHeader:SetAttribute("initialConfigFunction", initConfigFunc)
+        -- Publish before invisible-show so OnLoad-triggered DecorateGroupFrame's
+        -- raid-section parent check sees this header in QUI_GF.raidGroupHeaders.
+        groupHeader._raidGroupIndex = g
+        QUI_GF.raidGroupHeaders[g] = groupHeader
         groupHeader:SetAttribute("showRaid", true)
         groupHeader:SetAttribute("showParty", false)
         groupHeader:SetAttribute("showPlayer", false)
@@ -3369,27 +3368,14 @@ local function CreateHeaders()
         groupHeader:Hide()
         groupHeader:SetAttribute("showPlayer", false)
         groupHeader:SetAttribute("showSolo", false)
-
-        groupHeader:HookScript("OnAttributeChanged", function(self, key, value)
-            if value and type(key) == "string" and key:match("^child") then
-                DecorateGroupFrame(value)
-                if not InCombatLockdown() then
-                    value:RegisterForClicks("AnyUp")
-                else
-                    _pending.registerClicks = true
-                end
-            end
-        end)
-
-        groupHeader._raidGroupIndex = g
-        QUI_GF.raidGroupHeaders[g] = groupHeader
     end
     raidRoot:Hide()
 
     -- Self header — shows only the player for party/solo self-first.
     local selfHeader = CreateFrame("Frame", "QUI_SelfHeader", partyRoot, "SecureGroupHeaderTemplate")
-    selfHeader:SetAttribute("template", "SecureUnitButtonTemplate, BackdropTemplate")
+    selfHeader:SetAttribute("template", "QUIGroupUnitButtonTemplate")
     selfHeader:SetAttribute("initialConfigFunction", initConfigFunc)
+    QUI_GF.headers.self = selfHeader
     selfHeader:SetAttribute("showPlayer", true)
     selfHeader:SetAttribute("showParty", false)
     selfHeader:SetAttribute("showRaid", false)
@@ -3414,18 +3400,6 @@ local function CreateHeaders()
     selfHeader:Show()
     selfHeader:Hide()
     partyRoot:Hide()
-
-    QUI_GF.headers.self = selfHeader
-    selfHeader:HookScript("OnAttributeChanged", function(self, key, value)
-        if value and type(key) == "string" and key:match("^child") then
-            DecorateGroupFrame(value)
-            if not InCombatLockdown() then
-                value:RegisterForClicks("AnyUp")
-            else
-                _pending.registerClicks = true
-            end
-        end
-    end)
 end
 
 ---------------------------------------------------------------------------
@@ -3689,91 +3663,6 @@ local function UpdateHeaderSizes()
 end
 
 ---------------------------------------------------------------------------
--- HEADER: Decorate all child frames in a header
----------------------------------------------------------------------------
-local function DecorateHeaderChildren(header)
-    if not header then return end
-    local i = 1
-    while true do
-        local child = header:GetAttribute("child" .. i)
-        if not child then break end
-        DecorateGroupFrame(child)
-        -- RegisterForClicks is protected — defer during combat
-        if not InCombatLockdown() then
-            child:RegisterForClicks("AnyUp")
-        else
-            _pending.registerClicks = true
-        end
-        i = i + 1
-    end
-end
-
----------------------------------------------------------------------------
--- HEADER: Batched decoration — stagger across ticks to avoid "script ran
--- too long" when decorating 40+ raid frames at init.
----------------------------------------------------------------------------
-local function CollectHeaderChildren(header, out)
-    if not header then return end
-    local i = 1
-    while true do
-        local child = header:GetAttribute("child" .. i)
-        if not child then break end
-        out[#out + 1] = child
-        i = i + 1
-    end
-end
-
-local function DecorateBatched(frames, onComplete)
-    local total = #frames
-    if total == 0 then
-        if onComplete then onComplete() end
-        return
-    end
-
-    -- Small groups (party/small raid): decorate all at once — no visible stagger.
-    -- Only batch for 25+ frames to guard against "script ran too long".
-    local BATCH_THRESHOLD = 25
-    local inCombat = InCombatLockdown()
-
-    if total <= BATCH_THRESHOLD then
-        for i = 1, total do
-            DecorateGroupFrame(frames[i])
-            if not inCombat then
-                frames[i]:RegisterForClicks("AnyUp")
-            else
-                _pending.registerClicks = true
-            end
-        end
-        if onComplete then onComplete() end
-        return
-    end
-
-    -- Large raids: batch 20 per tick
-    local idx = 1
-    local function ProcessBatch()
-        -- Re-check combat each tick: batches are deferred via C_Timer, so the
-        -- player can enter combat between ticks — a captured value would taint.
-        local batchInCombat = InCombatLockdown()
-        local batchEnd = math_min(idx + 19, total)
-        for i = idx, batchEnd do
-            DecorateGroupFrame(frames[i])
-            if not batchInCombat then
-                frames[i]:RegisterForClicks("AnyUp")
-            else
-                _pending.registerClicks = true
-            end
-        end
-        idx = batchEnd + 1
-        if idx <= total then
-            C_Timer.After(0, ProcessBatch)
-        elseif onComplete then
-            onComplete()
-        end
-    end
-    ProcessBatch()
-end
-
----------------------------------------------------------------------------
 -- HEADER: Show/hide based on group status
 ---------------------------------------------------------------------------
 -- Show/hide per-group headers; hide single raid header
@@ -3904,35 +3793,24 @@ local function UpdateHeaderVisibility()
     -- End safe period before the deferred callback so combat guards apply
     _pending.initSafe = false
 
-    -- Defer decoration + map rebuild to next frame (after header creates children).
-    -- Batched only for 25+ frames to avoid "script ran too long" in large raids.
+    -- Children self-decorate via QUIGroupUnitButtonTemplate OnLoad at header
+    -- creation time — no decoration work remains for this path. Defer the
+    -- map rebuild + refresh one frame so the secure header has finished any
+    -- in-progress child reassignments from the size/attribute changes above.
     C_Timer.After(0, function()
-        local allChildren = {}
-        CollectHeaderChildren(QUI_GF.headers.party, allChildren)
-        if UseRaidSectionHeaders() and IsInRaid() then
-            for _, header in ipairs(QUI_GF.raidGroupHeaders) do
-                CollectHeaderChildren(header, allChildren)
+        ApplyChildFrameLayout()
+        RebuildUnitFrameMap()
+        QUI_GF:RefreshAllFrames()
+        UpdateAnchorFrames()
+        initSafePeriod = false
+
+        -- Reveal: all frames are now sized and populated.
+        if needsReveal then
+            _state.initialLayoutDone = true
+            for _, root in pairs(QUI_GF.anchorFrames) do
+                root:SetAlpha(1)
             end
-        else
-            CollectHeaderChildren(QUI_GF.headers.raid, allChildren)
         end
-        CollectHeaderChildren(QUI_GF.headers.self, allChildren)
-
-        DecorateBatched(allChildren, function()
-            ApplyChildFrameLayout()
-            RebuildUnitFrameMap()
-            QUI_GF:RefreshAllFrames()
-            UpdateAnchorFrames()
-            initSafePeriod = false
-
-            -- Reveal: all frames are now decorated, sized, and populated.
-            if needsReveal then
-                _state.initialLayoutDone = true
-                for _, root in pairs(QUI_GF.anchorFrames) do
-                    root:SetAlpha(1)
-                end
-            end
-        end)
     end)
 end
 
@@ -4341,14 +4219,8 @@ end
 ---------------------------------------------------------------------------
 local function GRU_DeferredWork()
     _state.gruDeferredPending = false
-    DecorateHeaderChildren(QUI_GF.headers.party)
-    if UseRaidSectionHeaders() and IsInRaid() then
-        for _, header in ipairs(QUI_GF.raidGroupHeaders) do
-            DecorateHeaderChildren(header)
-        end
-    else
-        DecorateHeaderChildren(QUI_GF.headers.raid)
-    end
+    -- Decoration runs at ADDON_LOADED via QUIGroupUnitButtonTemplate OnLoad —
+    -- nothing to decorate here even on a full roster change.
     RebuildUnitFrameMap()
     -- Refresh GUID cache so OnAttributeChanged skip has fresh data
     for unit, frame in pairs(QUI_GF.unitFrameMap) do
@@ -4632,13 +4504,10 @@ local function OnEvent(self, event, arg1, ...)
         end
         if _pending.registerClicks then
             _pending.registerClicks = false
-            DecorateHeaderChildren(QUI_GF.headers.party)
-            if UseRaidSectionHeaders() then
-                for _, header in ipairs(QUI_GF.raidGroupHeaders) do
-                    DecorateHeaderChildren(header)
-                end
-            else
-                DecorateHeaderChildren(QUI_GF.headers.raid)
+            -- Catch up on click registration for frames whose OnLoad path
+            -- deferred RegisterForClicks due to combat lockdown.
+            for _, frame in ipairs(QUI_GF.allFrames) do
+                frame:RegisterForClicks("AnyUp")
             end
             -- Re-register click-casting for frames that were decorated during
             -- combat but missed click-cast setup (SetupFrameClickCast bails

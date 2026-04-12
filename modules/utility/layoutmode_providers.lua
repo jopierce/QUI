@@ -288,7 +288,7 @@ local function RegisterAllProviders()
 
         U.CreateCollapsible(content, "Borders", 2 * FORM_ROW + 22, function(body)
             local sy = -4
-            sy = P(GUI:CreateFormCheckbox(body, "Enable Buff Borders", "enableBuffs", bb, Refresh), body, sy)
+            sy = P(GUI:CreateFormCheckbox(body, "Enable Buff Borders", "showBuffBorders", bb, Refresh), body, sy)
             P(GUI:CreateFormSlider(body, "Border Size", 1, 5, 0.5, "borderSize", bb, Refresh), body, sy)
             local note = body:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
             note:SetPoint("BOTTOMLEFT", body, "BOTTOMLEFT", 4, 4)
@@ -365,7 +365,7 @@ local function RegisterAllProviders()
 
         U.CreateCollapsible(content, "Borders", 2 * FORM_ROW + 22, function(body)
             local sy = -4
-            sy = P(GUI:CreateFormCheckbox(body, "Enable Debuff Borders", "enableDebuffs", bb, Refresh), body, sy)
+            sy = P(GUI:CreateFormCheckbox(body, "Enable Debuff Borders", "showDebuffBorders", bb, Refresh), body, sy)
             P(GUI:CreateFormSlider(body, "Border Size", 1, 5, 0.5, "borderSize", bb, Refresh), body, sy)
             local note = body:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
             note:SetPoint("BOTTOMLEFT", body, "BOTTOMLEFT", 4, 4)

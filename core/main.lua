@@ -716,19 +716,31 @@ function QUICore:HookEditMode()
             "ChatFrame1",
         }
 
+        -- PartyFrame is only suppressed when QUI group frames own party frames.
+        -- When disabled, the user needs Blizzard's Edit Mode selection to drag it.
+        local function ShouldSuppressEditModeFrame(name)
+            if name == "PartyFrame" then
+                local gfDB = QUI.db and QUI.db.profile and QUI.db.profile.quiGroupFrames
+                return gfDB and gfDB.enabled ~= false
+            end
+            return true
+        end
+
         local function InstallEditModeSuppression()
             if _editModeSuppressionInstalled then return end
             _editModeSuppressionInstalled = true
             for _, name in ipairs(_editModeSuppressedFrameNames) do
-                local frame = _G[name]
-                if frame and frame.HighlightSystem then
-                    hooksecurefunc(frame, "HighlightSystem", function(f)
-                        if f.ClearHighlight then f:ClearHighlight() end
-                    end)
-                    if frame.SelectSystem then
-                        hooksecurefunc(frame, "SelectSystem", function(f)
+                if ShouldSuppressEditModeFrame(name) then
+                    local frame = _G[name]
+                    if frame and frame.HighlightSystem then
+                        hooksecurefunc(frame, "HighlightSystem", function(f)
                             if f.ClearHighlight then f:ClearHighlight() end
                         end)
+                        if frame.SelectSystem then
+                            hooksecurefunc(frame, "SelectSystem", function(f)
+                                if f.ClearHighlight then f:ClearHighlight() end
+                            end)
+                        end
                     end
                 end
             end
@@ -750,9 +762,11 @@ function QUICore:HookEditMode()
             -- via secureexecuterange after EnterEditMode, so clear on next frame
             C_Timer.After(0, function()
                 for _, name in ipairs(_editModeSuppressedFrameNames) do
-                    local frame = _G[name]
-                    if frame and frame.ClearHighlight then
-                        pcall(frame.ClearHighlight, frame)
+                    if ShouldSuppressEditModeFrame(name) then
+                        local frame = _G[name]
+                        if frame and frame.ClearHighlight then
+                            pcall(frame.ClearHighlight, frame)
+                        end
                     end
                 end
             end)

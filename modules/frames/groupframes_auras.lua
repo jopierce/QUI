@@ -544,8 +544,8 @@ local function CreateAuraIcon(parent, size)
     pulseGroup:SetLooping("BOUNCE")
     icon.pulseGroup = pulseGroup
 
-    -- DandersFrames pattern: mouse propagation so @mouseover targeting and
-    -- click-casting work even when hovering aura icons.
+    -- Mouse propagation so @mouseover targeting and click-casting keep
+    -- working when the cursor is over aura icons.
     -- EnableMouse(true)                  → icon receives OnEnter/OnLeave (tooltips)
     -- SetPropagateMouseMotion(true)      → parent frame also gets motion events (@mouseover)
     -- SetPropagateMouseClicks(true)      → clicks pass through to parent (targeting/cast)
@@ -612,12 +612,18 @@ local function UpdateAuraIcon(icon, auraData, unit)
         auraIconState[icon] = state
     end
 
-    -- DandersFrames pattern: when bulk scan returns secret values, re-fetch
-    -- individual aura data by auraInstanceID for reliable display properties.
+    -- Re-fetch individual aura data when bulk-scan returned secret values,
+    -- OR when this icon is transitioning to a new aura instance (previous
+    -- state was for a different auraInstanceID or none). The transition case
+    -- matters because the pure-update dispatcher skip (in the subscriber)
+    -- may leave cache entries with stale expirationTime/duration; refetching
+    -- here ensures state.expirationTime is fresh when the icon takes over a
+    -- new aura via the set-change/sort path.
     local auraID = auraData.auraInstanceID
     local displayData = auraData
+    local isNewForIcon = state.auraInstanceID ~= auraID
     if auraID and not IsSecretValue(auraID) and C_UnitAuras and C_UnitAuras.GetAuraDataByAuraInstanceID then
-        if IsSecretValue(auraData.icon) or IsSecretValue(auraData.duration) then
+        if isNewForIcon or IsSecretValue(auraData.icon) or IsSecretValue(auraData.duration) then
             local ok, freshData = pcall(C_UnitAuras.GetAuraDataByAuraInstanceID, unit, auraID)
             if ok and freshData then
                 displayData = freshData
@@ -637,8 +643,8 @@ local function UpdateAuraIcon(icon, auraData, unit)
         pcall(icon.icon.SetTexture, icon.icon, displayData.icon)
     end
 
-    -- Stack count (DandersFrames pattern: use GetAuraApplicationDisplayCount
-    -- which returns a display-ready string, fully secret-safe via C-side SetText)
+    -- Stack count: GetAuraApplicationDisplayCount returns a display-ready
+    -- string, fully secret-safe via C-side SetText.
     if icon.stackText then
         if auraID and not IsSecretValue(auraID) and C_UnitAuras.GetAuraApplicationDisplayCount then
             local ok, countStr = pcall(C_UnitAuras.GetAuraApplicationDisplayCount, unit, auraID, 2, 99)
@@ -1385,6 +1391,53 @@ if ns.AuraEvents then
 
         local frame = GF.unitFrameMap[unit]
         if not frame or not frame:IsShown() then return end
+
+        -- Fast path for pure stack/duration updates (the dominant raid path):
+        -- before doing any cache work or C calls, check whether any visible
+        -- icon on this frame actually displays one of the updated auras. If
+        -- none do, the update cannot affect any pixel — skip the whole
+        -- subscriber. The cache entries for the non-visible auras stay at
+        -- their previous values, which is fine: UpdateAuraIcon re-fetches
+        -- on first-display transitions (see isNewForIcon branch there).
+        if type(updateInfo) == "table"
+            and not updateInfo.isFullUpdate
+            and not updateInfo.addedAuras
+            and not updateInfo.removedAuraInstanceIDs
+            and updateInfo.updatedAuraInstanceIDs
+            and unitAuraCache[unit]
+        then
+            local updated = updateInfo.updatedAuraInstanceIDs
+            local n = #updated
+            if n == 0 then return end
+            wipe(_updateSet)
+            for i = 1, n do _updateSet[updated[i]] = true end
+
+            local hasVisible = false
+            if frame.debuffIcons then
+                for i = 1, #frame.debuffIcons do
+                    local icon = frame.debuffIcons[i]
+                    if not icon:IsShown() then break end
+                    local st = auraIconState[icon]
+                    if st and st.auraInstanceID and _updateSet[st.auraInstanceID] then
+                        hasVisible = true
+                        break
+                    end
+                end
+            end
+            if not hasVisible and frame.buffIcons then
+                for i = 1, #frame.buffIcons do
+                    local icon = frame.buffIcons[i]
+                    if not icon:IsShown() then break end
+                    local st = auraIconState[icon]
+                    if st and st.auraInstanceID and _updateSet[st.auraInstanceID] then
+                        hasVisible = true
+                        break
+                    end
+                end
+            end
+
+            if not hasVisible then return end
+        end
 
         -- Try incremental update if updateInfo has delta data.
         -- Falls back to full scan when: updateInfo is nil, full update requested,

@@ -8,6 +8,7 @@
     <Script file="unitframe_auras.lua"/>
     <Script file="unitframe_editmode.lua"/>
     <Script file="unitframe_blizzard.lua"/>
+    <Include file="groupframes_template.xml"/>
     <Script file="groupframes.lua"/>
     <Script file="groupframes_auras.lua"/>
     <Script file="groupframes_indicators.lua"/>

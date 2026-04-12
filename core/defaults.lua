@@ -1334,6 +1334,7 @@ local defaults = {
                 fastUsabilityUpdates = false, -- 5x faster range/usability checks (50ms vs 250ms)
                 showTooltips = true,        -- Show tooltips when hovering action buttons
                 useOnKeyDown = false,       -- Cast on key press (true) vs key release (false)
+                assistedHighlight = false,  -- Marching-ants glow on Blizzard's next-cast rotation button
             },
             -- Mouseover fade settings
             fade = {
@@ -3152,6 +3153,8 @@ local defaults = {
         buffBorders = {
             enableBuffs = true,
             enableDebuffs = true,
+            showBuffBorders = true,
+            showDebuffBorders = true,
             hideBuffFrame = false,
             hideDebuffFrame = false,
             fadeBuffFrame = false,

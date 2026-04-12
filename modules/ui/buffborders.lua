@@ -35,6 +35,8 @@ local RemovePrivateAuraAnchor = C_UnitAuras and C_UnitAuras.RemovePrivateAuraAnc
 local DEFAULTS = {
     enableBuffs = true,
     enableDebuffs = true,
+    showBuffBorders = true,
+    showDebuffBorders = true,
     hideBuffFrame = false,
     hideDebuffFrame = false,
     fadeBuffFrame = false,
@@ -145,9 +147,10 @@ local paPendingSetup = false   -- deferred AddPrivateAuraAnchor after combat
 ---------------------------------------------------------------------------
 local function CreateAuraIcon(parent)
     iconCounter = iconCounter + 1
-    local frameName = "QUIAuraIcon" .. iconCounter
 
-    local icon = CreateFrame("Frame", frameName, parent)
+    -- Anonymous frame (no global name) to minimize taint surface. Named
+    -- frames land in _G and become targets for stricter taint enforcement.
+    local icon = CreateFrame("Frame", nil, parent)
     icon:SetSize(DEFAULT_ICON_SIZE, DEFAULT_ICON_SIZE)
 
     -- .Icon texture (ARTWORK layer)
@@ -156,7 +159,7 @@ local function CreateAuraIcon(parent)
     icon.Icon:SetTexCoord(BASE_CROP, 1 - BASE_CROP, BASE_CROP, 1 - BASE_CROP)
 
     -- .Cooldown frame (CooldownFrameTemplate for swipe + countdown)
-    icon.Cooldown = CreateFrame("Cooldown", frameName .. "Cooldown", icon, "CooldownFrameTemplate")
+    icon.Cooldown = CreateFrame("Cooldown", nil, icon, "CooldownFrameTemplate")
     icon.Cooldown:SetAllPoints(icon)
     icon.Cooldown:EnableMouse(false)
     icon.Cooldown:SetDrawSwipe(true)
@@ -366,10 +369,16 @@ local function StyleIcon(icon, settings, isBuff, debuffType)
     icon.BorderLeft:SetWidth(borderSize)
     icon.BorderRight:SetWidth(borderSize)
 
-    icon.BorderTop:Show()
-    icon.BorderBottom:Show()
-    icon.BorderLeft:Show()
-    icon.BorderRight:Show()
+    local showBorders
+    if isBuff then
+        showBorders = settings.showBuffBorders ~= false
+    else
+        showBorders = settings.showDebuffBorders ~= false
+    end
+    icon.BorderTop:SetShown(showBorders)
+    icon.BorderBottom:SetShown(showBorders)
+    icon.BorderLeft:SetShown(showBorders)
+    icon.BorderRight:SetShown(showBorders)
 
     -- Swipe visibility (swipe = dark fill, edge = bright leading line)
     if icon.Cooldown then
@@ -694,42 +703,34 @@ local function UpdateAuraIcons(container, activeIcons, sortedList, filter, isBuf
         activeIcons[id] = nil
     end
 
-    -- Phase 3: Acquire/update icons for current auras
+    -- Phase 3: Acquire/update icons for current auras.
+    --
+    -- Taint-safety principle: NEVER branch on auraData fields. Blizzard may
+    -- return "secret values" (numbers/booleans) for duration, expirationTime,
+    -- applications, spellId, icon, dispelName, etc. during combat. Evaluating
+    -- a secret value's truthiness (via if/and/or) taints the current Lua
+    -- execution thread, which then blocks subsequent protected calls.
+    --
+    -- Fix: pass auraData fields directly to C-side functions (which accept
+    -- secrets natively), always via pcall. Never use `if field then`.
     for id, auraData in pairs(currentAuras) do
         local icon = activeIcons[id]
         if not icon then
-            -- New aura — acquire icon
             icon = AcquireIcon(container)
             activeIcons[id] = icon
         end
 
-        -- Update icon data
         icon._auraInstanceID = id
         icon._spellId = auraData.spellId
         icon._filter = filter
 
-        -- Texture: prefer spell-specific lookup — auraData.icon can return
-        -- the granting spell's icon instead of the buff's own icon for some auras
-        local texID
-        if auraData.spellId and C_Spell and C_Spell.GetSpellTexture then
-            local ok, tex = pcall(C_Spell.GetSpellTexture, auraData.spellId)
-            if ok and tex then texID = tex end
-        end
-        texID = texID or auraData.icon
-        if texID and icon.Icon then
-            icon.Icon:SetTexture(texID)
+        -- Texture: GetSpellTexture + SetTexture are both C-side and handle
+        -- secret spellId / texture id directly. No branching.
+        if icon.Icon and C_Spell and C_Spell.GetSpellTexture then
+            pcall(icon.Icon.SetTexture, icon.Icon, C_Spell.GetSpellTexture(auraData.spellId))
         end
 
-        -- Cooldown swipe (secret-safe via pcall to C-side)
-        local duration = auraData.duration
-        local expirationTime = auraData.expirationTime
-
-        -- Store raw values (may be secret) — C-side functions handle them
-        icon._rawDuration = duration
-        icon._rawExpirationTime = expirationTime
-
-        -- Optional inversion so users can choose whether darkening ramps up
-        -- toward expiration or ramps down from full duration.
+        -- Swipe inversion uses only addon-owned booleans, no auraData.
         if icon.Cooldown and icon.Cooldown.SetReverse then
             local invertKey = isBuff and "buffInvertSwipeDarkening" or "debuffInvertSwipeDarkening"
             local invert = not not settings[invertKey]
@@ -738,63 +739,43 @@ local function UpdateAuraIcons(container, activeIcons, sortedList, filter, isBuf
             pcall(icon.Cooldown.SetReverse, icon.Cooldown, targetReverse)
         end
 
-        -- Cooldown swipe: prefer numeric path (correct remaining-time display),
-        -- fall back to DurationObject only when values are secret (combat).
-        if expirationTime and duration then
-            if not IsSecretValue(expirationTime) and not IsSecretValue(duration) then
-                -- Non-secret: SetCooldown with computed start time — always
-                -- shows correct remaining time for long-duration auras.
-                local startTime = expirationTime - duration
-                pcall(icon.Cooldown.SetCooldown, icon.Cooldown, startTime, duration)
-            elseif icon._auraInstanceID and C_UnitAuras and C_UnitAuras.GetAuraDuration
-                   and icon.Cooldown.SetCooldownFromDurationObject then
-                -- Combat (secret values): DurationObject is C-side safe
-                local ok, durObj = pcall(C_UnitAuras.GetAuraDuration, "player", icon._auraInstanceID)
-                if ok and durObj then
-                    pcall(icon.Cooldown.SetCooldownFromDurationObject, icon.Cooldown, durObj, true)
-                else
-                    icon.Cooldown:Clear()
-                end
+        -- Cooldown: always use the DurationObject path. GetAuraDuration and
+        -- SetCooldownFromDurationObject are both C-side and accept secrets.
+        -- SetCooldown with numeric values no longer accepts secrets from
+        -- tainted code in 12.0.5+, so DurationObject is the only safe path.
+        if icon.Cooldown and icon.Cooldown.SetCooldownFromDurationObject
+           and C_UnitAuras and C_UnitAuras.GetAuraDuration then
+            -- Only check `ok` from pcall (plain boolean). `durObj` may be a
+            -- secret value in combat; branching on its truthiness would taint.
+            local ok, durObj = pcall(C_UnitAuras.GetAuraDuration, "player", id)
+            if ok then
+                pcall(icon.Cooldown.SetCooldownFromDurationObject, icon.Cooldown, durObj, true)
             else
-                icon.Cooldown:Clear()
+                pcall(icon.Cooldown.Clear, icon.Cooldown)
             end
         else
-            icon.Cooldown:Clear()
+            pcall(icon.Cooldown.Clear, icon.Cooldown)
         end
 
-        -- Stacks
+        -- Stacks: TruncateWhenZero is C-side, accepts secret applications,
+        -- returns "" for 0/nil. SetText is C-side. No branching on the value.
         if settings.showStacks ~= false then
-            local applications = auraData.applications
-            if applications then
-                if not IsSecretValue(applications) then
-                    -- Out of combat: filter single-stack display
-                    if applications > 1 then
-                        icon.Stacks:SetText(applications)
-                        icon.Stacks:Show()
-                    else
-                        icon.Stacks:SetText("")
-                        icon.Stacks:Hide()
-                    end
-                else
-                    -- Combat secret: C_StringUtil.TruncateWhenZero is C-side,
-                    -- accepts secret values and returns "" for zero stacks
-                    pcall(icon.Stacks.SetText, icon.Stacks, C_StringUtil.TruncateWhenZero(applications))
-                    icon.Stacks:Show()
-                end
-            else
-                icon.Stacks:SetText("")
-                icon.Stacks:Hide()
-            end
+            pcall(icon.Stacks.SetText, icon.Stacks, C_StringUtil.TruncateWhenZero(auraData.applications))
+            pcall(icon.Stacks.Show, icon.Stacks)
         else
-            icon.Stacks:SetText("")
-            icon.Stacks:Hide()
+            pcall(icon.Stacks.SetText, icon.Stacks, "")
+            pcall(icon.Stacks.Hide, icon.Stacks)
         end
 
-        -- Style (borders, font)
-        local debuffType = not isBuff and (auraData.dispelName or "") or nil
-        StyleIcon(icon, settings, isBuff, debuffType)
+        -- StyleIcon reads debuffType via Helpers.SafeValue internally, which
+        -- checks issecretvalue without evaluating truthiness. Safe to pass.
+        StyleIcon(icon, settings, isBuff, auraData.dispelName)
 
-        icon:Show()
+        -- Note: icon:Show() intentionally omitted. AcquireIcon shows newly-
+        -- pooled icons, freshly-created frames are shown by default, and
+        -- existing icons remain shown from their previous update. Skipping
+        -- this call avoids ADDON_ACTION_BLOCKED if taint has propagated into
+        -- this execution context despite the safeguards above.
     end
 
     -- Phase 4: Build sorted list and layout
@@ -893,7 +874,9 @@ local function StyleSlotBorders(slot, settings)
     slot.BorderRight:SetWidth(borderSize)
 
     -- Only show borders when the client has rendered a visible aura child
-    local visible = SlotHasVisibleAura(slot)
+    -- and the user has borders enabled for debuffs.
+    local showBorders = settings and settings.showDebuffBorders ~= false
+    local visible = showBorders and SlotHasVisibleAura(slot)
     slot.BorderTop:SetShown(visible)
     slot.BorderBottom:SetShown(visible)
     slot.BorderLeft:SetShown(visible)
@@ -974,13 +957,16 @@ local function SetupPrivateAuras()
     for i = 1, PA_MAX_SLOTS do
         local slot = paSlots[i]
         if not slot then
-            slot = CreateFrame("Frame", "QUI_PlayerPrivateAura" .. i, debuffContainer)
+            -- Parent to UIParent (not debuffContainer) so protected-frame
+            -- inheritance from AddPrivateAuraAnchor does not propagate up
+            -- to debuffContainer and then sideways to buffContainer via
+            -- the debuffFrame → buffFrame SetPoint chain.
+            slot = CreateFrame("Frame", "QUI_PlayerPrivateAura" .. i, UIParent)
             slot:SetIgnoreParentAlpha(true)
+            slot:SetFrameStrata("HIGH")
             paSlots[i] = slot
         end
-        slot:SetParent(debuffContainer)
         slot:SetSize(iconSize, iconSize)
-        slot:SetFrameLevel(debuffContainer:GetFrameLevel() + 5)
         slot:Show()
 
         -- Add and style border textures to match normal debuff icons
@@ -1017,7 +1003,7 @@ local function SetupPrivateAuras()
 end
 
 local function LayoutPrivateAuraSlots()
-    if not AddPrivateAuraAnchor or #paSlots == 0 then return end
+    if not AddPrivateAuraAnchor or #paSlots == 0 or not debuffContainer then return end
 
     local settings = GetSettings()
     if not settings or not settings.enableDebuffs or settings.hideDebuffFrame then
@@ -1036,27 +1022,57 @@ local function LayoutPrivateAuraSlots()
     local growLeft = settings.debuffGrowLeft
     local growUp = settings.debuffGrowUp
 
-    local anchor
-    if growUp then
-        anchor = growLeft and "BOTTOMRIGHT" or "BOTTOMLEFT"
-    else
-        anchor = growLeft and "TOPRIGHT" or "TOPLEFT"
+    -- Read debuffContainer's growth corner in effective pixels. Slots are
+    -- parented to UIParent (to break the protected-frame inheritance chain),
+    -- so positioning goes through computed absolute UIParent coordinates.
+    local dcLeft = debuffContainer:GetLeft()
+    local dcRight = debuffContainer:GetRight()
+    local dcTop = debuffContainer:GetTop()
+    local dcBottom = debuffContainer:GetBottom()
+    if not (dcLeft and dcRight and dcTop and dcBottom) then
+        for _, slot in ipairs(paSlots) do
+            slot:Hide()
+        end
+        return
     end
 
+    -- Effective pixels → slot-local pixels. Slot is a UIParent child, so its
+    -- effective scale matches UIParent's.
+    local uiScale = UIParent:GetEffectiveScale()
+    local dcScale = debuffContainer:GetEffectiveScale()
+    local scaleRatio = dcScale / uiScale
+
+    local cornerX, cornerY
+    if growUp then
+        cornerY = dcBottom / uiScale
+        cornerX = growLeft and (dcRight / uiScale) or (dcLeft / uiScale)
+    else
+        cornerY = dcTop / uiScale
+        cornerX = growLeft and (dcRight / uiScale) or (dcLeft / uiScale)
+    end
+
+    -- First icon center is iconSize/2 inset from the growth corner (in the
+    -- flow direction), scale-corrected for the container's coordinate system.
+    local halfShiftX = (growLeft and -(iconSize / 2) or (iconSize / 2)) * scaleRatio
+    local halfShiftY = (growUp and (iconSize / 2) or -(iconSize / 2)) * scaleRatio
+
     local debuffCount = #debuffSortedIcons
-    local step = iconSize + spacing
+    local step = (iconSize + spacing) * scaleRatio
 
     for i, slot in ipairs(paSlots) do
         local idx = debuffCount + i - 1
         local col = idx % iconsPerRow
         local row = math.floor(idx / iconsPerRow)
 
-        local xOff = growLeft and -(col * step) or (col * step)
-        local yOff = growUp and (row * step) or -(row * step)
+        local xGrow = growLeft and -(col * step) or (col * step)
+        local yGrow = growUp and (row * step) or -(row * step)
+
+        local centerX = cornerX + halfShiftX + xGrow
+        local centerY = cornerY + halfShiftY + yGrow
 
         slot:SetSize(iconSize, iconSize)
         slot:ClearAllPoints()
-        slot:SetPoint(anchor, debuffContainer, anchor, xOff, yOff)
+        slot:SetPoint("CENTER", UIParent, "BOTTOMLEFT", centerX, centerY)
         StyleSlotBorders(slot, settings)
         slot:Show()
     end
@@ -1167,8 +1183,14 @@ local function UpdateWeaponEnchantIcons()
             -- CancelItemTempEnchantment is protected, so we overlay a secure
             -- button whose cancelaura action calls it via Blizzard's own
             -- SECURE_ACTIONS handler (target-slot → CANCELABLE_ITEMS lookup).
+            -- Parent to UIParent (not the icon) so this secure child does
+            -- not pull the icon into a secure-descendant chain — that would
+            -- make icon:Show() a protected action in combat, and since
+            -- icons are recycled across buffs/enchants the taint would
+            -- spread through the shared pool.
             if not icon._cancelBtn then
-                local btn = CreateFrame("Button", nil, icon, "SecureActionButtonTemplate")
+                local btn = CreateFrame("Button", nil, UIParent, "SecureActionButtonTemplate")
+                btn:SetFrameStrata("HIGH")
                 btn:SetAllPoints(icon)
                 btn:RegisterForClicks("RightButtonUp")
                 btn:SetAttribute("type2", "cancelaura")

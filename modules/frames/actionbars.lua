@@ -3864,6 +3864,15 @@ UpdateAllAssistedHighlights = function()
     if not (C_AssistedCombat and C_AssistedCombat.GetNextCastSpell) then return end
     if not (C_ActionBar and C_ActionBar.FindSpellActionButtons) then return end
 
+    local db = GetDB()
+    if not (db and db.global and db.global.assistedHighlight) then
+        for btn in pairs(assistedHighlightButtons) do
+            SetAssistedHighlightShown(btn, false)
+        end
+        assistedHighlightButtons = {}
+        return
+    end
+
     local ok, nextSpellID = pcall(C_AssistedCombat.GetNextCastSpell, true)
     if not ok then nextSpellID = nil end
 
@@ -3952,6 +3961,7 @@ ActionBarsOwned.UpdateAllSpellHighlights = UpdateAllSpellHighlights
 ActionBarsOwned.ShowActionButtonGlow = ShowActionButtonGlow
 ActionBarsOwned.HideActionButtonGlow = HideActionButtonGlow
 ActionBarsOwned.UpdateAllAssistedCombatRotation = UpdateAllAssistedCombatRotation
+ActionBarsOwned.UpdateAllAssistedHighlights = function() UpdateAllAssistedHighlights() end
 
 end -- do (spell glow / highlight / assisted rotation)
 
@@ -7720,14 +7730,20 @@ function ActionBarsOwned:Initialize()
         -- refresh naturally when the rotation action is moved/removed
         -- (HIDEGRID) or during the post-combat full refresh
         -- (PLAYER_REGEN_ENABLED calls UpdateAllAssistedHighlights).
-        EventRegistry:RegisterCallback("AssistedCombatManager.OnAssistedHighlightSpellChange", function()
-            local ok, nextSpell = pcall(C_AssistedCombat.GetNextCastSpell, true)
-            if not (ok and nextSpell) then return end
-            -- nil events intentionally ignored — keep last valid highlight.
+        EventRegistry:RegisterCallback("AssistedCombatManager.OnAssistedHighlightSpellChange", function(_, ...)
             -- Dedupe: under soft targeting this event fires every Blizzard
-            -- OnUpdate frame with the same spell, contributing to the
-            -- script-time-limit watchdog.  Skip if the recommendation hasn't
-            -- changed since the last dirty-flag flip.
+            -- OnUpdate frame, contributing to the script-time-limit watchdog.
+            -- Prefer the event's own spell arg and only fall back to
+            -- GetNextCastSpell when it's missing — an unconditional pcall
+            -- into C every frame accumulates enough script time to trip
+            -- the watchdog inside Blizzard's TriggerEvent call chain.
+            local nextSpell = select(1, ...)
+            if not nextSpell then
+                local ok, s = pcall(C_AssistedCombat.GetNextCastSpell, true)
+                if ok then nextSpell = s end
+            end
+            -- nil events intentionally ignored — keep last valid highlight.
+            if not nextSpell then return end
             if nextSpell == ActionBarsOwned._lastAssistHighlightSpell then return end
             ActionBarsOwned._lastAssistHighlightSpell = nextSpell
             abUpdateFrame._dirtyAssistHighlight = true
