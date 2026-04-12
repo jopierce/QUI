@@ -148,142 +148,10 @@ local function ScanUnitAuras(unit)
     return cache
 end
 
--- Incremental aura update: apply add/remove/update deltas from updateInfo
--- instead of a full rescan.  Falls back to full scan if incremental fails.
--- Pre-allocated scratch table for removal set (avoids per-event allocation)
-local _scratchRemoveSet = {}
-
--- Returns (cache, changed, setChanged).
---   changed    = any delta was applied (add/remove/update)
---   setChanged = the aura instance-ID set changed (add or remove)
--- Pure stack/duration updates do NOT set setChanged — the dispel overlay,
--- defensive indicator, aura indicators, and pinned auras all key off the
--- presence of specific instance IDs, so they can skip work when only existing
--- auras updated in place. This is the big raid-perf win.
-local function IncrementalUpdateAuras(unit, updateInfo)
-    local cache = unitAuraCache[unit]
-    if not cache then
-        return ScanUnitAuras(unit), true, true
-    end
-
-    if not C_UnitAuras or not C_UnitAuras.GetAuraDataByAuraInstanceID then
-        return ScanUnitAuras(unit), true, true
-    end
-
-    local changed = false
-    local setChanged = false
-    local dispellable = cache.playerDispellable
-    local defensives = cache.defensives
-
-    -- 1. Remove auras (in-place compaction — zero allocation)
-    if updateInfo.removedAuraInstanceIDs then
-        wipe(_scratchRemoveSet)
-        for _, instID in ipairs(updateInfo.removedAuraInstanceIDs) do
-            _scratchRemoveSet[instID] = true
-            -- Evict from the scan-time classification sets; cheap nil-writes.
-            if dispellable then dispellable[instID] = nil end
-            if defensives then defensives[instID] = nil end
-        end
-        -- Compact harmful in-place
-        local src = cache.harmful
-        local j = 0
-        for i = 1, #src do
-            if _scratchRemoveSet[src[i].auraInstanceID] then
-                changed = true
-                setChanged = true
-            else
-                j = j + 1
-                src[j] = src[i]
-            end
-        end
-        for i = j + 1, #src do src[i] = nil end
-        -- Compact helpful in-place
-        src = cache.helpful
-        j = 0
-        for i = 1, #src do
-            if _scratchRemoveSet[src[i].auraInstanceID] then
-                changed = true
-                setChanged = true
-            else
-                j = j + 1
-                src[j] = src[i]
-            end
-        end
-        for i = j + 1, #src do src[i] = nil end
-    end
-
-    -- 2. Update existing auras (stacks, duration changes)
-    if updateInfo.updatedAuraInstanceIDs then
-        for _, instID in ipairs(updateInfo.updatedAuraInstanceIDs) do
-            local ok, newData = pcall(C_UnitAuras.GetAuraDataByAuraInstanceID, unit, instID)
-            if ok and newData then
-                local list = newData.isHarmful and cache.harmful or cache.helpful
-                local found = false
-                for i = 1, #list do
-                    if list[i].auraInstanceID == instID then
-                        list[i] = newData
-                        found = true
-                        changed = true
-                        break
-                    end
-                end
-                if not found then
-                    -- Aura switched filter bucket — that's a set change.
-                    list[#list + 1] = newData
-                    changed = true
-                    setChanged = true
-                    -- Reclassify for the bucket it landed in. Stale entries
-                    -- in the opposite bucket get evicted on the next remove.
-                    if newData.isHarmful then
-                        if dispellable then
-                            if ClassifyDispellable(unit, instID) then
-                                dispellable[instID] = true
-                            end
-                        end
-                    else
-                        if defensives and ClassifyDefensive(unit, newData) then
-                            defensives[instID] = true
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    -- 3. Add new auras
-    if updateInfo.addedAuras then
-        for _, ad in ipairs(updateInfo.addedAuras) do
-            if ad.isHarmful then
-                cache.harmful[#cache.harmful + 1] = ad
-                -- Classify once at add time for scan-time dispel set.
-                if dispellable then
-                    local instID = ad.auraInstanceID
-                    if instID then
-                        local classified = ClassifyDispellable(unit, instID)
-                        if classified == true then
-                            dispellable[instID] = true
-                        elseif classified == nil and ad.dispelName and not IsSecretValue(ad.dispelName) then
-                            dispellable[instID] = true
-                        end
-                    end
-                end
-            else
-                cache.helpful[#cache.helpful + 1] = ad
-                -- Classify once at add time for scan-time defensive set.
-                if defensives then
-                    local instID = ad.auraInstanceID
-                    if instID and ClassifyDefensive(unit, ad) then
-                        defensives[instID] = true
-                    end
-                end
-            end
-            changed = true
-            setChanged = true
-        end
-    end
-
-    return cache, changed, setChanged
-end
+-- (IncrementalUpdateAuras removed: always full-scan via ScanUnitAuras.
+-- Eliminates hundreds of GetAuraDataByAuraInstanceID calls per second in raids
+-- that each allocate a fresh ~600-byte Blizzard table, overwhelming the GC.
+-- Full scan uses GetUnitAuras which returns one bulk table per filter type.)
 
 -- Evict stale cache entries for units no longer in the group.
 -- Called on GROUP_ROSTER_UPDATE from the centralized event dispatcher.
@@ -302,7 +170,10 @@ QUI_GFA.unitAuraCache = unitAuraCache
 QUI_GFA.ScanUnitAuras = ScanUnitAuras
 QUI_GFA.PruneAuraCache = PruneAuraCache
 
--- (Table pool removed: was pre-allocated with 60 tables but never used)
+-- Table reuse: unitAuraCache[unit] sub-tables (helpful, harmful, etc.) are
+-- created once per unit and wiped+refilled on each scan. Blizzard's auraData
+-- tables from GetUnitAuras are C-side allocated and can't be pooled, but the
+-- bulk-return pattern (one table per filter type) minimizes Lua-side garbage.
 
 ---------------------------------------------------------------------------
 -- SHARED AURA TIMER: Single animation drives all icon duration updates
@@ -401,13 +272,18 @@ local function SharedTimerOnUpdate(self, dt)
                             icon.durationText:SetText(FormatDuration(remaining))
                             state._lastBucket = bucket
                         end
+                        -- Color: throttled to 1 Hz per icon (expensive in raids)
                         local showDurationColor = not auraSettings or auraSettings.showDurationColor ~= false
                         if showDurationColor then
-                            local band = ComputeColorBand(remaining, dur)
-                            if band ~= state._lastColorBand then
-                                local r, g, b = GetDurationColor(remaining, dur)
-                                icon.durationText:SetTextColor(r, g, b, 1)
-                                state._lastColorBand = band
+                            local lastColorTime = state._lastColorTime or 0
+                            if (now - lastColorTime) >= 1.0 then
+                                state._lastColorTime = now
+                                local band = ComputeColorBand(remaining, dur)
+                                if band ~= state._lastColorBand then
+                                    local r, g, b = GetDurationColor(remaining, dur)
+                                    icon.durationText:SetTextColor(r, g, b, 1)
+                                    state._lastColorBand = band
+                                end
                             end
                         elseif state._lastColorBand ~= 0 then
                             icon.durationText:SetTextColor(1, 1, 1, 1)
@@ -606,32 +482,20 @@ local function UpdateAuraIcon(icon, auraData, unit)
         return
     end
 
-    local state = auraIconState[icon]
+    -- Reuse icon-level state table (created once, fields overwritten).
+    -- Avoids per-icon table creation and keeps state off Blizzard frames (taint safety).
+    local state = icon._auraState
     if not state then
         state = {}
-        auraIconState[icon] = state
+        icon._auraState = state
+        auraIconState[icon] = state  -- register for tooltip lookups
     end
 
-    -- Re-fetch individual aura data when bulk-scan returned secret values,
-    -- OR when this icon is transitioning to a new aura instance (previous
-    -- state was for a different auraInstanceID or none). The transition case
-    -- matters because the pure-update dispatcher skip (in the subscriber)
-    -- may leave cache entries with stale expirationTime/duration; refetching
-    -- here ensures state.expirationTime is fresh when the icon takes over a
-    -- new aura via the set-change/sort path.
+    -- Cache always has fresh data from full ScanUnitAuras — no refetch needed.
     local auraID = auraData.auraInstanceID
     local displayData = auraData
-    local isNewForIcon = state.auraInstanceID ~= auraID
-    if auraID and not IsSecretValue(auraID) and C_UnitAuras and C_UnitAuras.GetAuraDataByAuraInstanceID then
-        if isNewForIcon or IsSecretValue(auraData.icon) or IsSecretValue(auraData.duration) then
-            local ok, freshData = pcall(C_UnitAuras.GetAuraDataByAuraInstanceID, unit, auraID)
-            if ok and freshData then
-                displayData = freshData
-            end
-        end
-    end
 
-    -- Store data in side-table (NOT on frame — taint safety)
+    -- Overwrite state fields (zero allocation)
     state.unit = unit
     state.auraInstanceID = auraID
     state.expirationTime = displayData.expirationTime
@@ -765,10 +629,10 @@ local DEBUFF_CLASSIFICATION_MAP = {
 local filterCaches = { party = {}, raid = {} }
 local cachedFilterVersion = -1
 
--- Classification result cache: auraInstanceID → filterStr → true/false
--- Aura classification is immutable for a given auraInstanceID, so results
--- never go stale. Wipe on filter settings change (layout version bump).
-local _classificationCache = {}
+-- (Per-auraInstanceID classification cache removed: grew unboundedly during
+-- long encounters. Now classify inline during each full scan — same approach
+-- as reference addons. Cost is minimal since full scans only run once per
+-- unit per coalesce tick, and IsAuraFilteredOutByInstanceID is C-side.)
 
 local function InitFilterCache()
     return {
@@ -831,7 +695,6 @@ local function RebuildFilterCacheForContext(cache, auraSettings)
 end
 
 local function RebuildFilterCache()
-    wipe(_classificationCache)
     local db = GetDB()
     if not db then return end
 
@@ -867,9 +730,11 @@ local function AuraPassesSpellFilter(auraData, whitelist, blacklist)
     return true
 end
 
--- Check if an aura passes classification filter (OR logic).
+-- Check if an aura passes classification filter (OR logic, inline query).
 -- Returns true if aura should be shown.
 -- Fail-open: if API fails or returns secret, show the aura.
+-- No per-auraInstanceID caching — classify inline during each scan.
+-- IsAuraFilteredOutByInstanceID is C-side and fast.
 local function AuraPassesFilter(unit, auraInstanceID, filterStrings)
     if not filterStrings or #filterStrings == 0 then
         return false
@@ -883,32 +748,15 @@ local function AuraPassesFilter(unit, auraInstanceID, filterStrings)
         return true
     end
 
-    -- Check cache first: classification is immutable per auraInstanceID
-    local cached = _classificationCache[auraInstanceID]
-
     for _, filterStr in ipairs(filterStrings) do
-        local result
-        if cached then
-            result = cached[filterStr]
+        local ok, filteredOut = pcall(C_UnitAuras.IsAuraFilteredOutByInstanceID, unit, auraInstanceID, filterStr)
+        if not ok then
+            return true -- fail-open on error
         end
-        if result == nil then
-            -- Cache miss: query the C-side API
-            local ok, filteredOut = pcall(C_UnitAuras.IsAuraFilteredOutByInstanceID, unit, auraInstanceID, filterStr)
-            if not ok then
-                return true -- fail-open on error
-            end
-            if IsSecretValue(filteredOut) then
-                return true -- fail-open on secret
-            end
-            result = not filteredOut
-            -- Store in cache
-            if not cached then
-                cached = {}
-                _classificationCache[auraInstanceID] = cached
-            end
-            cached[filterStr] = result
+        if IsSecretValue(filteredOut) then
+            return true -- fail-open on secret
         end
-        if result then
+        if not filteredOut then
             return true -- aura matches this classification
         end
     end
@@ -946,68 +794,9 @@ end
 ---------------------------------------------------------------------------
 -- UPDATE: Auras for a single frame
 ---------------------------------------------------------------------------
----------------------------------------------------------------------------
--- DELTA-AWARE ICON REFRESH: When only stacks/durations changed (no auras
--- added or removed), the filtered+sorted display set is identical. Skip
--- the full filter → sort → render pipeline and just re-call UpdateAuraIcon
--- on the visible icons whose auraInstanceID is in updatedAuraInstanceIDs.
--- This is the dominant path in raids (DoT ticks, HoT refreshes, etc.).
----------------------------------------------------------------------------
-local _updateSet = {}  -- scratch set, wipe-reuse
-
-local function RefreshUpdatedIcons(frame, unit, updateInfo)
-    if not updateInfo or not updateInfo.updatedAuraInstanceIDs then return end
-    local updated = updateInfo.updatedAuraInstanceIDs
-    if #updated == 0 then return end
-
-    -- Build a set for O(1) lookup
-    wipe(_updateSet)
-    for _, instID in ipairs(updated) do
-        _updateSet[instID] = true
-    end
-
-    -- Refresh visible debuff icons whose displayed instance ID was updated
-    if frame.debuffIcons then
-        for _, icon in ipairs(frame.debuffIcons) do
-            if not icon:IsShown() then break end  -- pool is contiguous
-            local state = auraIconState[icon]
-            local instID = state and state.auraInstanceID
-            if instID and _updateSet[instID] then
-                -- Re-fetch fresh aura data from the cache (was just updated
-                -- by IncrementalUpdateAuras) and push it to the icon.
-                local cache = unitAuraCache[unit]
-                if cache and cache.harmful then
-                    for i = 1, #cache.harmful do
-                        if cache.harmful[i].auraInstanceID == instID then
-                            UpdateAuraIcon(icon, cache.harmful[i], unit)
-                            break
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    -- Refresh visible buff icons
-    if frame.buffIcons then
-        for _, icon in ipairs(frame.buffIcons) do
-            if not icon:IsShown() then break end
-            local state = auraIconState[icon]
-            local instID = state and state.auraInstanceID
-            if instID and _updateSet[instID] then
-                local cache = unitAuraCache[unit]
-                if cache and cache.helpful then
-                    for i = 1, #cache.helpful do
-                        if cache.helpful[i].auraInstanceID == instID then
-                            UpdateAuraIcon(icon, cache.helpful[i], unit)
-                            break
-                        end
-                    end
-                end
-            end
-        end
-    end
-end
+-- (RefreshUpdatedIcons / delta-aware icon refresh removed: always full-scan
+-- now, so every dispatch does ScanUnitAuras → UpdateFrameAuras. Simpler,
+-- and avoids the per-aura GetAuraDataByAuraInstanceID allocation overhead.)
 
 local sortedAuras = {} -- Reusable sort table
 
@@ -1228,21 +1017,9 @@ local function UpdateFrameAuras(frame)
                 if onlyMine and not dominated then
                     local instID = auraData.auraInstanceID
                     if C_UnitAuras.IsAuraFilteredOutByInstanceID and instID and not IsSecretValue(instID) then
-                        -- Check classification cache first (same cache as AuraPassesFilter)
-                        local cached = _classificationCache[instID]
-                        local filteredOut = cached and cached["HELPFUL|PLAYER"]
-                        if filteredOut == nil then
-                            local ok, fo = pcall(C_UnitAuras.IsAuraFilteredOutByInstanceID, unit, instID, "HELPFUL|PLAYER")
-                            if ok and not IsSecretValue(fo) then
-                                filteredOut = fo
-                                if not cached then
-                                    cached = {}
-                                    _classificationCache[instID] = cached
-                                end
-                                cached["HELPFUL|PLAYER"] = filteredOut
-                            end
-                        end
-                        if filteredOut then
+                        -- Inline query — no per-ID caching (same approach as AuraPassesFilter)
+                        local ok, fo = pcall(C_UnitAuras.IsAuraFilteredOutByInstanceID, unit, instID, "HELPFUL|PLAYER")
+                        if ok and not IsSecretValue(fo) and fo then
                             dominated = true
                         end
                     elseif not IsSecretValue(auraData.isFromPlayerOrPlayerPet) then
@@ -1369,9 +1146,9 @@ local function FixAllIconMouse()
     pendingMouseFix = false
 end
 
--- (FlushPendingAuras removed: aura processing now happens inline in the
--- dispatcher callback, eliminating double coalescing and using the changed
--- flag from IncrementalUpdateAuras to skip work when nothing changed)
+-- (FlushPendingAuras removed: aura processing is inline in the dispatcher.
+-- IncrementalUpdateAuras also removed: always full-scan now for simplicity
+-- and to avoid per-aura GetAuraDataByAuraInstanceID table allocations.)
 
 -- PLAYER_REGEN_ENABLED handler (mouse fix deferred from combat)
 local regenFrame = CreateFrame("Frame")
@@ -1381,109 +1158,30 @@ regenFrame:SetScript("OnEvent", function(self, event)
 end)
 
 -- Subscribe to centralized aura dispatcher for group frame aura updates.
--- Process inline: the dispatcher already coalesces all UNIT_AURA events within
--- one render frame into a single callback per unit. No need for a second
--- coalescing layer (which added 33ms latency at 60fps for zero benefit).
+-- Always full-scan: ignores updateInfo deltas entirely. GetUnitAuras returns
+-- one bulk table per filter type (zero per-aura allocation). This is simpler
+-- and avoids the GetAuraDataByAuraInstanceID calls that created hundreds of
+-- ~600-byte Blizzard tables per second in raids, overwhelming the GC.
 if ns.AuraEvents then
-    ns.AuraEvents:Subscribe("roster", function(unit, updateInfo)
+    ns.AuraEvents:Subscribe("roster", function(unit)
         local GF = ns.QUI_GroupFrames
         if not GF or not GF.initialized then return end
 
         local frame = GF.unitFrameMap[unit]
         if not frame or not frame:IsShown() then return end
 
-        -- Fast path for pure stack/duration updates (the dominant raid path):
-        -- before doing any cache work or C calls, check whether any visible
-        -- icon on this frame actually displays one of the updated auras. If
-        -- none do, the update cannot affect any pixel — skip the whole
-        -- subscriber. The cache entries for the non-visible auras stay at
-        -- their previous values, which is fine: UpdateAuraIcon re-fetches
-        -- on first-display transitions (see isNewForIcon branch there).
-        if type(updateInfo) == "table"
-            and not updateInfo.isFullUpdate
-            and not updateInfo.addedAuras
-            and not updateInfo.removedAuraInstanceIDs
-            and updateInfo.updatedAuraInstanceIDs
-            and unitAuraCache[unit]
-        then
-            local updated = updateInfo.updatedAuraInstanceIDs
-            local n = #updated
-            if n == 0 then return end
-            wipe(_updateSet)
-            for i = 1, n do _updateSet[updated[i]] = true end
+        -- Full scan: wipe + rebuild cache from GetUnitAuras (2 C-side calls)
+        ScanUnitAuras(unit)
 
-            local hasVisible = false
-            if frame.debuffIcons then
-                for i = 1, #frame.debuffIcons do
-                    local icon = frame.debuffIcons[i]
-                    if not icon:IsShown() then break end
-                    local st = auraIconState[icon]
-                    if st and st.auraInstanceID and _updateSet[st.auraInstanceID] then
-                        hasVisible = true
-                        break
-                    end
-                end
-            end
-            if not hasVisible and frame.buffIcons then
-                for i = 1, #frame.buffIcons do
-                    local icon = frame.buffIcons[i]
-                    if not icon:IsShown() then break end
-                    local st = auraIconState[icon]
-                    if st and st.auraInstanceID and _updateSet[st.auraInstanceID] then
-                        hasVisible = true
-                        break
-                    end
-                end
-            end
-
-            if not hasVisible then return end
-        end
-
-        -- Try incremental update if updateInfo has delta data.
-        -- Falls back to full scan when: updateInfo is nil, full update requested,
-        -- or incremental fails.
-        local changed = true      -- anything at all changed
-        local setChanged = true   -- the aura instance-ID set changed (add/remove)
-        local useIncremental = type(updateInfo) == "table"
-            and not updateInfo.isFullUpdate
-            and unitAuraCache[unit]  -- must have existing cache
-        if useIncremental then
-            local ok, _cache, delta, delta2 = pcall(IncrementalUpdateAuras, unit, updateInfo)
-            if ok then
-                changed = delta
-                setChanged = delta2
-            else
-                ScanUnitAuras(unit)
-            end
-        else
-            ScanUnitAuras(unit)
-        end
-
-        -- Skip full render pipeline when incremental update reports no changes.
-        if not changed then return end
-
-        -- The dispel overlay, defensive indicator, aura indicators, and pinned
-        -- auras all key off *presence* of specific instance IDs. If the set
-        -- didn't change (pure stack/duration updates, which are the dominant
-        -- case in raids — DoT refreshes, stacking bleeds), none of them can
-        -- have different output. Skip the full scan pass and only refresh the
-        -- icons that might need new stack text / timers.
-        if setChanged then
-            -- Defensives + indicators first so buff dedup set is populated
-            if GF.UpdateDispelOverlay then GF:UpdateDispelOverlay(frame) end
-            if GF.UpdateDefensiveIndicator then GF:UpdateDefensiveIndicator(frame) end
-            local GFI = ns.QUI_GroupFrameIndicators
-            if GFI and GFI.RefreshFrame then GFI:RefreshFrame(frame) end
-            local GFP = ns.QUI_GroupFramePinnedAuras
-            if GFP and GFP.RefreshFrame then GFP:RefreshFrame(frame) end
-            -- Full filter → sort → render: the display set may have changed.
-            UpdateFrameAuras(frame)
-        else
-            -- Pure stack/duration update — the display set is identical.
-            -- Only refresh the specific icons whose instance IDs were
-            -- updated, skipping the entire filter/sort/collect pipeline.
-            RefreshUpdatedIcons(frame, unit, updateInfo)
-        end
+        -- Update all consumers: dispel overlay, defensive indicator,
+        -- aura indicators, pinned auras, and icon display.
+        if GF.UpdateDispelOverlay then GF:UpdateDispelOverlay(frame) end
+        if GF.UpdateDefensiveIndicator then GF:UpdateDefensiveIndicator(frame) end
+        local GFI = ns.QUI_GroupFrameIndicators
+        if GFI and GFI.RefreshFrame then GFI:RefreshFrame(frame) end
+        local GFP = ns.QUI_GroupFramePinnedAuras
+        if GFP and GFP.RefreshFrame then GFP:RefreshFrame(frame) end
+        UpdateFrameAuras(frame)
     end)
 end
 
@@ -1492,7 +1190,6 @@ end
 ---------------------------------------------------------------------------
 function QUI_GFA:InvalidateLayout()
     layoutVersion = layoutVersion + 1
-    wipe(_classificationCache)
     _cachedFontPath = nil  -- force re-fetch on next access
     -- Refresh cached setting for shared timer
     local db = GetDB()
