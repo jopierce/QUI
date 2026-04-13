@@ -876,6 +876,19 @@ local function HookBlizzTexture(icon, blizzChild)
             -- Skip when the icon has a resolved desired texture — the Blizzard
             -- child may use a different icon (e.g., debuff instead of ability).
             if quiIcon._desiredTexture then return end
+            -- Block debuff texture bleed on non-aura cooldown entries.
+            -- When an ability applies a DOT (e.g. Outbreak → Dread Plague),
+            -- Blizzard sets wasSetFromAura on the viewer child and updates
+            -- the Icon texture to the debuff icon.  For non-aura cooldown
+            -- entries (essential/utility), block this — the user wants the
+            -- ability icon, not the debuff icon.  For aura entries and spell
+            -- override transitions (wasSetFromAura = false), forward normally.
+            if tEntry and not tEntry.isAura and tEntry._blizzChild then
+                local child = tEntry._blizzChild
+                if type(child.wasSetFromAura) == "boolean" and child.wasSetFromAura then
+                    return
+                end
+            end
             if quiIcon.Icon and texture then
                 -- Detect spell override transitions (e.g., Wake of Ashes →
                 -- Hammer of Light).  When texture changes, the spell has
@@ -2061,6 +2074,8 @@ local function UpdateIconCooldown(icon)
                 -- child's dynamic texture changes (e.g. Glacial Spike ↔
                 -- Frostbolt).  C_Spell.GetSpellInfo never reflects these.
                 -- For custom entries (no blizzChild), resolve explicitly.
+                -- Note: debuff texture bleed (e.g. Outbreak → Dread Plague)
+                -- is handled by the wasSetFromAura guard in HookBlizzTexture.
                 if icon.Icon and entry._blizzChild then
                     icon._desiredTexture = nil
                 elseif icon.Icon then

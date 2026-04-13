@@ -3041,6 +3041,56 @@ function CDMSpellData:GetActiveAuras(filter)
     return result
 end
 
+---------------------------------------------------------------------------
+-- GetPassiveAuras — returns passive spells from class/spec spellbook tabs
+-- (skips General). These are talent-granted passives that may produce
+-- visible player buffs trackable in aura containers.
+---------------------------------------------------------------------------
+function CDMSpellData:GetPassiveAuras()
+    local result = {}
+    local seen = {}
+
+    if not (C_SpellBook and C_SpellBook.GetNumSpellBookSkillLines) then
+        return result
+    end
+
+    local okTabs, numTabs = pcall(C_SpellBook.GetNumSpellBookSkillLines)
+    if not okTabs or not numTabs then return result end
+
+    for tab = 1, numTabs do
+        local okLine, skillLineInfo = pcall(C_SpellBook.GetSpellBookSkillLineInfo, tab)
+        if okLine and skillLineInfo and skillLineInfo.name ~= GENERAL then
+            local offset = skillLineInfo.itemIndexOffset or 0
+            local numEntries = skillLineInfo.numSpellBookItems or 0
+            for i = 1, numEntries do
+                local slotIndex = offset + i
+                local okItem, itemInfo = pcall(C_SpellBook.GetSpellBookItemInfo, slotIndex, Enum.SpellBookSpellBank.Player)
+                if okItem and itemInfo and itemInfo.spellID and itemInfo.isPassive and not itemInfo.isOffSpec then
+                    local sid = itemInfo.spellID
+                    if not seen[sid] then
+                        seen[sid] = true
+                        local name, icon
+                        if C_Spell and C_Spell.GetSpellInfo then
+                            local okI, spellInfo = pcall(C_Spell.GetSpellInfo, sid)
+                            if okI and spellInfo then
+                                name = spellInfo.name
+                                icon = spellInfo.iconID
+                            end
+                        end
+                        result[#result + 1] = {
+                            spellID = sid,
+                            name = name or "",
+                            icon = icon or 0,
+                        }
+                    end
+                end
+            end
+        end
+    end
+
+    return result
+end
+
 function CDMSpellData:GetUsableItems()
     local result = {}
 
