@@ -303,7 +303,7 @@ local function SyncHeaderAttributes(header, settings, prefix)
     -- icon size directly into the snippet — updated each time SyncHeaderAttributes
     -- runs (out of combat). During combat, new children use the last-set size.
     header:SetAttribute("initialConfigFunction",
-        ("self:SetWidth(%d) self:SetHeight(%d) self:RegisterForClicks('RightButtonUp')"):format(iconSize, iconSize)
+        ("self:SetWidth(%d) self:SetHeight(%d)"):format(iconSize, iconSize)
     )
 end
 
@@ -347,6 +347,12 @@ local function StyleHeaderChildren(header, settings, isBuff)
         child._auraInstanceID = data.auraInstanceID
         child._spellId = data.spellId
         child._filter = filter
+
+        -- Register right-click for buff cancellation (protected, out-of-combat only)
+        if not child._quiClickRegistered and not InCombatLockdown() then
+            child._quiClickRegistered = true
+            child:RegisterForClicks("RightButtonUp")
+        end
 
         -- Tooltip handlers (set once, check flag)
         if not child._quiTooltipHooked then
@@ -420,16 +426,16 @@ local function StyleHeaderChildren(header, settings, isBuff)
         end
 
         -- Stacks (data.applications holds the stack count)
-        if child.Stacks then
-            local stacks = data.applications
-            if settings.showStacks ~= false and stacks and not IsSecretValue(stacks) and stacks > 1 then
-                pcall(child.Stacks.SetText, child.Stacks, tostring(stacks))
-                pcall(child.Stacks.Show, child.Stacks)
-            else
-                pcall(child.Stacks.SetText, child.Stacks, "")
-                pcall(child.Stacks.Hide, child.Stacks)
-            end
+        -- Lazily create the Stacks FontString on header children (secure
+        -- aura header does not provide one — only preview icons have it).
+        if not child.Stacks then
+            child.Stacks = child:CreateFontString(nil, "OVERLAY")
+            child.Stacks:SetText("")
+            child.Stacks:Hide()
         end
+        pcall(child.Stacks.SetText, child.Stacks,
+            C_StringUtil.TruncateWhenZero(data.applications))
+        pcall(child.Stacks.Show, child.Stacks)
 
         -- Borders (via StyleIcon — reuse existing function)
         StyleIcon(child, settings, isBuff, data.dispelName)
