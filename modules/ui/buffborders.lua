@@ -230,7 +230,7 @@ local function CreateHeader(name, filter)
     header:SetAttribute("template", "QUIAuraIconTemplate")
     header:SetAttribute("minWidth", 1)
     header:SetAttribute("minHeight", 1)
-    header:SetAttribute("sortMethod", "TIME")
+    header:SetAttribute("sortMethod", "INDEX")
     header:SetAttribute("sortDirection", "+")
     if filter == "HELPFUL" then
         header:SetAttribute("includeWeapons", 1)
