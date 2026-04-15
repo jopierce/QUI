@@ -1220,10 +1220,23 @@ local function CreateIcon(parent, spellEntry)
         else
             texID = GetSpellTexture(spellEntry.overrideSpellID or spellEntry.spellID)
         end
+        -- Aura entries: try the child's linkedSpellIDs for the actual buff
+        -- icon (e.g., Roll the Bones → Broadside). The tick update also
+        -- resolves this, but setting it at init avoids a 1-frame flash.
+        if spellEntry.isAura and spellEntry._blizzChild then
+            local ci = spellEntry._blizzChild.cooldownInfo
+            if ci and ci.linkedSpellIDs then
+                local lsid = SafeValue(ci.linkedSpellIDs[1], nil)
+                if lsid and lsid > 0 then
+                    local linkedTex = GetSpellTexture(lsid)
+                    if linkedTex then texID = linkedTex end
+                end
+            end
+        end
         if texID then
             icon.Icon:SetTexture(texID)
-            -- Only lock texture for cooldown entries — aura icons rely on the
-            -- Blizzard texture hook for the correct aura icon.
+            -- Only lock texture for cooldown entries — aura icons rely on
+            -- the tick update + Blizzard texture hook for dynamic changes.
             if not spellEntry.isAura then
                 icon._desiredTexture = texID
             end
@@ -1903,15 +1916,35 @@ local function UpdateIconCooldown(icon)
                             end
                         end
 
-                        -- Keep texture showing the tracked aura spell
+                        -- Keep texture showing the active aura buff.
+                        -- Roll the Bones (etc.) cycles between different
+                        -- buff spells — resolve the actual buff icon from
+                        -- auraData or the child's linkedSpellIDs, not the
+                        -- base ability icon.
                         if icon.Icon then
-                            local texSpellID = auraSpellID
-                            if texSpellID then
-                                local texID = GetSpellTexture(texSpellID)
-                                if texID and texID ~= icon._lastTexture then
-                                    icon.Icon:SetTexture(texID)
-                                    icon._lastTexture = texID
+                            local texID
+                            -- 1. auraData.icon — the live buff's texture
+                            if r.auraData then
+                                local aIcon = SafeValue(r.auraData.icon, nil)
+                                if aIcon and aIcon ~= 0 then texID = aIcon end
+                            end
+                            -- 2. Blizzard child linkedSpellIDs (like bars)
+                            if not texID and entry._blizzChild then
+                                local ci = entry._blizzChild.cooldownInfo
+                                if ci and ci.linkedSpellIDs then
+                                    local lsid = SafeValue(ci.linkedSpellIDs[1], nil)
+                                    if lsid and lsid > 0 then
+                                        texID = GetSpellTexture(lsid)
+                                    end
                                 end
+                            end
+                            -- 3. Fallback: base aura spell texture
+                            if not texID then
+                                texID = GetSpellTexture(auraSpellID)
+                            end
+                            if texID and texID ~= icon._lastTexture then
+                                icon.Icon:SetTexture(texID)
+                                icon._lastTexture = texID
                             end
                         end
 

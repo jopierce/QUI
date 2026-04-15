@@ -3977,16 +3977,7 @@ end
 
 local assistedHighlightButtons = {}  -- set of buttons currently highlighted (button → true)
 local _assistHighlightScratch = {}   -- reusable scratch table to avoid per-frame allocation
-local ASSISTED_HIGHLIGHT_KEY = "QUI_AssistedCombat"
-local ASSISTED_HIGHLIGHT_FALLBACK = { 1, 1, 1, 0.8 }
-
-local function GetAssistedHighlightSettings()
-    local core = ns.Addon
-    if core and core.db and core.db.profile and core.db.profile.ncdm then
-        return core.db.profile.ncdm.cooldownHighlighter
-    end
-    return nil
-end
+local ASSISTED_HIGHLIGHT_COLOR = { 0.2, 0.82, 0.6, 1 }  -- Teal/mint, matches QUI accent
 
 local function SetAssistedHighlightShown(button, show)
     if not LCG then return end
@@ -3994,16 +3985,11 @@ local function SetAssistedHighlightShown(button, show)
     if show then
         if state.quiAssistedHighlight then return end
         state.quiAssistedHighlight = true
-        local hl = GetAssistedHighlightSettings()
-        local color = (hl and hl.color) or ASSISTED_HIGHLIGHT_FALLBACK
-        local lines = (hl and hl.lines) or 8
-        local freq = (hl and hl.frequency) or 0.25
-        local thick = (hl and hl.thickness) or 1
-        LCG.PixelGlow_Start(button, color, lines, freq, nil, thick, 0, 0, false, ASSISTED_HIGHLIGHT_KEY)
+        LCG.ButtonGlow_Start(button, ASSISTED_HIGHLIGHT_COLOR)
     else
         if not state.quiAssistedHighlight then return end
         state.quiAssistedHighlight = false
-        LCG.PixelGlow_Stop(button, ASSISTED_HIGHLIGHT_KEY)
+        LCG.ButtonGlow_Stop(button)
     end
 end
 
