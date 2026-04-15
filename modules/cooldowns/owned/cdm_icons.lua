@@ -128,7 +128,7 @@ local function ChargeDebug(spellName, ...)
     local tag = select(1, ...) or ""
     if tag == "FWD path:" or tag == "SKIP API path:" or tag == "API path:" or tag == "FWD path CLEAR:"
         or tag == "DESAT GCD bail:" or tag == "DESAT charged check:" or tag == "DESAT result:"
-        or tag == "MIRROR hook:" then
+        or tag == "MIRROR hook:" or tag == "AURA TICK stacks:" or tag == "TICK stacks:" then
         local key = (spellName or "") .. tag
         local now = GetTime()
         if _chargeDebugThrottle[key] and now - _chargeDebugThrottle[key] < 1 then return end
@@ -941,22 +941,17 @@ end
 --- to avoid overwriting the hook-driven values (our event handler runs
 --- after Blizzard's hooks, creating a race where the API path clears or
 --- sets stacks that the hook just populated correctly).
+---
+--- Uses frame visibility (chargeVisible/appVisible) rather than text
+--- content comparison.  Hook text values can be secret — comparing
+--- secrets always fails, making text-based checks permanently stuck.
+--- Frame Show/Hide state is a boolean, immune to secret value issues.
 local function IsHookStackActive(entry, icon)
     if not entry or not entry._blizzChild then return false end
     local bss = blizzStackState[entry._blizzChild]
     if not bss or bss.icon ~= icon then return false end
-    -- chargeText/appText may be secret values — pcall the comparison.
-    -- If comparison errors (secret), treat as non-empty (active).
-    -- Hooks now forward all text (including ""), so "" means stacks
-    -- are genuinely depleted — treat as inactive.
-    if bss.chargeText ~= nil then
-        local ok, eq = pcall(function() return bss.chargeText == "" end)
-        if not ok or not eq then return true end
-    end
-    if bss.appText ~= nil then
-        local ok, eq = pcall(function() return bss.appText == "" end)
-        if not ok or not eq then return true end
-    end
+    if bss.chargeVisible then return true end
+    if bss.appVisible then return true end
     return false
 end
 
@@ -995,12 +990,21 @@ local function HookBlizzStackText(icon, blizzChild)
             "Applications=", blizzChild.Applications and "exists" or "nil")
     end
 
+    -- Always (re-)seed visibility flags from current frame state.
+    -- On icon reassignment, chargeVisible/appVisible are cleared to nil
+    -- but state.hooked stays true — must seed outside the hooked block.
+    local chargeFrame = blizzChild.ChargeCount
+    local appFrame = blizzChild.Applications
+    -- Seed true if frame is currently shown, nil if hidden/missing.
+    -- nil = unknown (never explicitly hidden) — SetText hooks treat
+    -- this as "allow Show" so entries where Blizzard never toggles
+    -- ChargeCount visibility still display stacks via the hook.
+    -- The Hide hook sets false explicitly to block future Shows.
+    state.chargeVisible = (chargeFrame and chargeFrame:IsShown()) or nil
+    state.appVisible = (appFrame and appFrame:IsShown()) or nil
+
     if not state.hooked then
         state.hooked = true
-
-        -- Log what children exist on this blizzChild
-        local chargeFrame = blizzChild.ChargeCount
-        local appFrame = blizzChild.Applications
 
         -- Hook ChargeCount (e.g., charged spells, dynamic transforms like
         -- Mind Blast → Void Blast). Show/Hide forward directly to control
@@ -1013,6 +1017,7 @@ local function HookBlizzStackText(icon, blizzChild)
                 local entry = s.icon._spellEntry
                 if entry and entry._blizzChild ~= blizzChild then return end
                 if entry and entry.isAura then return end
+                s.chargeVisible = true
                 ChargeDebug(entry and entry.name, "HOOK ChargeCount.Show",
                     "spellID=", entry and entry.spellID, "overrideSpellID=", entry and entry.overrideSpellID)
                 s.icon.StackText:Show()
@@ -1022,9 +1027,7 @@ local function HookBlizzStackText(icon, blizzChild)
                 if not s or not s.icon then return end
                 local entry = s.icon._spellEntry
                 if entry and entry._blizzChild ~= blizzChild then return end
-                -- Clear cached chargeText — Blizzard may hide the frame
-                -- instead of calling SetText("") when stacks deplete.
-                -- Without this, IsHookStackActive stays true on stale data.
+                s.chargeVisible = false
                 s.chargeText = nil
                 ChargeDebug(entry and entry.name, "HOOK ChargeCount.Hide",
                     "spellID=", entry and entry.spellID, "overrideSpellID=", entry and entry.overrideSpellID)
@@ -1044,30 +1047,25 @@ local function HookBlizzStackText(icon, blizzChild)
                     local entry = s.icon._spellEntry
                     if entry and entry._blizzChild ~= blizzChild then return end
                     if entry and entry.isAura then return end
-                    -- Forward every SetText directly — no filtering.
-                    -- Blizzard is the source of truth; if it says "" then
-                    -- stacks are gone. Any same-frame "" → "6" sequence
-                    -- resolves before render (no visible flicker).
                     s.chargeText = text
-                    s.lastHookTime = GetTime()
                     ChargeDebug(entry and entry.name, "HOOK ChargeCount.SetText text=", text,
                         "hasCharges=", entry and entry.hasCharges,
+                        "chargeVis=", s.chargeVisible,
                         "spellID=", entry and entry.spellID, "overrideSpellID=", entry and entry.overrideSpellID,
                         "blizzChild match=", entry._blizzChild == blizzChild)
                     -- Non-charged entries (e.g., Spirit Bomb / Soul Fragments):
-                    -- forward ChargeCount text directly to StackText. Charged
-                    -- entries are driven by cooldownChargesCount via the FWD path.
+                    -- forward ChargeCount text directly to StackText and Show.
+                    -- The Hide hook handles clearing when ChargeCount is hidden.
+                    -- Charged entries are driven by cooldownChargesCount (FWD path).
                     if not (entry and entry.hasCharges) then
-                        pcall(s.icon.StackText.SetText, s.icon.StackText, text)
-                        -- Show/hide based on whether text has content.
-                        local isBlank = (text == nil)
-                        if not isBlank then
-                            local bok, beq = pcall(function() return text == "" end)
-                            isBlank = bok and beq
-                        end
-                        if isBlank then
-                            s.icon.StackText:Hide()
-                        else
+                        -- Blindly forward via TruncateWhenZero (C-side,
+                        -- resolves secrets, returns "" for zero).  pcall
+                        -- because TWZ requires a number — if text is
+                        -- already a string like "", fall back to raw text.
+                        local twzOk, twzVal = pcall(C_StringUtil.TruncateWhenZero, text)
+                        pcall(s.icon.StackText.SetText, s.icon.StackText,
+                            twzOk and twzVal or text)
+                        if s.chargeVisible ~= false then
                             s.icon.StackText:Show()
                         end
                     end
@@ -1083,6 +1081,10 @@ local function HookBlizzStackText(icon, blizzChild)
                 if not s or not s.icon then return end
                 local entry = s.icon._spellEntry
                 if entry and entry._blizzChild ~= blizzChild then return end
+                s.appVisible = true
+                ChargeDebug(entry and entry.name, "HOOK Applications.Show",
+                    "hasCharges=", entry and entry.hasCharges,
+                    "appText=", s.appText)
                 if entry and entry.hasCharges then return end
                 s.icon.StackText:Show()
             end)
@@ -1091,9 +1093,11 @@ local function HookBlizzStackText(icon, blizzChild)
                 if not s or not s.icon then return end
                 local entry = s.icon._spellEntry
                 if entry and entry._blizzChild ~= blizzChild then return end
-                -- Clear cached appText — Blizzard hides the frame
-                -- when stacks deplete instead of calling SetText("").
+                s.appVisible = false
                 s.appText = nil
+                ChargeDebug(entry and entry.name, "HOOK Applications.Hide",
+                    "hasCharges=", entry and entry.hasCharges,
+                    "appText was=", s.appText)
                 if entry and entry.hasCharges then return end
                 s.icon.StackText:SetText("")
                 s.icon.StackText:Hide()
@@ -1109,19 +1113,14 @@ local function HookBlizzStackText(icon, blizzChild)
                     -- stacks. Skip forwarding to prevent buff viewer
                     -- applications ("0") from overwriting charge count.
                     if entry and entry.hasCharges then return end
-                    -- Forward every SetText directly — no filtering.
-                    -- Blizzard is the source of truth for application stacks.
                     s.appText = text
-                    s.lastHookTime = GetTime()
-                    pcall(s.icon.StackText.SetText, s.icon.StackText, text)
-                    local isBlank = (text == nil)
-                    if not isBlank then
-                        local bok, beq = pcall(function() return text == "" end)
-                        isBlank = bok and beq
-                    end
-                    if isBlank then
-                        s.icon.StackText:Hide()
-                    else
+                    ChargeDebug(entry and entry.name, "HOOK Applications.SetText text=", text,
+                        "appVis=", s.appVisible,
+                        "hasCharges=", entry and entry.hasCharges)
+                    local twzOk, twzVal = pcall(C_StringUtil.TruncateWhenZero, text)
+                    pcall(s.icon.StackText.SetText, s.icon.StackText,
+                        twzOk and twzVal or text)
+                    if s.appVisible ~= false then
                         s.icon.StackText:Show()
                     end
                 end)
@@ -1916,6 +1915,14 @@ local function UpdateIconCooldown(icon)
                         -- combat — only use it as a fallback when hooks aren't
                         -- actively driving stack text for this icon.
                         local _auraHookActive = IsHookStackActive(entry, icon)
+                        local _bssDbg = entry._blizzChild and blizzStackState[entry._blizzChild]
+                        ChargeDebug(entry.name, "AURA TICK stacks:",
+                            "r.stacks=", r.stacks,
+                            "hookActive=", _auraHookActive,
+                            "chargeVis=", _bssDbg and _bssDbg.chargeVisible,
+                            "appVis=", _bssDbg and _bssDbg.appVisible,
+                            "hasCharges=", entry.hasCharges,
+                            "inCombat=", InCombatLockdown())
                         if not _auraHookActive then
                             if r.stacks then
                                 -- Charged abilities: "0" is meaningful (all
@@ -1971,13 +1978,11 @@ local function UpdateIconCooldown(icon)
                         icon._auraActive = false
                         if icon.Cooldown then icon.Cooldown:Clear() end
 
-                        -- Only clear stack text if the charge hook isn't driving.
-                        -- Dynamic charge spells (Mind Blast → Void Blast) have
-                        -- their StackText set by the ChargeCount.SetText hook.
-                        local _auraClearBss = entry._blizzChild and blizzStackState[entry._blizzChild]
-                        local _auraChargeHook = _auraClearBss and _auraClearBss.lastHookTime
-                            and (GetTime() - _auraClearBss.lastHookTime) < 2
-                        if not _auraChargeHook then
+                        -- Only clear stack text if the charge hook isn't
+                        -- actively driving.  Use IsHookStackActive (frame
+                        -- visibility) — lastHookTime is unreliable with
+                        -- secret values that can't be compared to "".
+                        if not IsHookStackActive(entry, icon) then
                             icon.StackText:SetText("")
                             icon.StackText:Hide()
                         end
@@ -2387,7 +2392,16 @@ local function UpdateIconCooldown(icon)
     -- hooks in the same frame — API writes would overwrite the correct
     -- hook-driven values, causing visible flicker every tick.
     local _hookActive = IsHookStackActive(entry, icon)
-
+    do
+        local _bssDbg = entry._blizzChild and blizzStackState[entry._blizzChild]
+        ChargeDebug(entry.name, "TICK stacks:",
+            "hookActive=", _hookActive,
+            "chargeVis=", _bssDbg and _bssDbg.chargeVisible,
+            "appVis=", _bssDbg and _bssDbg.appVisible,
+            "hasCharges=", entry.hasCharges,
+            "stackText=", icon.StackText and icon.StackText:GetText(),
+            "stackShown=", icon.StackText and icon.StackText:IsShown())
+    end
 
     -- Forward cooldownChargesCount from the Blizzard child every tick.
     -- Gate: GetSpellCharges on the base spell returns maxCharges > 1.

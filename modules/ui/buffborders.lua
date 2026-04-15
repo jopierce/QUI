@@ -25,6 +25,13 @@ local CreateFrame = CreateFrame
 local GetTime = GetTime
 local InCombatLockdown = InCombatLockdown
 
+-- Debug helper — gated behind /qui debug
+local function BBDebug(...)
+    if QUI and QUI.DEBUG_MODE and QUI.DebugPrint then
+        QUI:DebugPrint("|cffFFD700[BuffBorders]|r", ...)
+    end
+end
+
 -- Private aura API (WoW 10.1.0+)
 local AddPrivateAuraAnchor = C_UnitAuras and C_UnitAuras.AddPrivateAuraAnchor
 local RemovePrivateAuraAnchor = C_UnitAuras and C_UnitAuras.RemovePrivateAuraAnchor
@@ -237,11 +244,6 @@ local function CreateHeader(name, filter)
         header:SetAttribute("weaponTemplate", "QUIAuraIconTemplate")
     end
 
-    -- Ensure QUI headers sit above banished Blizzard frames whose secure
-    -- children may retain EnableMouse(true) during combat.
-    header:SetFrameStrata("MEDIUM")
-    header:SetFrameLevel(50)
-
     -- Fade support
     header._fadeEnabled = false
     header:EnableMouse(true)
@@ -353,11 +355,34 @@ local function StyleHeaderChildren(header, settings, isBuff)
         child._spellId = data.spellId
         child._filter = filter
 
-        -- Register right-click for buff cancellation (protected, out-of-combat only).
-        -- Re-register every pass — the XML template sets this at creation time but
-        -- external code or secure header recycling can clear the registration.
-        if not InCombatLockdown() then
+        -- Register right-click for buff cancellation (protected, out-of-combat only)
+        if not child._quiClickRegistered and not InCombatLockdown() then
+            child._quiClickRegistered = true
             child:RegisterForClicks("RightButtonUp")
+        end
+
+        -- Debug: hook click events to trace right-click cancellation failures
+        if not child._quiClickDebugHooked then
+            child._quiClickDebugHooked = true
+            child:HookScript("PreClick", function(self, button)
+                local id = self:GetID()
+                local unit = self:GetAttribute("unit")
+                local type2 = self:GetAttribute("type2")
+                local idx = self:GetAttribute("index")
+                local flt = self:GetAttribute("filter")
+                local name = self._spellId and GetSpellInfo(self._spellId) or "?"
+                BBDebug(("PreClick btn=%s id=%d unit=%s type2=%s index=%s filter=%s spell=%s(%s) combat=%s"):format(
+                    tostring(button), id,
+                    tostring(unit), tostring(type2), tostring(idx), tostring(flt),
+                    tostring(name), tostring(self._spellId),
+                    tostring(InCombatLockdown())
+                ))
+            end)
+            child:HookScript("PostClick", function(self, button)
+                BBDebug(("PostClick btn=%s id=%d — action sent to secure handler"):format(
+                    tostring(button), self:GetID()
+                ))
+            end)
         end
 
         -- Tooltip handlers (set once, check flag)
@@ -506,6 +531,31 @@ local function StyleHeaderChildren(header, settings, isBuff)
         end
     end
 
+    -- Debug: dump child state summary
+    if visibleCount > 0 and (QUI.DEBUG_MODE or header._quiDiagRequested) then
+        header._quiDiagRequested = nil
+        for i = 1, visibleCount do
+            local c = header:GetAttribute("child" .. i)
+            if c then
+                local strata, level = c:GetFrameStrata(), c:GetFrameLevel()
+                local mouse = c:IsMouseEnabled()
+                local clickFn = c.GetRegisteredClicks
+                local clicks = clickFn and clickFn(c) or "N/A"
+                local t2 = c:GetAttribute("type2")
+                local idx = c:GetAttribute("index")
+                local flt = c:GetAttribute("filter")
+                local unit = c:GetAttribute("unit")
+                BBDebug(("%s child%d: strata=%s lvl=%d mouse=%s clicks=%s type2=%s index=%s filter=%s unit=%s spellId=%s"):format(
+                    isBuff and "BUFF" or "DEBUFF", i,
+                    tostring(strata), level,
+                    tostring(mouse), tostring(clicks),
+                    tostring(t2), tostring(idx), tostring(flt), tostring(unit),
+                    tostring(c._spellId)
+                ))
+            end
+        end
+    end
+
     -- Cache visible count for private aura slot positioning
     if isBuff then
         header._visibleBuffCount = visibleCount
@@ -586,22 +636,36 @@ end
 
 local function BanishBlizzardFrame(frame, showHookedFlag, alphaHookedFlag)
     if not frame then return false, false end
-    if InCombatLockdown() then return showHookedFlag, alphaHookedFlag end
 
-    -- Full suppression: hide the frame and kill its event pump so the
-    -- secure header never creates children. No children = no invisible
-    -- buttons stealing clicks or generating phantom tooltips.
-    frame:Hide()
-    frame:UnregisterAllEvents()
+    frame:SetAlpha(0)
     frame:EnableMouse(false)
     SetDescendantMouse(frame, false)
 
-    -- Hook Show to re-suppress if Blizzard code tries to resurrect it
+    -- Hook Show to re-enforce hiding
     if not showHookedFlag then
         showHookedFlag = true
         hooksecurefunc(frame, "Show", function(self)
-            if self._quiBanished and not InCombatLockdown() then
-                self:Hide()
+            C_Timer.After(0, function()
+                if self._quiBanished then
+                    self:SetAlpha(0)
+                    self:EnableMouse(false)
+                    SetDescendantMouse(self, false)
+                end
+            end)
+        end)
+    end
+
+    -- Hook SetAlpha to prevent Blizzard from restoring visibility
+    if not alphaHookedFlag then
+        alphaHookedFlag = true
+        hooksecurefunc(frame, "SetAlpha", function(self, alpha)
+            if self._quiBanished and alpha > 0 then
+                C_Timer.After(0, function()
+                    if self._quiBanished and self:GetAlpha() > 0 then
+                        self:SetAlpha(0)
+                        SetDescendantMouse(self, false)
+                    end
+                end)
             end
         end)
     end
@@ -612,12 +676,11 @@ end
 
 local function RestoreBlizzardFrame(frame)
     if not frame then return end
-    if InCombatLockdown() then return end
 
     frame._quiBanished = nil
+    frame:SetAlpha(1)
     frame:EnableMouse(true)
     SetDescendantMouse(frame, true)
-    frame:Show()
 end
 
 ---------------------------------------------------------------------------
@@ -1423,19 +1486,6 @@ paRegenFrame:SetScript("OnEvent", function()
         paPendingSetup = false
         SetupPrivateAuras()
         LayoutPrivateAuraSlots()
-    end
-    -- Re-suppress banished Blizzard frames — Show/Hide is protected during
-    -- combat so our hook couldn't enforce the hide. Now that we're out of
-    -- combat, slam them back down.
-    if blizzBuffBanished and BuffFrame then
-        BuffFrame:Hide()
-        BuffFrame:EnableMouse(false)
-        SetDescendantMouse(BuffFrame, false)
-    end
-    if blizzDebuffBanished and DebuffFrame then
-        DebuffFrame:Hide()
-        DebuffFrame:EnableMouse(false)
-        SetDescendantMouse(DebuffFrame, false)
     end
     -- Re-sync header attributes that couldn't be changed during combat
     local settings = GetSettings()
