@@ -3949,12 +3949,12 @@ local function UpdateAllAssistedCombatRotation()
     -- the current recommendation and update that one button.  Once it
     -- creates a frame, _assistRotationButton gets set and subsequent
     -- updates take the fast path above.
-    if not (AssistedCombatManager and C_ActionBar
-        and C_ActionBar.FindSpellActionButtons) then
+    if not (C_AssistedCombat and C_AssistedCombat.GetNextCastSpell
+        and C_ActionBar and C_ActionBar.FindSpellActionButtons) then
         return
     end
-    local spellID = AssistedCombatManager and AssistedCombatManager.lastNextCastSpellID
-    if not spellID then return end
+    local ok, spellID = pcall(C_AssistedCombat.GetNextCastSpell, false)
+    if not ok or not spellID then return end
     local slots = C_ActionBar.FindSpellActionButtons(spellID)
     if not slots then return end
     local slotMap = ActionBarsOwned.slotMap
@@ -3994,7 +3994,7 @@ local function SetAssistedHighlightShown(button, show)
 end
 
 UpdateAllAssistedHighlights = function()
-    if not AssistedCombatManager then return end
+    if not (C_AssistedCombat and C_AssistedCombat.GetNextCastSpell) then return end
     if not (C_ActionBar and C_ActionBar.FindSpellActionButtons) then return end
 
     local db = GetDB()
@@ -4006,9 +4006,8 @@ UpdateAllAssistedHighlights = function()
         return
     end
 
-    -- Read directly from the manager's Lua table — Blizzard's OnUpdate sets
-    -- this field before firing the event.  Zero-cost vs pcall into C.
-    local nextSpellID = AssistedCombatManager and AssistedCombatManager.lastNextCastSpellID
+    local okNext, nextSpellID = pcall(C_AssistedCombat.GetNextCastSpell, false)
+    if not okNext then nextSpellID = nil end
 
     -- Build match set into a reusable scratch table to avoid per-call
     -- allocation — this runs up to 10x/sec under soft targeting.
@@ -7842,7 +7841,8 @@ function ActionBarsOwned:Initialize()
     -- Assisted combat rotation (one-button rotation arrow overlay).
     if EventRegistry and EventRegistry.RegisterCallback then
         EventRegistry:RegisterCallback("AssistedCombatManager.OnSetActionSpell", function()
-            local newSpell = AssistedCombatManager and AssistedCombatManager.lastNextCastSpellID
+            local okSpell, newSpell = pcall(C_AssistedCombat.GetNextCastSpell, false)
+            if not okSpell then newSpell = nil end
             -- Dedupe: Blizzard fires this every OnUpdate frame under soft
             -- targeting; if the rotation spell hasn't actually changed,
             -- skip entirely.
@@ -7870,7 +7870,8 @@ function ActionBarsOwned:Initialize()
         -- gap) — NOT "rotation disabled".  Ignore nil to avoid flicker.
         -- Highlights refresh on HIDEGRID or PLAYER_REGEN_ENABLED.
         EventRegistry:RegisterCallback("AssistedCombatManager.OnAssistedHighlightSpellChange", function()
-            local nextSpell = AssistedCombatManager.lastNextCastSpellID
+            local okHL, nextSpell = pcall(C_AssistedCombat.GetNextCastSpell, false)
+            if not okHL then nextSpell = nil end
             if not nextSpell then return end
             if nextSpell == ActionBarsOwned._lastAssistHighlightSpell then return end
             ActionBarsOwned._lastAssistHighlightSpell = nextSpell
@@ -7885,22 +7886,41 @@ function ActionBarsOwned:Initialize()
     -- source and notifies the rotation assist icon + CDM viewer overlay.
     if AssistedCombatManager and AssistedCombatManager.UpdateAllAssistedHighlightFramesForSpell then
         hooksecurefunc(AssistedCombatManager, "UpdateAllAssistedHighlightFramesForSpell", function(_, spellID)
-            -- The spellID from AssistedCombatManager may be a secret value
-            -- in combat.  Convert to a safe number so modules can use ==
-            -- comparisons without erroring.
+            if not spellID then return end
             local Helpers = ns.Helpers
-            local safeSpellID = Helpers and Helpers.SafeToNumber(spellID, nil) or spellID
-            if not safeSpellID then return end
+            local isSecret = Helpers and Helpers.IsSecretValue(spellID)
+
+            -- Resolve the talent-transformed display spell.  Blizzard may
+            -- recommend a base spell ID while talents have replaced it with
+            -- an override (or vice versa).  Resolve both directions so
+            -- downstream matching works regardless of which ID the API returns.
+            local resolvedID = spellID
+            if not isSecret then
+                -- Forward: base → current override (e.g., Thunder Clap → Thunder Blast)
+                local okOvr, overrideID = pcall(C_Spell.GetOverrideSpell, spellID)
+                if okOvr and overrideID and overrideID ~= spellID then
+                    resolvedID = overrideID
+                end
+            end
+
             -- ForceUpdateAction → SafeUpdate races the C-side texture write:
             -- SafeUpdate reads GetActionTexture before the new value is
             -- committed, showing the PREVIOUS spell icon.  This hook fires
             -- AFTER the C-side completes, so schedule an immediate visual
             -- refresh to re-read the now-correct texture.
             ScheduleABVisualUpdate(false, true)
+            -- Rotation assist icon handles secret values natively via C-side
+            -- functions — pass the raw spellID so it works during combat.
             local rai = ns.RotationAssistIcon
-            if rai and rai.Update then pcall(rai.Update, safeSpellID) end
+            if rai and rai.Update then pcall(rai.Update, spellID) end
+            -- Pass both the resolved override and the original base so the
+            -- matcher can check either direction.  Secret values pass through
+            -- safely — tonumber() returns nil for secrets, so no match = no
+            -- overlay, no crash.
             local kb = ns.Keybinds
-            if kb and kb.UpdateAllRotationHelpers then pcall(kb.UpdateAllRotationHelpers, safeSpellID) end
+            if kb and kb.UpdateAllRotationHelpers then
+                pcall(kb.UpdateAllRotationHelpers, resolvedID, spellID)
+            end
         end)
     end
 
