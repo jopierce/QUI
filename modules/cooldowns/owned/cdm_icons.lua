@@ -1909,7 +1909,14 @@ local function UpdateIconCooldown(icon)
                         local _auraHookActive = IsHookStackActive(entry, icon)
                         if not _auraHookActive then
                             if r.stacks then
-                                pcall(icon.StackText.SetText, icon.StackText, C_StringUtil.TruncateWhenZero(r.stacks))
+                                -- Charged abilities: "0" is meaningful (all
+                                -- charges depleted). Only truncate zero for
+                                -- non-charged resource stacks.
+                                if entry.hasCharges then
+                                    pcall(icon.StackText.SetText, icon.StackText, r.stacks)
+                                else
+                                    pcall(icon.StackText.SetText, icon.StackText, C_StringUtil.TruncateWhenZero(r.stacks))
+                                end
                                 icon.StackText:Show()
                             elseif not InCombatLockdown() then
                                 icon.StackText:SetText("")
