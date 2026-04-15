@@ -57,6 +57,10 @@ local iconPool = {}
 local POOL_SIZE = 60
 local spellNameCache = {}
 
+local DEFAULT_SQUARE_COLOR = { 0.5, 0.5, 0.5, 1 }
+local DEFAULT_INSET = { 0, 0 }
+local AURA_FILTERS = { "HELPFUL", "HARMFUL" }
+
 -- Reusable scratch tables for aura lookups (avoids 2 table allocations
 -- per frame per UNIT_AURA event — 80+ garbage tables per raid burst).
 local _scratchActiveAuras = {}     -- [spellID] = auraData
@@ -179,7 +183,11 @@ local function FindSecretTrackedAura(unit, spellID, helpfulAuras)
         end
     end
 
-    if C_UnitAuras and C_UnitAuras.GetUnitAuras then
+    -- Skip expensive bulk scan in combat — the helpfulAuras path above
+    -- already covers auras present in the shared cache.  The full
+    -- GetUnitAuras(unit, filter, 100) scan allocates massive C-side
+    -- tables that overwhelm the GC in 20-person raids.
+    if not InCombatLockdown() and C_UnitAuras and C_UnitAuras.GetUnitAuras then
         local scanFilter = config.filter or "HELPFUL"
         local scanLimit = config.scanLimit or 100
         local ok, allAuras = pcall(C_UnitAuras.GetUnitAuras, unit, scanFilter, scanLimit)
@@ -328,7 +336,7 @@ local function UpdateIndicatorData(ind, unit, slot, auraData, showSwipe)
     ind:Show()
 
     if displayType == "square" then
-        local color = slot.color or {0.5, 0.5, 0.5, 1}
+        local color = slot.color or DEFAULT_SQUARE_COLOR
         ind.icon:Hide()
         ind.solidColor:SetColorTexture(color[1] or 0.5, color[2] or 0.5, color[3] or 0.5, color[4] or 1)
         ind.solidColor:Show()
@@ -518,19 +526,19 @@ local function UpdateFramePinnedAuras(frame)
                 end
             end
         end
-    else
-        if C_UnitAuras and C_UnitAuras.GetUnitAuras then
-            for _, filter in ipairs({"HELPFUL", "HARMFUL"}) do
-                local ok, auras = pcall(C_UnitAuras.GetUnitAuras, unit, filter, 40)
-                if ok and auras then
-                    if filter == "HELPFUL" then helpfulAuras = auras end
-                    for _, auraData in ipairs(auras) do
-                        local spID = SafeValue(auraData.spellId, nil)
-                        if spID then activeAuras[spID] = auraData end
-                        local spName = SafeValue(auraData.name, nil)
-                        if spName and not activeAuraNames[spName] then
-                            activeAuraNames[spName] = auraData
-                        end
+    elseif not InCombatLockdown() and C_UnitAuras and C_UnitAuras.GetUnitAuras then
+        -- Fallback: shared cache missing (should not happen in normal dispatch).
+        -- Skip in combat to avoid C-side table allocations that overwhelm the GC.
+        for _, filter in ipairs(AURA_FILTERS) do
+            local ok, auras = pcall(C_UnitAuras.GetUnitAuras, unit, filter, 40)
+            if ok and auras then
+                if filter == "HELPFUL" then helpfulAuras = auras end
+                for _, auraData in ipairs(auras) do
+                    local spID = SafeValue(auraData.spellId, nil)
+                    if spID then activeAuras[spID] = auraData end
+                    local spName = SafeValue(auraData.name, nil)
+                    if spName and not activeAuraNames[spName] then
+                        activeAuraNames[spName] = auraData
                     end
                 end
             end
@@ -594,7 +602,7 @@ local function UpdateFramePinnedAuras(frame)
 
                 -- Position at anchor with inset
                 ind:ClearAllPoints()
-                local insetDir = ANCHOR_INSET[anchor] or {0, 0}
+                local insetDir = ANCHOR_INSET[anchor] or DEFAULT_INSET
                 local offX = insetDir[1] * inset + (slot.offsetX or 0)
                 local offY = insetDir[2] * inset + (slot.offsetY or 0)
                 if anchor == "BOTTOMLEFT" or anchor == "BOTTOM" or anchor == "BOTTOMRIGHT" then
@@ -621,6 +629,8 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     if not GF or not GF.initialized then return end
 
     if event == "PLAYER_SPECIALIZATION_CHANGED" then
+        -- Spec change: evict spell name cache (spell roster changes per spec)
+        wipe(spellNameCache)
         QUI_GFP:RefreshAll()
     end
 end)

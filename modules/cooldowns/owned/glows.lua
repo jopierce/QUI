@@ -69,6 +69,8 @@ local function IsPandemicMirroringEnabled(icon)
         return settings.essentialPandemicEnabled ~= false
     elseif viewerType == "utility" then
         return settings.utilityPandemicEnabled ~= false
+    elseif viewerType == "buff" then
+        return settings.buffPandemicEnabled ~= false
     end
 
     return false

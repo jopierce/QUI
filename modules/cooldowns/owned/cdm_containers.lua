@@ -3652,11 +3652,13 @@ do
                             local isPixel = glowType == "Pixel Glow"
                             local isAutocast = glowType == "Autocast Shine"
                             local isButton = glowType == "Button Glow"
+                            local isTexture = glowType == "Flash" or glowType == "Hammer"
+                            local isProc = glowType == "Proc Glow"
                             if glowWidgets.lines then glowWidgets.lines:SetEnabled(isPixel or isAutocast) end
                             if glowWidgets.thickness then glowWidgets.thickness:SetEnabled(isPixel) end
                             if glowWidgets.scale then glowWidgets.scale:SetEnabled(isAutocast) end
-                            if glowWidgets.xOffset then glowWidgets.xOffset:SetEnabled(not isButton) end
-                            if glowWidgets.yOffset then glowWidgets.yOffset:SetEnabled(not isButton) end
+                            if glowWidgets.xOffset then glowWidgets.xOffset:SetEnabled(not isButton and not isTexture) end
+                            if glowWidgets.yOffset then glowWidgets.yOffset:SetEnabled(not isButton and not isTexture) end
                         end
 
                         sy = U.PlaceRow(GUI:CreateFormCheckbox(body, "Enable Custom Glow", enabledKey, glowDB, RefreshGlows), body, sy)
@@ -3666,6 +3668,9 @@ do
                             {value = "Pixel Glow", text = "Pixel Glow"},
                             {value = "Autocast Shine", text = "Autocast Shine"},
                             {value = "Button Glow", text = "Button Glow"},
+                            {value = "Flash", text = "Flash"},
+                            {value = "Hammer", text = "Hammer"},
+                            {value = "Proc Glow", text = "Proc Glow"},
                         }
                         sy = U.PlaceRow(GUI:CreateFormDropdown(body, "Glow Type", glowTypeOptions, glowTypeKey, glowDB, function()
                             RefreshGlows()
@@ -3932,6 +3937,21 @@ do
                 sy = P(GUI:CreateFormSlider(body, "Stack X Offset", -20, 20, 1, "stackOffsetX", buffData, RefreshBuff), body, sy)
                 P(GUI:CreateFormSlider(body, "Stack Y Offset", -20, 20, 1, "stackOffsetY", buffData, RefreshBuff), body, sy)
             end, sections, relayout)
+
+            -- Effects section (pandemic glow toggle)
+            do
+                local profile = GetProfileDB()
+                if profile then
+                    if not profile.customGlow then profile.customGlow = {} end
+                    local glowDB = profile.customGlow
+                    if glowDB.buffPandemicEnabled == nil then glowDB.buffPandemicEnabled = true end
+
+                    CreateCollapsible(content, "Effects", FORM_ROW + 8, function(body)
+                        local sy = -4
+                        P(GUI:CreateFormCheckbox(body, "Mirror Blizzard Pandemic Refresh Glow", "buffPandemicEnabled", glowDB, RefreshGlows), body, sy)
+                    end, sections, relayout)
+                end
+            end
 
             -- Position / Anchoring
             BuildPositionCollapsible(content, key, nil, sections, relayout)

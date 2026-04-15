@@ -3117,7 +3117,7 @@ local defaults = {
             hideEssential = true,
             hideUtility = true,
         },
-        -- Custom Glow Settings (for Essential/Utility cooldown viewers)
+        -- Custom Glow Settings (for Essential/Utility/Buff cooldown viewers)
         customGlow = {
             -- Essential Cooldowns
             essentialEnabled = true,
@@ -3144,6 +3144,9 @@ local defaults = {
             utilityScale = 1,
             utilityXOffset = 0,
             utilityYOffset = 0,
+
+            -- Buff Icon Bar
+            buffPandemicEnabled = true,
         },
         
         -- Cooldown Highlighter (flash on spell cast)
