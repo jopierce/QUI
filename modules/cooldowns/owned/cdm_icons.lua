@@ -947,8 +947,8 @@ local function IsHookStackActive(entry, icon)
     if not bss or bss.icon ~= icon then return false end
     -- chargeText/appText may be secret values — pcall the comparison.
     -- If comparison errors (secret), treat as non-empty (active).
-    -- Empty spam is filtered at the hook level (only non-empty text
-    -- updates chargeText/appText), so these reflect real content.
+    -- Hooks now forward all text (including ""), so "" means stacks
+    -- are genuinely depleted — treat as inactive.
     if bss.chargeText ~= nil then
         local ok, eq = pcall(function() return bss.chargeText == "" end)
         if not ok or not eq then return true end
@@ -1039,39 +1039,31 @@ local function HookBlizzStackText(icon, blizzChild)
                     local entry = s.icon._spellEntry
                     if entry and entry._blizzChild ~= blizzChild then return end
                     if entry and entry.isAura then return end
-                    -- Mark hook as active so the tick update uses
-                    -- cooldownChargesCount (gated) instead of the API path.
-                    -- Track non-empty text for hook-active detection.
-                    -- Empty text means stacks depleted — clear cached state
-                    -- so IsHookStackActive yields to the API/clear path.
-                    -- Only the first empty after a real value triggers the
-                    -- clear; subsequent empties are no-ops (no flicker).
-                    local isEmpty = true
-                    if text ~= nil then
-                        local eok, eeq = pcall(function() return text == "" end)
-                        isEmpty = eok and eeq
-                    end
-                    if not isEmpty then
-                        s.chargeText = text
-                        s.lastHookTime = GetTime()
-                        ChargeDebug(entry.name, "HOOK ChargeCount.SetText text=", text,
-                            "hasCharges=", entry.hasCharges,
-                            "spellID=", entry.spellID, "overrideSpellID=", entry.overrideSpellID,
-                            "blizzChild match=", entry._blizzChild == blizzChild)
-                        -- Non-charged entries (e.g., Spirit Bomb / Soul Fragments):
-                        -- forward ChargeCount text directly to StackText. Charged
-                        -- entries are driven by cooldownChargesCount via the FWD path.
-                        if not entry.hasCharges then
-                            pcall(s.icon.StackText.SetText, s.icon.StackText, text)
-                            s.icon.StackText:Show()
+                    -- Forward every SetText directly — no filtering.
+                    -- Blizzard is the source of truth; if it says "" then
+                    -- stacks are gone. Any same-frame "" → "6" sequence
+                    -- resolves before render (no visible flicker).
+                    s.chargeText = text
+                    s.lastHookTime = GetTime()
+                    ChargeDebug(entry and entry.name, "HOOK ChargeCount.SetText text=", text,
+                        "hasCharges=", entry and entry.hasCharges,
+                        "spellID=", entry and entry.spellID, "overrideSpellID=", entry and entry.overrideSpellID,
+                        "blizzChild match=", entry._blizzChild == blizzChild)
+                    -- Non-charged entries (e.g., Spirit Bomb / Soul Fragments):
+                    -- forward ChargeCount text directly to StackText. Charged
+                    -- entries are driven by cooldownChargesCount via the FWD path.
+                    if not (entry and entry.hasCharges) then
+                        pcall(s.icon.StackText.SetText, s.icon.StackText, text)
+                        -- Show/hide based on whether text has content.
+                        local isBlank = (text == nil)
+                        if not isBlank then
+                            local bok, beq = pcall(function() return text == "" end)
+                            isBlank = bok and beq
                         end
-                    elseif s.chargeText ~= nil then
-                        s.chargeText = nil
-                        ChargeDebug(entry and entry.name, "HOOK ChargeCount.SetText CLEAR",
-                            "hasCharges=", entry and entry.hasCharges)
-                        if not (entry and entry.hasCharges) then
-                            s.icon.StackText:SetText("")
+                        if isBlank then
                             s.icon.StackText:Hide()
+                        else
+                            s.icon.StackText:Show()
                         end
                     end
                 end)
@@ -1108,26 +1100,20 @@ local function HookBlizzStackText(icon, blizzChild)
                     -- stacks. Skip forwarding to prevent buff viewer
                     -- applications ("0") from overwriting charge count.
                     if entry and entry.hasCharges then return end
-                    -- Track appText so IsHookStackActive knows the
-                    -- Applications hook is driving — prevents the aura
-                    -- path from overwriting with r.stacks every tick.
-                    -- Only track/forward non-empty text — Blizzard spams
-                    -- SetText("") every refresh cycle which would clear
-                    -- the display and reset the hook-active state.
-                    local isEmpty = true
-                    if text ~= nil then
-                        local eok, eeq = pcall(function() return text == "" end)
-                        isEmpty = eok and eeq
+                    -- Forward every SetText directly — no filtering.
+                    -- Blizzard is the source of truth for application stacks.
+                    s.appText = text
+                    s.lastHookTime = GetTime()
+                    pcall(s.icon.StackText.SetText, s.icon.StackText, text)
+                    local isBlank = (text == nil)
+                    if not isBlank then
+                        local bok, beq = pcall(function() return text == "" end)
+                        isBlank = bok and beq
                     end
-                    if not isEmpty then
-                        s.appText = text
-                        s.lastHookTime = GetTime()
-                        pcall(s.icon.StackText.SetText, s.icon.StackText, text)
-                        s.icon.StackText:Show()
-                    elseif s.appText ~= nil then
-                        s.appText = nil
-                        s.icon.StackText:SetText("")
+                    if isBlank then
                         s.icon.StackText:Hide()
+                    else
+                        s.icon.StackText:Show()
                     end
                 end)
             end
