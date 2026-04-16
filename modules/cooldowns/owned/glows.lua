@@ -21,6 +21,27 @@ local IsSpellOverlayed = (C_SpellActivationOverlay and C_SpellActivationOverlay.
 -- and also used to check override spell IDs that the API might miss.
 local overlayedSpells = {}  -- [spellID] = true
 
+local function ForEachSpellCandidate(spellID, callback)
+    if not spellID or not callback then return end
+
+    local seen = {}
+    local function Visit(id)
+        if id and not seen[id] then
+            seen[id] = true
+            callback(id)
+        end
+    end
+
+    Visit(spellID)
+
+    if C_Spell and C_Spell.GetOverrideSpell then
+        local ok, overrideID = pcall(C_Spell.GetOverrideSpell, spellID)
+        if ok and overrideID and overrideID ~= spellID then
+            Visit(overrideID)
+        end
+    end
+end
+
 -- Safe wrapper: C_Spell.IsSpellUsable can return secret values in Midnight.
 local function SafeIsSpellUsable(spellID)
     if not spellID or not C_Spell or not C_Spell.IsSpellUsable then return true, false end
@@ -106,10 +127,18 @@ local function RebuildGlowSpellMap()
         for _, icon in ipairs(pool) do
             if icon._spellEntry then
                 local ids = {}
-                if icon._spellEntry.spellID then ids[#ids + 1] = icon._spellEntry.spellID end
-                if icon._spellEntry.overrideSpellID and icon._spellEntry.overrideSpellID ~= icon._spellEntry.spellID then
-                    ids[#ids + 1] = icon._spellEntry.overrideSpellID
+                local seen = {}
+                local function AddID(id)
+                    if id and not seen[id] then
+                        seen[id] = true
+                        ids[#ids + 1] = id
+                    end
                 end
+
+                ForEachSpellCandidate(icon._spellEntry.spellID, AddID)
+                ForEachSpellCandidate(icon._spellEntry.overrideSpellID, AddID)
+                AddID(icon._cachedOverrideID)
+
                 for _, id in ipairs(ids) do
                     local list = spellIdToGlowIcons[id]
                     if not list then
@@ -586,18 +615,13 @@ local function ScanGlowsForSpell(spellID)
     local CDMIcons = ns.CDMIcons
     if not CDMIcons then return end
 
-    -- Collect all candidate spellIDs to look up
-    local candidates = { spellID }
-    if C_Spell and C_Spell.GetOverrideSpell then
-        local ov = C_Spell.GetOverrideSpell(spellID)
-        if ov and ov ~= spellID then candidates[#candidates + 1] = ov end
-    end
-
     -- Deduplicate icons across candidates
     local visited = {}
-    for _, id in ipairs(candidates) do
+    local matched = false
+    ForEachSpellCandidate(spellID, function(id)
         local icons = spellIdToGlowIcons[id]
         if icons then
+            matched = true
             for _, icon in ipairs(icons) do
                 if not visited[icon] then
                     visited[icon] = true
@@ -607,6 +631,13 @@ local function ScanGlowsForSpell(spellID)
                 end
             end
         end
+    end)
+
+    if not matched then
+        -- Proc events are infrequent; if the fast reverse map misses because
+        -- Blizzard reported a related spellID we do not currently index,
+        -- rescan all visible icons immediately so short overlays are not lost.
+        ScanAllGlows()
     end
 end
 
