@@ -6,9 +6,6 @@
          secure execution context, avoiding ADDON_ACTION_BLOCKED taint. -->
     <Button name="QUIAuraIconTemplate" inherits="SecureActionButtonTemplate" registerForClicks="RightButtonUp" virtual="true">
         <Size x="30" y="30"/>
-        <Attributes>
-            <Attribute name="type2" value="cancelaura"/>
-        </Attributes>
         <Layers>
             <Layer level="BACKGROUND">
                 <Texture parentKey="Icon" setAllPoints="true">

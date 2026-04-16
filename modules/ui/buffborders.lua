@@ -25,13 +25,6 @@ local CreateFrame = CreateFrame
 local GetTime = GetTime
 local InCombatLockdown = InCombatLockdown
 
--- Debug helper — gated behind /qui debug
-local function BBDebug(...)
-    if QUI and QUI.DEBUG_MODE and QUI.DebugPrint then
-        QUI:DebugPrint("|cffFFD700[BuffBorders]|r", ...)
-    end
-end
-
 -- Private aura API (WoW 10.1.0+)
 local AddPrivateAuraAnchor = C_UnitAuras and C_UnitAuras.AddPrivateAuraAnchor
 local RemovePrivateAuraAnchor = C_UnitAuras and C_UnitAuras.RemovePrivateAuraAnchor
@@ -309,12 +302,8 @@ local function SyncHeaderAttributes(header, settings, prefix)
     -- header creates a new child. 'self' is the new child button. Bake the
     -- icon size directly into the snippet — updated each time SyncHeaderAttributes
     -- runs (out of combat). During combat, new children use the last-set size.
-    header:SetAttribute("initialConfigFunction", ([=[
-        self:SetWidth(%d)
-        self:SetHeight(%d)
-        self:SetAttribute("unit", "player")
-        self:SetAttribute("type2", "cancelaura")
-    ]=]):format(iconSize, iconSize)
+    header:SetAttribute("initialConfigFunction",
+        ("self:SetWidth(%d) self:SetHeight(%d)"):format(iconSize, iconSize)
     )
 end
 
@@ -363,34 +352,17 @@ local function StyleHeaderChildren(header, settings, isBuff)
         if not child._quiClickRegistered and not InCombatLockdown() then
             child._quiClickRegistered = true
             child:RegisterForClicks("RightButtonUp")
-            child:SetAttribute("unit", "player")
-            child:SetAttribute("type2", "cancelaura")
         end
 
-        -- Cancel via modern API — the legacy cancelaura secure action calls
-        -- CancelUnitBuff internally which is defunct in 12.0+. Use
-        -- CancelAuraByAuraInstanceID in PostClick instead (still runs in
-        -- hardware event context so the client accepts it).
+        -- Cancel buff on right-click via PostClick (runs in hardware event
+        -- context). The cancelaura secure action type is non-functional in
+        -- 12.0+ so we call CancelUnitBuff directly.
         if not child._quiCancelHooked then
             child._quiCancelHooked = true
             child:HookScript("PostClick", function(self, button)
                 if button ~= "RightButton" then return end
-                local aid = self._auraInstanceID
-                BBDebug(("PostClick cancel btn=%s id=%d auraInstanceID=%s combat=%s"):format(
-                    tostring(button), self:GetID(), tostring(aid), tostring(InCombatLockdown())
-                ))
-                if aid and C_UnitAuras then
-                    -- Try every known cancel API and report what happens
-                    if C_UnitAuras.CancelAuraByAuraInstanceID then
-                        local ok, err = pcall(C_UnitAuras.CancelAuraByAuraInstanceID, aid)
-                        BBDebug(("CancelAuraByAuraInstanceID(%s) ok=%s err=%s"):format(tostring(aid), tostring(ok), tostring(err)))
-                    else
-                        BBDebug("CancelAuraByAuraInstanceID does not exist")
-                    end
-                    if not ok and CancelUnitBuff then
-                        local ok2, err2 = pcall(CancelUnitBuff, "player", self:GetID(), self._filter)
-                        BBDebug(("CancelUnitBuff(player, %d, %s) ok=%s err=%s"):format(self:GetID(), tostring(self._filter), tostring(ok2), tostring(err2)))
-                    end
+                if isBuff then
+                    pcall(CancelUnitBuff, "player", self:GetID(), "HELPFUL")
                 end
             end)
         end
@@ -537,31 +509,6 @@ local function StyleHeaderChildren(header, settings, isBuff)
                         end
                     end)
                 end
-            end
-        end
-    end
-
-    -- Debug: dump child state summary
-    if visibleCount > 0 and (QUI.DEBUG_MODE or header._quiDiagRequested) then
-        header._quiDiagRequested = nil
-        for i = 1, visibleCount do
-            local c = header:GetAttribute("child" .. i)
-            if c then
-                local strata, level = c:GetFrameStrata(), c:GetFrameLevel()
-                local mouse = c:IsMouseEnabled()
-                local clickFn = c.GetRegisteredClicks
-                local clicks = clickFn and clickFn(c) or "N/A"
-                local t2 = c:GetAttribute("type2")
-                local idx = c:GetAttribute("index")
-                local flt = c:GetAttribute("filter")
-                local unit = c:GetAttribute("unit")
-                BBDebug(("%s child%d: strata=%s lvl=%d mouse=%s clicks=%s type2=%s index=%s filter=%s unit=%s spellId=%s"):format(
-                    isBuff and "BUFF" or "DEBUFF", i,
-                    tostring(strata), level,
-                    tostring(mouse), tostring(clicks),
-                    tostring(t2), tostring(idx), tostring(flt), tostring(unit),
-                    tostring(c._spellId)
-                ))
             end
         end
     end
