@@ -104,11 +104,10 @@ local blizzCDState = setmetatable({}, { __mode = "k" })
 -- frames during combat.
 local blizzTexState = setmetatable({}, { __mode = "k" })
 
--- TAINT SAFETY: Blizzard stack/charge text hook state tracked in a weak-keyed
--- table.  Maps Blizzard _blizzChild → { icon, chargeVisible, appVisible, hooked }.
--- Hooks on Show/Hide/SetText receive parameters from Blizzard's secure calling
--- code — not tainted — unlike polling IsShown()/GetText() on the alpha=0 viewer
--- children which always returns QUI-tainted secret values.
+-- Minimal state for reparented Blizzard stack/charge frames.
+-- Maps _blizzChild → { icon, blizzChild }.  The native ChargeCount and
+-- Applications frames are reparented onto our CDM icons and Blizzard
+-- manages SetText/Show/Hide natively — no hook forwarding needed.
 local blizzStackState = setmetatable({}, { __mode = "k" })
 
 ---------------------------------------------------------------------------
@@ -128,7 +127,7 @@ local function ChargeDebug(spellName, ...)
     local tag = select(1, ...) or ""
     if tag == "FWD path:" or tag == "SKIP API path:" or tag == "API path:" or tag == "FWD path CLEAR:"
         or tag == "DESAT GCD bail:" or tag == "DESAT charged check:" or tag == "DESAT result:"
-        or tag == "MIRROR hook:" or tag == "AURA TICK stacks:" or tag == "TICK stacks:" then
+        or tag == "MIRROR hook:" then
         local key = (spellName or "") .. tag
         local now = GetTime()
         if _chargeDebugThrottle[key] and now - _chargeDebugThrottle[key] < 1 then return end
@@ -1011,8 +1010,6 @@ local function HookBlizzStackText(icon, blizzChild)
     end
     state.icon = icon
     state.blizzChild = blizzChild
-    state.chargeVisible = chargeFrame and chargeFrame:IsShown() or nil
-    state.appVisible = appFrame and appFrame:IsShown() or nil
 
     ChargeDebug(entry and entry.name, "HookBlizzStackText ASSIGN",
         "spellID=", entry and entry.spellID, "overrideSpellID=", entry and entry.overrideSpellID,
@@ -1845,14 +1842,6 @@ local function UpdateIconCooldown(icon)
                         -- combat — only use it as a fallback when hooks aren't
                         -- actively driving stack text for this icon.
                         local _auraHookActive = IsHookStackActive(entry, icon)
-                        local _bssDbg = entry._blizzChild and blizzStackState[entry._blizzChild]
-                        ChargeDebug(entry.name, "AURA TICK stacks:",
-                            "r.stacks=", r.stacks,
-                            "hookActive=", _auraHookActive,
-                            "chargeVis=", _bssDbg and _bssDbg.chargeVisible,
-                            "appVis=", _bssDbg and _bssDbg.appVisible,
-                            "hasCharges=", entry.hasCharges,
-                            "inCombat=", InCombatLockdown())
                         if not _auraHookActive then
                             if r.stacks then
                                 -- Charged abilities: "0" is meaningful (all
@@ -1908,10 +1897,8 @@ local function UpdateIconCooldown(icon)
                         icon._auraActive = false
                         if icon.Cooldown then icon.Cooldown:Clear() end
 
-                        -- Only clear stack text if the charge hook isn't
-                        -- actively driving.  Use IsHookStackActive (frame
-                        -- visibility) — lastHookTime is unreliable with
-                        -- secret values that can't be compared to "".
+                        -- Only clear our StackText overlay if Blizzard's
+                        -- native stack frames aren't actively displaying.
                         if not IsHookStackActive(entry, icon) then
                             icon.StackText:SetText("")
                             icon.StackText:Hide()
@@ -2322,16 +2309,6 @@ local function UpdateIconCooldown(icon)
     -- hooks in the same frame — API writes would overwrite the correct
     -- hook-driven values, causing visible flicker every tick.
     local _hookActive = IsHookStackActive(entry, icon)
-    do
-        local _bssDbg = entry._blizzChild and blizzStackState[entry._blizzChild]
-        ChargeDebug(entry.name, "TICK stacks:",
-            "hookActive=", _hookActive,
-            "chargeVis=", _bssDbg and _bssDbg.chargeVisible,
-            "appVis=", _bssDbg and _bssDbg.appVisible,
-            "hasCharges=", entry.hasCharges,
-            "stackText=", icon.StackText and icon.StackText:GetText(),
-            "stackShown=", icon.StackText and icon.StackText:IsShown())
-    end
 
     -- Forward cooldownChargesCount from the Blizzard child every tick.
     -- Gate: GetSpellCharges on the base spell returns maxCharges > 1.
@@ -2400,22 +2377,9 @@ local function UpdateIconCooldown(icon)
         end
     end
 
-    -- Fallback: if the hook is driving (hookActive) but the FWD path failed
-    -- (chargeCountForwarded=false), and this is a charged entry, the hook's
-    -- ChargeCount text is valid but wasn't forwarded to StackText (the hook
-    -- defers to FWD for hasCharges entries).  Forward it now.
-    -- This covers dynamic transforms where neither base nor override spell
-    -- returns charges from GetSpellCharges but Blizzard's viewer still
-    -- updates ChargeCount correctly.
-    if _hookActive and not _chargeCountForwarded and entry.hasCharges then
-        local bss = entry._blizzChild and blizzStackState[entry._blizzChild]
-        if bss and bss.chargeText ~= nil then
-            ChargeDebug(entry.name, "HOOK fallback: forwarding chargeText=", bss.chargeText)
-            pcall(icon.StackText.SetText, icon.StackText, bss.chargeText)
-            icon.StackText:Show()
-            _chargeCountForwarded = true
-        end
-    end
+    -- Charged entries where the FWD path couldn't find charges:
+    -- Blizzard's native ChargeCount.Current (reparented onto our icon)
+    -- displays the correct value natively — no fallback forwarding needed.
 
     if _hookActive or _chargeCountForwarded then
         ChargeDebug(entry.name, "SKIP API path: hookActive=", _hookActive,
