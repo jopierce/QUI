@@ -67,6 +67,10 @@ local _spellIDToChild = {}  -- [spellID] = { child1, child2, ... } (built OOC du
 -- linkedSpellID via a buff-viewer CDM entry).
 local _resolveIconMemo = {}          -- [spellID] = iconID (false = negative lookup)
 local _resolveAuraActiveMemo = {}    -- [lsid]    = bool   (true = active aura present)
+do local mp = ns._memprobes or {}; ns._memprobes = mp
+    mp[#mp + 1] = { name = "CDM_resolveIconMemo", tbl = _resolveIconMemo }
+    mp[#mp + 1] = { name = "CDM_resolveAuraMemo", tbl = _resolveAuraActiveMemo }
+end
 
 -- Per-tick caches for Blizzard aura queries. Same aura instance is frequently
 -- queried by multiple icons in one UpdateAllCooldowns batch (~100-150 icons).
@@ -77,6 +81,10 @@ local _resolveAuraActiveMemo = {}    -- [lsid]    = bool   (true = active aura p
 -- the cache key.
 local _tickAuraDataCache = {}        -- [auraInstanceID] = data | false (false = negative)
 local _tickAuraDurationCache = {}    -- [auraInstanceID] = durObj | false
+do local mp = ns._memprobes or {}; ns._memprobes = mp
+    mp[#mp + 1] = { name = "CDM_tickAuraData",     tbl = _tickAuraDataCache }
+    mp[#mp + 1] = { name = "CDM_tickAuraDuration", tbl = _tickAuraDurationCache }
+end
 
 local function TickCacheGetAuraData(unit, instanceID)
     if not instanceID then return nil end
@@ -165,6 +173,7 @@ local function _safeGetChildren(viewer) _collectChildren(viewer:GetChildren()) e
 
 local _childBySpellID = {}  -- [spellID] = { child1, child2, ... } (may span viewers)
 local _childMapDirty = true -- set true on aura/cooldown events, not per-cycle
+do local mp = ns._memprobes or {}; ns._memprobes = mp; mp[#mp + 1] = { name = "CDM_childBySpellID", tbl = _childBySpellID } end
 
 local SafeValue = Helpers.SafeValue
 

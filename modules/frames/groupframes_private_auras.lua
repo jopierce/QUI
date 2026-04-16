@@ -58,6 +58,11 @@ local unitPrivateDispelState = {}
 local containerPool = {}
 local POOL_SIZE = 80
 
+do local mp = ns._memprobes or {}; ns._memprobes = mp
+    mp[#mp + 1] = { name = "GFPA_unitDispelState", tbl = unitPrivateDispelState }
+    mp[#mp + 1] = { name = "GFPA_containerPool",   tbl = containerPool }
+end
+
 -- Deferred work
 local pendingReanchor = false
 local pendingCleanup = false

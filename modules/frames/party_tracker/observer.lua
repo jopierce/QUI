@@ -32,9 +32,16 @@ local EVIDENCE_TOLERANCE = 0.15
 -- PER-UNIT STATE
 ---------------------------------------------------------------------------
 local unitState = {}  -- unit → { lastCastTime, lastDebuffTime, lastShieldTime, lastUnitFlagsTime, lastFeignDeathTime, lastFeignState }
-local unitFrames = {} -- unit → event frame
+local unitFrames = {} -- unit → event frame (pooled, reused across Watch/Unwatch)
 local watchedUnits = {} -- set of active units
 local unitCanFeign = {} -- unit → bool (lazy class check, only Hunters can feign)
+
+do local mp = ns._memprobes or {}; ns._memprobes = mp
+    mp[#mp + 1] = { name = "PT_Obs_unitState",    tbl = unitState }
+    mp[#mp + 1] = { name = "PT_Obs_unitFrames",   tbl = unitFrames }
+    mp[#mp + 1] = { name = "PT_Obs_watchedUnits", tbl = watchedUnits }
+    mp[#mp + 1] = { name = "PT_Obs_unitCanFeign", tbl = unitCanFeign }
+end
 
 ---------------------------------------------------------------------------
 -- GLOBAL ABSORB FRAME

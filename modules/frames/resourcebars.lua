@@ -262,6 +262,8 @@ do
     local seenGUID  = {}
     local pendingToken = 0
 
+    do local mp = ns._memprobes or {}; ns._memprobes = mp; mp[#mp + 1] = { name = "RB_WW_seenGUID", tbl = seenGUID } end
+
     function WhirlwindTracker:GetStacks()
         -- Expire stale stacks
         if expiresAt and GetTime() >= expiresAt then

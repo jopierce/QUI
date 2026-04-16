@@ -253,6 +253,7 @@ end
 ---------------------------------------------------------------------------
 
 local _ccAbilitiesCache = {}  -- [unit] = { spell, spell, ... }
+do local mp = ns._memprobes or {}; ns._memprobes = mp; mp[#mp + 1] = { name = "PT_CC_abilitiesCache", tbl = _ccAbilitiesCache } end
 
 local function InvalidateCCAbilitiesCache()
     wipe(_ccAbilitiesCache)

@@ -168,6 +168,10 @@ local CHANNEL_TICK_RUNTIME_CACHE = {}
 local CHANNEL_TICK_ACTIVE_BY_GUID = {}
 local CHANNEL_TICK_EVENT_FRAME = CreateFrame("Frame")
 local CHANNEL_TICK_EVENT_REGISTERED = false
+do local mp = ns._memprobes or {}; ns._memprobes = mp
+    mp[#mp + 1] = { name = "CB_channelTickRuntime", tbl = CHANNEL_TICK_RUNTIME_CACHE }
+    mp[#mp + 1] = { name = "CB_channelTickActive",  tbl = CHANNEL_TICK_ACTIVE_BY_GUID }
+end
 
 local CHANNEL_TICK_SUBEVENTS = {
     SPELL_PERIODIC_DAMAGE = true,
@@ -1059,6 +1063,7 @@ end
 -- recycling is safe.
 local CHANNEL_TICK_OBSERVATION_POOL = {}
 local CHANNEL_TICK_OBSERVATION_POOL_MAX = 4
+do local mp = ns._memprobes or {}; ns._memprobes = mp; mp[#mp + 1] = { name = "CB_channelTickPool", tbl = CHANNEL_TICK_OBSERVATION_POOL } end
 
 local function ReleaseChannelTickObservation(observation)
     if not observation then return end

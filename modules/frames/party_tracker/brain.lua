@@ -40,6 +40,8 @@ local EVIDENCE_TOLERANCE = 0.15
 local activeCooldowns = {}  -- unit → { [spellId|cdKey] = { startTime, cooldown, timer } }
 local cooldownCallback = nil  -- function(unit, spellId, startTime, cooldown, isOffensive)
 
+do local mp = ns._memprobes or {}; ns._memprobes = mp; mp[#mp + 1] = { name = "PT_Brain_activeCooldowns", tbl = activeCooldowns } end
+
 ---------------------------------------------------------------------------
 -- INIT
 ---------------------------------------------------------------------------

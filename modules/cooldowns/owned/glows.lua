@@ -91,6 +91,11 @@ local activeGlowIcons = {}  -- [icon] = true
 -- Reverse lookup: spellID → list of icons that track it.
 -- Allows O(1) dispatch on SHOW/HIDE events instead of scanning all icons.
 local spellIdToGlowIcons = {}  -- [spellID] = {icon, ...}
+do local mp = ns._memprobes or {}; ns._memprobes = mp
+    mp[#mp + 1] = { name = "CDM_overlayedSpells", tbl = overlayedSpells }
+    mp[#mp + 1] = { name = "CDM_glowSpellMap",    tbl = spellIdToGlowIcons }
+    mp[#mp + 1] = { name = "CDM_activeGlows",     tbl = activeGlowIcons }
+end
 
 local function RebuildGlowSpellMap()
     wipe(spellIdToGlowIcons)

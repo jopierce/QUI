@@ -212,6 +212,7 @@ end
 
 local _staticAbilitiesCache = {}  -- [unit][filterMode] = { {spellId, isOffensive}, ... }
 local _seenScratch = {}            -- reused across GetStaticAbilities calls
+do local mp = ns._memprobes or {}; ns._memprobes = mp; mp[#mp + 1] = { name = "PT_CD_staticAbilities", tbl = _staticAbilitiesCache } end
 
 local function InvalidateStaticAbilitiesCache()
     wipe(_staticAbilitiesCache)
@@ -558,7 +559,10 @@ end
 
 local trackedAuras = {}  -- unit → { [instanceID] = { types, startTime, castSnapshot } }
 local pendingReconciliation = {}  -- unit → { [signature] = { tracked1, tracked2, ... } }
-do local mp = ns._memprobes or {}; ns._memprobes = mp; mp[#mp + 1] = { name = "PT_CD_pendingRecon", tbl = pendingReconciliation } end
+do local mp = ns._memprobes or {}; ns._memprobes = mp
+    mp[#mp + 1] = { name = "PT_CD_trackedAuras",  tbl = trackedAuras }
+    mp[#mp + 1] = { name = "PT_CD_pendingRecon",  tbl = pendingReconciliation }
+end
 
 local function AuraTypesSignature(types)
     if types.BigDefensive then return "BD" end

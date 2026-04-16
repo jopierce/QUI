@@ -261,6 +261,7 @@ end
 -- swap / spec change), so we keep it across ticks.  Wiped on SPELLS_CHANGED
 -- and PLAYER_SPECIALIZATION_CHANGED to pick up new icons.
 local _textureCycleCache = {}
+do local mp = ns._memprobes or {}; ns._memprobes = mp; mp[#mp + 1] = { name = "CDM_textureCycleCache", tbl = _textureCycleCache } end
 
 local function GetSpellTexture(spellID)
     if not spellID then return nil end
@@ -1352,6 +1353,7 @@ end
 -- Session cache: spellID → macroName or false. Invalidated on UPDATE_MACROS.
 local _macroCache = {}
 local _macroCacheDirty = true
+do local mp = ns._memprobes or {}; ns._memprobes = mp; mp[#mp + 1] = { name = "CDM_macroCache", tbl = _macroCache } end
 
 local function InvalidateMacroCache()
     wipe(_macroCache)

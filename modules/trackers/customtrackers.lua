@@ -690,6 +690,11 @@ local knownChargeSpells = {}
 -- Used to detect real recharge vs GCD in combat when charge count is secret
 local chargeSpellLastCast = {}
 
+do local mp = ns._memprobes or {}; ns._memprobes = mp
+    mp[#mp + 1] = { name = "CT_knownChargeSpells", tbl = knownChargeSpells }
+    mp[#mp + 1] = { name = "CT_chargeSpellLastCast", tbl = chargeSpellLastCast }
+end
+
 local function GetSpellChargeCount(spellID)
     if not spellID then return 0, 1, 0, 0, false, nil end
     local chargeInfo = C_Spell.GetSpellCharges(spellID)
@@ -1757,6 +1762,7 @@ end
 -- Bars that need a full RebuildActiveSet (with Show/Hide + layout) after combat ends.
 -- During combat we update data but use alpha-based visibility to avoid ADDON_ACTION_BLOCKED.
 local pendingActiveSetRebuilds = {}
+do local mp = ns._memprobes or {}; ns._memprobes = mp; mp[#mp + 1] = { name = "CT_pendingRebuilds", tbl = pendingActiveSetRebuilds } end
 
 -- Rebuild the active icon set for a bar
 -- Called on: spec change, talent change, bar creation, hideNonUsable toggle
@@ -2473,6 +2479,11 @@ end
 local _barFramePool = {}  -- [barID] = frame (hidden, ready for reuse)
 local _pendingBarDeletes = {}  -- [barID] = true (queued during combat lockdown)
 local _pendingRefreshAll = false
+
+do local mp = ns._memprobes or {}; ns._memprobes = mp
+    mp[#mp + 1] = { name = "CT_barFramePool",      tbl = _barFramePool }
+    mp[#mp + 1] = { name = "CT_pendingBarDeletes", tbl = _pendingBarDeletes }
+end
 
 local function BarHasSecureChildren(bar)
     local firstIcon = bar and bar.icons and bar.icons[1]

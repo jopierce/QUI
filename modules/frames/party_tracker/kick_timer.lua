@@ -299,6 +299,7 @@ local GetFrameForUnit = ns.PartyTracker_GetFrameForUnit
 
 -- Track recent casts from party members (for UNIT_SPELLCAST_INTERRUPTED matching)
 local recentCasts = {}  -- unit → GetTime()
+do local mp = ns._memprobes or {}; ns._memprobes = mp; mp[#mp + 1] = { name = "PT_Kick_recentCasts", tbl = recentCasts } end
 
 local function OnSpellcastSucceeded(unit, castGUID, spellID)
     if not IsActive() then return end

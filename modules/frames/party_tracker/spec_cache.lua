@@ -33,6 +33,11 @@ local inspectPending = nil  -- unit currently being inspected
 local inspectStartTime = 0
 local inspectTicker = nil
 
+do local mp = ns._memprobes or {}; ns._memprobes = mp
+    mp[#mp + 1] = { name = "PT_Spec_cache",        tbl = cache }
+    mp[#mp + 1] = { name = "PT_Spec_inspectQueue", tbl = inspectQueue }
+end
+
 local function HasSafeGuid(guid)
     return not IsSecretValue(guid) and guid ~= nil
 end
