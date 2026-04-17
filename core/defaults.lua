@@ -1173,6 +1173,7 @@ local defaults = {
             visibility = "FLYING_ONLY",
             fadeDelay = 1,
             fadeDuration = 0.3,
+            hideWhenFarmHudShown = false,
         },
 
         -- Chat Frame Customization

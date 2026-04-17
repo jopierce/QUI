@@ -1993,7 +1993,7 @@ local function RegisterAllProviders()
         local function Refresh() if _G.QUI_RefreshSkyriding then _G.QUI_RefreshSkyriding() end end
 
         -- Visibility
-        U.CreateCollapsible(content, "Visibility", 3 * FORM_ROW + 8, function(body)
+        U.CreateCollapsible(content, "Visibility", 4 * FORM_ROW + 8, function(body)
             local sy = -4
             sy = P(GUI:CreateFormDropdown(body, "Visibility Mode", {
                 {value = "ALWAYS", text = "Always Visible"},
@@ -2001,7 +2001,8 @@ local function RegisterAllProviders()
                 {value = "AUTO", text = "Auto (fade when grounded)"},
             }, "visibility", sr, Refresh), body, sy)
             sy = P(GUI:CreateFormSlider(body, "Fade Delay (sec)", 0, 10, 0.5, "fadeDelay", sr, Refresh), body, sy)
-            P(GUI:CreateFormSlider(body, "Fade Speed (sec)", 0.1, 1.0, 0.1, "fadeDuration", sr, Refresh), body, sy)
+            sy = P(GUI:CreateFormSlider(body, "Fade Speed (sec)", 0.1, 1.0, 0.1, "fadeDuration", sr, Refresh), body, sy)
+            P(GUI:CreateFormCheckbox(body, "Hide When FarmHud Is Active", "hideWhenFarmHudShown", sr, Refresh), body, sy)
         end, sections, relayout)
 
         -- Bar Size

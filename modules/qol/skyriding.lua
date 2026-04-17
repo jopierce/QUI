@@ -47,6 +47,7 @@ local fadeTargetAlpha = 1
 local inCombat = false
 local hasThrillOfTheSkiesBuff = false
 local isPreviewMode = false
+local farmHudHooked = false
 
 -- Smooth animation state
 local targetBarValue = 0
@@ -971,6 +972,11 @@ local function UpdateVisibility()
         return
     end
 
+    if settings.hideWhenFarmHudShown and _G.FarmHud and _G.FarmHud.IsShown and _G.FarmHud:IsShown() then
+        skyridingFrame:Hide()
+        return
+    end
+
     local gliding, canGlideNow, _ = GetGlidingInfo()
     isGliding = gliding
     canGlide = canGlideNow
@@ -1320,6 +1326,27 @@ function EnsureSkyridingFrame()
 end
 
 ---------------------------------------------------------------------------
+-- External HUD Integration
+-- Hook a third-party fullscreen HUD frame so we can yield to it without
+-- polling. The external frame hides our skyriding display while visible.
+---------------------------------------------------------------------------
+local function TryHookFarmHud()
+    if farmHudHooked then return end
+    local externalFrame = _G.FarmHud
+    if not externalFrame or type(externalFrame.HookScript) ~= "function" then return end
+
+    externalFrame:HookScript("OnShow", function()
+        _visibilityDirty = true
+        if skyridingFrame then UpdateVisibility() end
+    end)
+    externalFrame:HookScript("OnHide", function()
+        _visibilityDirty = true
+        if skyridingFrame then UpdateVisibility() end
+    end)
+    farmHudHooked = true
+end
+
+---------------------------------------------------------------------------
 -- Event Handling
 ---------------------------------------------------------------------------
 local eventFrame = CreateFrame("Frame")
@@ -1345,6 +1372,7 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         -- (truthy) or preview-mode entry. Non-skyriding characters never
         -- allocate the ~27 frame/texture objects.
     elseif event == "PLAYER_ENTERING_WORLD" then
+        TryHookFarmHud()
         RefreshSkyridingState()
         -- Loading screens can briefly preserve the pre-instance mount/glide state.
         -- Recheck once Blizzard has finished updating player movement state.
