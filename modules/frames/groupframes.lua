@@ -2399,10 +2399,6 @@ local function DecorateGroupFrame(frame)
     -- Keep backward compat alias for single-icon references
     frame.defensiveIcon = frame.defensiveIcons[1]
 
-    -- Party Tracker: store px for lazy icon creation (icons created on
-    -- first use, not at decoration time, to avoid backdrop overhead)
-    frame._partyTrackerPx = px
-
     -- Portrait (optional, side-attached)
     local portraitSettings = GetPortraitSettings(isRaid)
     if portraitSettings and portraitSettings.showPortrait then
@@ -4998,14 +4994,6 @@ function QUI_GF:RefreshAllFrames()
     if ns.QUI_GroupFramePrivateAuras and ns.QUI_GroupFramePrivateAuras.RefreshAll then
         ns.QUI_GroupFramePrivateAuras:RefreshAll()
     end
-
-    -- Party Tracker modules
-    local ptCCIcons = ns.PartyTracker_CCIcons
-    if ptCCIcons and ptCCIcons.RefreshAll then ptCCIcons.RefreshAll() end
-    local ptKickTimer = ns.PartyTracker_KickTimer
-    if ptKickTimer and ptKickTimer.RefreshAll then ptKickTimer.RefreshAll() end
-    local ptCDDisplay = ns.PartyTracker_CooldownDisplay
-    if ptCDDisplay and ptCDDisplay.RefreshAll then ptCDDisplay.RefreshAll() end
 end
 
 ---------------------------------------------------------------------------
