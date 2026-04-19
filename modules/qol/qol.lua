@@ -308,7 +308,7 @@ local function HookTalentReminderAlerts()
         hooksecurefunc("MainMenuMicroButton_ShowAlert", function(button)
             C_Timer.After(0, function()
                 -- If microbar is hidden/invisible, suppress ALL micro button alerts
-                if IsMicrobarEffectivelyHidden() then
+                if IsMicrobarEffectivelyHidden() or IsPopupBlockEnabled("blockMicroButtonGlows") then
                     HideTalentMicroButtonAlert(button)
                     return
                 end
