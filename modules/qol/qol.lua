@@ -55,6 +55,7 @@ local talentMicroButtonAlertCandidates = {
 local hookedAlertSystems = {}
 local eventToastHooked = false
 local mainMenuAlertHooked = false
+local microButtonPulseHooked = false
 local _quiPopupBlockerHooked = {}  -- Track hooked alert frames (avoids writing to Blizzard frames)
 
 local function GetMaxStaticPopupDialogs()
@@ -220,6 +221,9 @@ local function HideTalentMicroButtonAlert(button)
     end
 
     if button.FlashBorder then
+        -- Alpha 0 persists across re-shows; Blizzard pulse animations can
+        -- re-show the texture, but with alpha 0 it renders invisibly.
+        button.FlashBorder:SetAlpha(0)
         button.FlashBorder:Hide()
     end
     if button.NewFeatureTexture then
@@ -340,7 +344,37 @@ local function HookTalentReminderAlerts()
     -- children can fire OnShow from secure context (MicroButtonAndBagsBar layout),
     -- and HookScript injects addon code into that context. Taint propagates through
     -- ShowUIPanel → GameMenuFrame → callback() → ADDON_ACTION_FORBIDDEN.
-    -- FlashBorder is already hidden by HideTalentMicroButtonAlert() above.
+    --
+    -- Instead, hook the named globals MicroButtonPulse / MicroButtonPulseStop.
+    -- hooksecurefunc on named globals is taint-safe (the original runs first,
+    -- untainted), and Hide/SetAlpha on a texture from our deferred callback
+    -- doesn't taint secure state. This re-suppresses FlashBorder whenever
+    -- Blizzard re-triggers the pulse (talent change, spec swap, etc.).
+    if not microButtonPulseHooked then
+        if type(MicroButtonPulse) == "function" then
+            hooksecurefunc("MicroButtonPulse", function(button)
+                C_Timer.After(0, function()
+                    if not button then return end
+                    if IsMicrobarEffectivelyHidden()
+                        or (IsPopupBlockEnabled("blockTalentMicroButtonAlerts") and IsTalentMicroButton(button)) then
+                            HideTalentMicroButtonAlert(button)
+                    end
+                end)
+            end)
+        end
+        if type(MicroButtonPulseStop) == "function" then
+            hooksecurefunc("MicroButtonPulseStop", function(button)
+                C_Timer.After(0, function()
+                    if not button then return end
+                    if button.FlashBorder then
+                        button.FlashBorder:SetAlpha(0)
+                        button.FlashBorder:Hide()
+                    end
+                end)
+            end)
+        end
+        microButtonPulseHooked = true
+    end
 end
 
 -- TAINT SAFETY: HelpTip is a Lua mixin (not a C-side API). Calling ANY of its
