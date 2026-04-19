@@ -127,6 +127,13 @@ function QUI:SlashCommandOpen(input)
             print("|cff60A5FAQUI:|r CDM Spell Composer not available. Enable CDM first.")
         end
         return
+    elseif input and input == "helptipscan" then
+        if _G.QUI_DebugScanHelpTips then
+            _G.QUI_DebugScanHelpTips()
+        else
+            print("|cff60A5FAQUI:|r HelpTip scanner not loaded.")
+        end
+        return
     elseif input and input:match("^migration") then
         -- /qui migration             → status (current schema version + backup slots)
         -- /qui migration status      → same

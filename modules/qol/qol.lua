@@ -280,14 +280,50 @@ end
 -- write to HelpTip's Lua state. We use SetAlpha(0) rather than Hide() so the
 -- frame's OnHide handler never fires → HelpTip's framePool:Release is never
 -- triggered from our context.
+local function AlphaZeroHelpTip(child)
+    if child.SetAlpha then child:SetAlpha(0) end
+    if child.EnableMouse then child:EnableMouse(false) end
+end
+
 local function HideHelpTipsOnButton(button)
     if not button or type(button.GetChildren) ~= "function" then return end
     local children = { button:GetChildren() }
     for i = 1, #children do
         local child = children[i]
         if IsHelpTipShapedFrame(child) and child.IsShown and child:IsShown() then
-            if child.SetAlpha then child:SetAlpha(0) end
-            if child.EnableMouse then child:EnableMouse(false) end
+            AlphaZeroHelpTip(child)
+        end
+    end
+end
+
+-- Builds a lookup set {[frameRef]=true} of the live micro button frames.
+local function BuildMicroButtonSet()
+    local set = {}
+    for i = 1, #allMicroButtonNames do
+        local btn = _G[allMicroButtonNames[i]]
+        if btn then set[btn] = true end
+    end
+    return set
+end
+
+-- Fallback sweep: HelpTip frames are often parented to UIParent with SetPoint
+-- anchored to the micro button (not direct children of the button). Scan
+-- UIParent children once per tick and hide any HelpTip-shaped frame that's
+-- anchored to a known micro button.
+local function SweepHelpTipsFromUIParent()
+    if not UIParent or type(UIParent.GetChildren) ~= "function" then return end
+    local micros = BuildMicroButtonSet()
+    local kids = { UIParent:GetChildren() }
+    for i = 1, #kids do
+        local child = kids[i]
+        if IsHelpTipShapedFrame(child) and child.IsShown and child:IsShown()
+            and type(child.GetNumPoints) == "function" then
+                local hit = false
+                for p = 1, child:GetNumPoints() do
+                    local _, relTo = child:GetPoint(p)
+                    if relTo and micros[relTo] then hit = true; break end
+                end
+                if hit then AlphaZeroHelpTip(child) end
         end
     end
 end
@@ -447,11 +483,62 @@ local function SweepMicroButtonHelpTips()
     if not (IsMicrobarEffectivelyHidden() or IsPopupBlockEnabled("blockMicroButtonGlows")) then
         return
     end
+    -- 1) Direct children of each micro button (covers HelpTips parented to button)
     for _, buttonName in ipairs(allMicroButtonNames) do
         local btn = _G[buttonName]
         if btn then HideHelpTipsOnButton(btn) end
     end
+    -- 2) UIParent children anchored to a micro button (covers HelpTips
+    --    parented to UIParent with SetPoint(..., microButton, ...))
+    SweepHelpTipsFromUIParent()
 end
+
+-- Debug command: /qui helptipscan — dumps every HelpTip-shaped frame we can
+-- find and where it's parented/anchored, so we can diagnose why a specific
+-- callout isn't being caught.
+local function DebugScanHelpTips()
+    local function dump(prefix, frame)
+        local name = (frame.GetName and frame:GetName()) or "<unnamed>"
+        local parent = frame.GetParent and frame:GetParent()
+        local pname = (parent and parent.GetName and parent:GetName()) or "<unnamed-parent>"
+        local txt = (frame.Text and frame.Text.GetText and frame.Text:GetText()) or ""
+        local shown = (frame.IsShown and frame:IsShown()) and "shown" or "hidden"
+        local anchors = {}
+        if type(frame.GetNumPoints) == "function" then
+            for p = 1, frame:GetNumPoints() do
+                local _, relTo = frame:GetPoint(p)
+                local rname = (relTo and relTo.GetName and relTo:GetName()) or "?"
+                table.insert(anchors, rname)
+            end
+        end
+        print(string.format("[QUI HelpTipScan] %s name=%s parent=%s state=%s anchors={%s} text=%q",
+            prefix, name, pname, shown, table.concat(anchors, ","), txt or ""))
+    end
+
+    print("[QUI HelpTipScan] --- scanning UIParent children ---")
+    local kids = UIParent and { UIParent:GetChildren() } or {}
+    local count = 0
+    for i = 1, #kids do
+        if IsHelpTipShapedFrame(kids[i]) then
+            dump("UIParent", kids[i])
+            count = count + 1
+        end
+    end
+    print(string.format("[QUI HelpTipScan] --- scanning micro button children (%d total) ---", #allMicroButtonNames))
+    for _, buttonName in ipairs(allMicroButtonNames) do
+        local btn = _G[buttonName]
+        if btn and btn.GetChildren then
+            for _, c in ipairs({ btn:GetChildren() }) do
+                if IsHelpTipShapedFrame(c) then
+                    dump(buttonName, c)
+                    count = count + 1
+                end
+            end
+        end
+    end
+    print(string.format("[QUI HelpTipScan] total HelpTip-shaped frames found: %d", count))
+end
+_G.QUI_DebugScanHelpTips = DebugScanHelpTips
 
 local function RefreshHelpTipSweeper()
     local shouldRun = IsPopupBlockEnabled("blockMicroButtonGlows")
