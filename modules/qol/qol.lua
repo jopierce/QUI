@@ -13,6 +13,7 @@ local qolFrame = CreateFrame("Frame")
 local popupBlockerDefaults = {
     enabled = false,
     blockTalentMicroButtonAlerts = false,
+    blockMicroButtonGlows = false,
     blockHelpTips = false,
     blockEventToasts = false,
     blockMountAlerts = false,
@@ -277,25 +278,26 @@ local function HideAllMicroButtonAlerts()
 end
 
 local function HideTalentReminderAlerts()
-    -- If microbar is hidden, suppress ALL micro button alerts
-    if IsMicrobarEffectivelyHidden() then
+    -- Broad sweep: microbar hidden (alerts would be off-screen) OR user opted
+    -- into blocking ALL micro button glows → suppress every micro button.
+    if IsMicrobarEffectivelyHidden() or IsPopupBlockEnabled("blockMicroButtonGlows") then
         HideAllMicroButtonAlerts()
-        return
     end
 
-    if not IsPopupBlockEnabled("blockTalentMicroButtonAlerts") then return end
-
-    for _, buttonName in ipairs(talentMicroButtonCandidates) do
-        local button = _G[buttonName]
-        if button then
-            HideTalentMicroButtonAlert(button)
+    -- Talent-specific sweep (named alert frames beyond the generic button set).
+    if IsPopupBlockEnabled("blockTalentMicroButtonAlerts") then
+        for _, buttonName in ipairs(talentMicroButtonCandidates) do
+            local button = _G[buttonName]
+            if button then
+                HideTalentMicroButtonAlert(button)
+            end
         end
-    end
 
-    for _, alertName in ipairs(talentMicroButtonAlertCandidates) do
-        local alertFrame = _G[alertName]
-        if alertFrame then
-            alertFrame:Hide()
+        for _, alertName in ipairs(talentMicroButtonAlertCandidates) do
+            local alertFrame = _G[alertName]
+            if alertFrame then
+                alertFrame:Hide()
+            end
         end
     end
 end
@@ -327,11 +329,27 @@ local function HookTalentReminderAlerts()
             alertFrame:HookScript("OnShow", function(self)
                 C_Timer.After(0, function()
                     if not self or not self.Hide then return end
-                    if IsMicrobarEffectivelyHidden() then
-                        self:Hide()
-                        return
+                    if IsMicrobarEffectivelyHidden()
+                        or IsPopupBlockEnabled("blockMicroButtonGlows")
+                        or IsPopupBlockEnabled("blockTalentMicroButtonAlerts") then
+                            self:Hide()
                     end
-                    if IsPopupBlockEnabled("blockTalentMicroButtonAlerts") then
+                end)
+            end)
+            _quiPopupBlockerHooked[alertFrame] = true
+        end
+    end
+
+    -- Hook OnShow on non-talent micro button alert frames too (e.g. CollectionsMicroButtonAlert,
+    -- AchievementMicroButtonAlert). These are plain callout frames — not secure-layout
+    -- children like FlashBorder — so HookScript is taint-safe here.
+    for _, buttonName in ipairs(allMicroButtonNames) do
+        local alertFrame = _G[buttonName .. "Alert"]
+        if alertFrame and not _quiPopupBlockerHooked[alertFrame] then
+            alertFrame:HookScript("OnShow", function(self)
+                C_Timer.After(0, function()
+                    if not self or not self.Hide then return end
+                    if IsMicrobarEffectivelyHidden() or IsPopupBlockEnabled("blockMicroButtonGlows") then
                         self:Hide()
                     end
                 end)
@@ -356,6 +374,7 @@ local function HookTalentReminderAlerts()
                 C_Timer.After(0, function()
                     if not button then return end
                     if IsMicrobarEffectivelyHidden()
+                        or IsPopupBlockEnabled("blockMicroButtonGlows")
                         or (IsPopupBlockEnabled("blockTalentMicroButtonAlerts") and IsTalentMicroButton(button)) then
                             HideTalentMicroButtonAlert(button)
                     end
