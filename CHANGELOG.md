@@ -5,6 +5,23 @@ All notable changes to QUI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
+
+## v3.4.2 - 2026-04-20
+
+### Added
+- feat(qol): auto-close settings panel and layout mode on combat entry
+- feat(qol): add 'Block All Microbutton Glows' toggle to popup blocker
+
+### Fixed
+- fix(cdm): symmetric icon↔bar viewer fallback; suppress mirror on inactive
+- fix(raidbuffs): guard per-icon geometry behind InCombatLockdown
+- fix(uihider): use state driver for WorldMap blackout to avoid pin taint
+- fix(qol): NEW_COSMETIC_ADDED event doesn't exist; pcall each RegisterEvent
+- feat(qol): UIParent fallback for HelpTip sweep + /qui helptipscan debug
+- feat(qol): suppress HelpTip callouts on micro buttons via structural sweep
+- fix(qol): apply blockMicroButtonGlows to MainMenuMicroButton_ShowAlert hook
+- fix(cdm): guard ResolveDisplaySpellID at glow candidate boundary
+- fix(cdm): guard secret spellIDs at glow candidate boundary
 ## v3.4.1 - 2026-04-19
 
 ### Added
