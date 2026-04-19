@@ -473,12 +473,10 @@ local function RefreshHelpTipSuppression()
     -- intentionally empty — see taint safety note above
 end
 
--- Sweep ticker for micro button HelpTips. Scoped to the 12 micro buttons, so
--- each tick checks at most 12 * (few children) = ~24 frames. Pure C-side
--- Frame:GetChildren + SetAlpha/EnableMouse — does NOT touch the HelpTip Lua
--- module. Only runs while blockMicroButtonGlows (or microbar-hidden) is active.
-local helpTipSweepTicker = nil
-
+-- Event-driven sweep for micro button HelpTips. Pure C-side (Frame:GetChildren
+-- + SetAlpha/EnableMouse) — does NOT touch the HelpTip Lua module, so no
+-- taint risk. Triggered by the events that actually cause HelpTips to appear
+-- on micro buttons, so no polling cost.
 local function SweepMicroButtonHelpTips()
     if not (IsMicrobarEffectivelyHidden() or IsPopupBlockEnabled("blockMicroButtonGlows")) then
         return
@@ -493,63 +491,37 @@ local function SweepMicroButtonHelpTips()
     SweepHelpTipsFromUIParent()
 end
 
--- Debug command: /qui helptipscan — dumps every HelpTip-shaped frame we can
--- find and where it's parented/anchored, so we can diagnose why a specific
--- callout isn't being caught.
-local function DebugScanHelpTips()
-    local function dump(prefix, frame)
-        local name = (frame.GetName and frame:GetName()) or "<unnamed>"
-        local parent = frame.GetParent and frame:GetParent()
-        local pname = (parent and parent.GetName and parent:GetName()) or "<unnamed-parent>"
-        local txt = (frame.Text and frame.Text.GetText and frame.Text:GetText()) or ""
-        local shown = (frame.IsShown and frame:IsShown()) and "shown" or "hidden"
-        local anchors = {}
-        if type(frame.GetNumPoints) == "function" then
-            for p = 1, frame:GetNumPoints() do
-                local _, relTo = frame:GetPoint(p)
-                local rname = (relTo and relTo.GetName and relTo:GetName()) or "?"
-                table.insert(anchors, rname)
-            end
-        end
-        print(string.format("[QUI HelpTipScan] %s name=%s parent=%s state=%s anchors={%s} text=%q",
-            prefix, name, pname, shown, table.concat(anchors, ","), txt or ""))
-    end
-
-    print("[QUI HelpTipScan] --- scanning UIParent children ---")
-    local kids = UIParent and { UIParent:GetChildren() } or {}
-    local count = 0
-    for i = 1, #kids do
-        if IsHelpTipShapedFrame(kids[i]) then
-            dump("UIParent", kids[i])
-            count = count + 1
-        end
-    end
-    print(string.format("[QUI HelpTipScan] --- scanning micro button children (%d total) ---", #allMicroButtonNames))
-    for _, buttonName in ipairs(allMicroButtonNames) do
-        local btn = _G[buttonName]
-        if btn and btn.GetChildren then
-            for _, c in ipairs({ btn:GetChildren() }) do
-                if IsHelpTipShapedFrame(c) then
-                    dump(buttonName, c)
-                    count = count + 1
-                end
-            end
-        end
-    end
-    print(string.format("[QUI HelpTipScan] total HelpTip-shaped frames found: %d", count))
-end
-_G.QUI_DebugScanHelpTips = DebugScanHelpTips
+-- Events that reliably trigger a micro button HelpTip appearance. Each fires
+-- once per state change (not per frame), so the cost is trivial. A short
+-- C_Timer.After defer lets Blizzard actually create/show the HelpTip before
+-- we sweep.
+local helpTipSweepEvents = {
+    "PLAYER_ENTERING_WORLD",        -- Login / zone change (catches pre-existing tips)
+    "NEW_MOUNT_ADDED",              -- Collections: new mount
+    "NEW_PET_ADDED",                -- Collections: new pet
+    "NEW_TOY_ADDED",                -- Collections: new toy
+    "NEW_COSMETIC_ADDED",           -- Collections: new cosmetic / appearance
+    "ACHIEVEMENT_EARNED",           -- Achievements button
+    "TRAIT_CONFIG_UPDATED",         -- PlayerSpells/Talents button
+    "PLAYER_TALENT_UPDATE",         -- Legacy talent event
+    "QUEST_LOG_UPDATE",             -- Quest log callouts
+}
+local helpTipSweepFrame = CreateFrame("Frame")
+helpTipSweepFrame:SetScript("OnEvent", function()
+    C_Timer.After(0.1, SweepMicroButtonHelpTips)
+end)
 
 local function RefreshHelpTipSweeper()
     local shouldRun = IsPopupBlockEnabled("blockMicroButtonGlows")
         or IsMicrobarEffectivelyHidden()
-    if shouldRun and not helpTipSweepTicker then
-        -- Immediate first sweep for any HelpTips currently showing
+    if shouldRun then
+        for _, ev in ipairs(helpTipSweepEvents) do
+            helpTipSweepFrame:RegisterEvent(ev)
+        end
+        -- Immediate sweep for any HelpTips currently showing
         SweepMicroButtonHelpTips()
-        helpTipSweepTicker = C_Timer.NewTicker(0.5, SweepMicroButtonHelpTips)
-    elseif not shouldRun and helpTipSweepTicker then
-        helpTipSweepTicker:Cancel()
-        helpTipSweepTicker = nil
+    else
+        helpTipSweepFrame:UnregisterAllEvents()
     end
 end
 
