@@ -101,6 +101,16 @@ local BUTTON_COUNTS = {
     bar6 = 12, bar7 = 12, bar8 = 12, pet = 10, stance = 10,
 }
 
+local BAR_ACTION_OFFSETS = {
+    bar2 = 60,   -- slots 61-72
+    bar3 = 48,   -- slots 49-60
+    bar4 = 24,   -- slots 25-36
+    bar5 = 36,   -- slots 37-48
+    bar6 = 144,  -- slots 145-156
+    bar7 = 156,  -- slots 157-168
+    bar8 = 168,  -- slots 169-180
+}
+
 -- Binding command prefixes for LibKeyBound integration
 local BINDING_COMMANDS = {
     bar1 = "ACTIONBUTTON",           -- ACTIONBUTTON1-12
@@ -1186,6 +1196,27 @@ local function SetBarContainerShown(container, shown)
         container:Hide()
     end
 end
+
+local function InstallSecureActionFlagRefresh(btn)
+    if not btn or btn._quiActionFlagRefreshInstalled then return end
+    btn._quiActionFlagRefreshInstalled = true
+    btn:SetAttribute("QUI_UpdateActionFlags", [[
+        local action = self:GetAttribute("action")
+        local pressAndHold = false
+
+        self:SetAttribute("typerelease", "actionrelease")
+        if action and IsPressHoldReleaseSpell then
+            local actionType, id, subType = GetActionInfo(action)
+            if actionType == "spell" then
+                pressAndHold = IsPressHoldReleaseSpell(id)
+            elseif actionType == "macro" and subType == "spell" then
+                pressAndHold = IsPressHoldReleaseSpell(id)
+            end
+        end
+
+        self:SetAttribute("pressAndHoldAction", pressAndHold)
+    ]])
+end
 ActionBarsOwned.SetBarContainerShown = SetBarContainerShown
 
 ---------------------------------------------------------------------------
@@ -2165,6 +2196,19 @@ local function SetupBar1Paging(container)
     RegisterStateDriver(container, "page", BuildPagingCondition())
 end
 
+local function SetupSecureActionFlagRefresh(container)
+    if not container or container._quiActionFlagRefreshSetup then return end
+    container._quiActionFlagRefreshSetup = true
+    container:SetAttribute("qui-refresh-target", nil)
+    container:SetAttribute("_onattributechanged", [[
+        if name ~= "qui-refresh-target" then return end
+        local ref = value and self:GetFrameRef(value)
+        if ref then
+            ref:RunAttribute("QUI_UpdateActionFlags")
+        end
+    ]])
+end
+
 ---------------------------------------------------------------------------
 -- BAR BUILD (native engine)
 ---------------------------------------------------------------------------
@@ -2186,6 +2230,281 @@ local function GetOriginalBlizzButtons(barKey)
     return buttons
 end
 
+local function EnsureOwnedActionButton(container, barKey, btnName, index)
+    local btn = _G[btnName]
+    local existed = btn ~= nil
+    if not btn then
+        local ok
+        ok, btn = pcall(CreateFrame, "CheckButton", btnName, container, "ActionButtonTemplate, SecureActionButtonTemplate")
+        if not ok then btn = _G[btnName] end
+        btn:SetAttribute("type", "action")
+        btn:SetAttribute("checkselfcast", true)
+        btn:SetAttribute("checkfocuscast", true)
+        btn:SetAttribute("checkmouseovercast", true)
+        btn:SetAttribute("useparent-unit", true)
+        btn:SetAttribute("useparent-actionpage", true)
+        btn:RegisterForDrag("LeftButton", "RightButton")
+        btn:RegisterForClicks("AnyDown", "AnyUp")
+        do
+            local _db = GetDB()
+            local _g = _db and _db.global
+            btn:SetAttribute("useOnKeyDown", _g and _g.useOnKeyDown == true)
+        end
+        if not btn.HasPopup then
+            local popupDir
+            btn.HasPopup = true
+            btn.SetPopupDirection = function(_, dir) popupDir = dir end
+            btn.GetPopupDirection = function() return popupDir end
+            btn.SetPopup = function(self2, popup)
+                if popup then
+                    rawset(self2, "_quiPopup", popup)
+                end
+            end
+            btn.ClearPopup = function(self2)
+                rawset(self2, "_quiPopup", nil)
+            end
+        end
+        btn.flashing = 0
+        btn.flashtime = 0
+    else
+        btn:SetParent(container)
+    end
+
+    btn:SetAttribute("qui-refresh-ref", "btn-refresh-" .. barKey .. "-" .. index)
+    InstallSecureActionFlagRefresh(btn)
+    return btn, existed
+end
+
+local function SetupPagedOwnedActionButton(btn, index)
+    btn:SetAttribute("index", index)
+    btn:SetAttribute("action", index)
+    btn:SetAttribute("_childupdate-offset", [[
+        local index = self:GetAttribute("index")
+        local newAction = index + (message or 0)
+        self:SetAttribute("action", newAction)
+        self:RunAttribute("QUI_UpdateActionFlags")
+        self:CallMethod("SafeSyncAction")
+    ]])
+    btn.SafeSyncAction = ActionBarsOwned.SafeSyncAction
+    btn.UpdateCooldown = function(self)
+        ActionBarsOwned.UpdateCooldown(self)
+    end
+    btn.UpdateCount = function(self)
+        local action = self.action
+        if not action or not HasAction(action) then
+            if self.Count then self.Count:SetText("") end
+            return
+        end
+        if C_ActionBar and C_ActionBar.GetActionDisplayCount then
+            if self.Count then self.Count:SetText(C_ActionBar.GetActionDisplayCount(action) or "") end
+        elseif self.Count then
+            self.Count:SetText("")
+        end
+    end
+end
+
+local function SetupFixedOwnedActionButton(container, btn, action)
+    container:SetFrameRef("init-btn", btn)
+    container:Execute(string.format([[
+        local btn = self:GetFrameRef("init-btn")
+        btn:SetAttribute("action", %d)
+        btn:RunAttribute("QUI_UpdateActionFlags")
+    ]], action))
+end
+
+local function FinalizeStandardOwnedActionButtons(container, barKey, buttons)
+    SetupSecureActionFlagRefresh(container)
+    for i, btn in ipairs(buttons) do
+        container:SetFrameRef("btn-refresh-" .. barKey .. "-" .. i, btn)
+    end
+end
+
+local function SuppressOriginalStandardBar(barFrame, barKey)
+    if barFrame then
+        HideManagedBlizzardBarFrame(barFrame, true)
+    end
+    local origButtons = GetOriginalBlizzButtons(barKey)
+    for _, blizzBtn in ipairs(origButtons) do
+        if barKey == "bar1" then
+            blizzBtn:SetParent(hiddenBarParent)
+        end
+        SuppressBlizzardButton(blizzBtn)
+    end
+    if barKey == "bar1" then
+        local leaveBtn = _G.MainMenuBarVehicleLeaveButton
+        if leaveBtn then
+            leaveBtn:SetParent(UIParent)
+        end
+    end
+end
+
+local function BuildStandardOwnedButtons(container, barKey)
+    local buttons = {}
+
+    if barKey == "bar1" then
+        for i = 1, 12 do
+            local btnName = "QUI_Bar1Button" .. i
+            local btn, existed = EnsureOwnedActionButton(container, barKey, btnName, i)
+            if not existed then
+                SetupPagedOwnedActionButton(btn, i)
+                btn.action = i
+            else
+                btn.action = btn:GetAttribute("action") or i
+            end
+            btn:Show()
+            buttons[i] = btn
+        end
+        SetupBar1Paging(container)
+        return buttons
+    end
+
+    local offset = BAR_ACTION_OFFSETS[barKey] or 0
+    local barNum = barKey:sub(4)
+    for i = 1, 12 do
+        local btnName = "QUI_Bar" .. barNum .. "Button" .. i
+        local btn, existed = EnsureOwnedActionButton(container, barKey, btnName, i)
+        local action = offset + i
+        if not existed then
+            SetupFixedOwnedActionButton(container, btn, action)
+        end
+        btn.action = action
+        btn:Show()
+        buttons[i] = btn
+    end
+
+    return buttons
+end
+
+local function SetupStandardOwnedButtonRuntime(btn)
+    btn:UnregisterAllEvents()
+    btn:SetScript("OnEvent", function(self, event, ...)
+        if event == "ACTIONBAR_UPDATE_COOLDOWN"
+            or event == "LOSS_OF_CONTROL_ADDED"
+            or event == "LOSS_OF_CONTROL_UPDATE" then
+            ActionBarsOwned.UpdateCooldown(self)
+        else
+            ActionBarsOwned.SafeUpdate(self)
+        end
+    end)
+    btn.Update = ActionBarsOwned.SafeUpdate
+    btn.UpdateAction = ActionBarsOwned.SafeSyncAction
+    btn.SafeSyncAction = ActionBarsOwned.SafeSyncAction
+    btn.UpdateCooldown = function(self)
+        ActionBarsOwned.UpdateCooldown(self)
+    end
+    btn.UpdatePressAndHoldAction = function() end
+    btn.UpdateCount = function(self)
+        local action = self.action
+        if not action or not HasAction(action) then
+            self.Count:SetText("")
+            return
+        end
+        if C_ActionBar and C_ActionBar.GetActionDisplayCount then
+            self.Count:SetText(C_ActionBar.GetActionDisplayCount(action) or "")
+        else
+            self.Count:SetText("")
+        end
+    end
+    if SetActionUIButton and btn.action and btn.cooldown then
+        SetActionUIButton(btn, btn.action, btn.cooldown)
+    end
+
+    btn.SetTooltip = function(self)
+        if GetCVar("UberTooltips") == "1" then
+            GameTooltip_SetDefaultAnchor(GameTooltip, self)
+        else
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        end
+        if GameTooltip:SetAction(self.action) then
+            self.UpdateTooltip = self.SetTooltip
+        else
+            self.UpdateTooltip = nil
+        end
+    end
+
+    btn:SetAttribute("buttonlock", GetCVar("lockActionBars") == "1")
+    btn.QUI_PostDrag = function(self)
+        OwnedButton_PostDrag(self)
+    end
+
+    if not btn.quiSecureHooksInstalled then
+        btn.quiSecureHooksInstalled = true
+        SecureHandlerWrapScript(btn, "OnAttributeChanged", btn, [[
+            if name == "action" and IsPressHoldReleaseSpell and type(value) == "number" then
+                self:RunAttribute("QUI_UpdateActionFlags")
+            end
+        ]])
+
+        btn:HookScript("OnEnter", function(self)
+            local global = GetGlobalSettings()
+            if global and global.showTooltips == false then return end
+            self:SetTooltip()
+        end)
+        btn:HookScript("OnLeave", function(self)
+            self.UpdateTooltip = nil
+            GameTooltip:Hide()
+        end)
+
+        btn:HookScript("PreClick", function(self)
+            if InCombatLockdown() then return end
+            local useOnKeyDown = self:GetAttribute("useOnKeyDown")
+            if useOnKeyDown
+                and self:GetAttribute("buttonlock")
+                and IsModifiedClick("PICKUPACTION")
+                and not GetCursorInfo() then
+                self:SetAttribute("useOnKeyDown", false)
+                self._quiPreClickKeyDownBackup = useOnKeyDown
+            end
+        end)
+        btn:HookScript("PostClick", function(self)
+            if self._quiPreClickKeyDownBackup ~= nil then
+                if not InCombatLockdown() then
+                    self:SetAttribute("useOnKeyDown", self._quiPreClickKeyDownBackup)
+                end
+                self._quiPreClickKeyDownBackup = nil
+            end
+        end)
+
+        btn:SetScript("OnDragStart", nil)
+        SecureHandlerWrapScript(btn, "OnDragStart", btn, [[
+            if (self:GetAttribute("buttonlock") and not IsModifiedClick("PICKUPACTION"))
+                or self:GetAttribute("LABdisableDragNDrop") then
+                return false
+            end
+            return "action", self:GetAttribute("action")
+        ]])
+        SecureHandlerWrapScript(btn, "OnDragStart", btn, [[
+            return "message", "update"
+        ]], [[
+            self:CallMethod("QUI_PostDrag")
+        ]])
+
+        btn:SetScript("OnReceiveDrag", nil)
+        SecureHandlerWrapScript(btn, "OnReceiveDrag", btn, [[
+            if (self:GetAttribute("buttonlock") and not IsModifiedClick("PICKUPACTION"))
+                or self:GetAttribute("LABdisableDragNDrop") then
+                return false
+            end
+            return "action", self:GetAttribute("action")
+        ]])
+        SecureHandlerWrapScript(btn, "OnReceiveDrag", btn, [[
+            return "message", "update"
+        ]], [[
+            self:CallMethod("QUI_PostDrag")
+        ]])
+    end
+end
+
+local function PrimeStandardOwnedButtonVisuals(buttons)
+    for _, btn in ipairs(buttons) do
+        if ActionButton_Update then
+            pcall(ActionButton_Update, btn)
+        end
+        ActionBarsOwned.UpdateCooldown(btn)
+        ActionBarsOwned.UpdateOverlayGlow(btn)
+    end
+end
+
 local function BuildBar(barKey)
     local barFrame = GetBarFrame(barKey)
 
@@ -2197,145 +2516,9 @@ local function BuildBar(barKey)
     local settings = GetEffectiveSettings(barKey)
     local buttons = {}
 
-    if barKey == "bar1" then
-        -- BAR 1: Create new ActionButtonTemplate buttons with paging
-        -- Hide Blizzard's bar frame and original buttons
-        if barFrame then
-            HideManagedBlizzardBarFrame(barFrame, true)
-        end
-        local origButtons = GetOriginalBlizzButtons(barKey)
-        for _, blizzBtn in ipairs(origButtons) do
-            blizzBtn:SetParent(hiddenBarParent)
-            SuppressBlizzardButton(blizzBtn)
-        end
-
-        -- Rescue the leave-vehicle button from the hidden Blizzard bar hierarchy.
-        -- MainMenuBarVehicleLeaveButton is a child of MainActionBar; reparenting
-        -- the bar to hiddenBarParent makes it invisible. Reparent to UIParent so
-        -- Blizzard's visibility driver can still show/hide it normally.
-        local leaveBtn = _G.MainMenuBarVehicleLeaveButton
-        if leaveBtn then
-            leaveBtn:SetParent(UIParent)
-        end
-
-        -- Create or reuse QUI bar1 buttons
-        for i = 1, 12 do
-            local btnName = "QUI_Bar1Button" .. i
-            local btn = _G[btnName]
-            if not btn then
-                local ok
-                ok, btn = pcall(CreateFrame, "CheckButton", btnName, container, "ActionButtonTemplate, SecureActionButtonTemplate")
-                if not ok then btn = _G[btnName] end
-                -- Secure action attributes (normally set by ActionBarActionButtonMixin:OnLoad)
-                btn:SetAttribute("type", "action")
-                btn:SetAttribute("checkselfcast", true)
-                btn:SetAttribute("checkfocuscast", true)
-                btn:SetAttribute("checkmouseovercast", true)
-                btn:SetAttribute("useparent-unit", true)
-                btn:SetAttribute("useparent-actionpage", true)
-                btn:RegisterForDrag("LeftButton", "RightButton")
-                -- Register for both down and up clicks — empowered
-                -- spells (Evoker Fire Breath etc.) need mouse-down to
-                -- start the empower and mouse-up to release.
-                btn:RegisterForClicks("AnyDown", "AnyUp")
-                -- Click timing is user-configurable:
-                --   • false (default) — cast on mouse-up. Drag motions
-                --     naturally pre-empt the cast.
-                --   • true — cast on mouse-down for snappier response.
-                -- Empowered spells still work in both modes because
-                -- pressAndHoldAction + typerelease="actionrelease"
-                -- override the timing for press/release flow.
-                do
-                    local _db = GetDB()
-                    local _g = _db and _db.global
-                    btn:SetAttribute("useOnKeyDown", _g and _g.useOnKeyDown == true)
-                end
-                -- Popup direction support for spell flyouts.
-                -- BaseActionButtonMixin:UpdateFlyout bails at
-                -- "if not self.HasPopup" without these methods,
-                -- so the flyoutDirection attribute is never read.
-                if not btn.HasPopup then
-                    local popupDir
-                    btn.HasPopup = true
-                    btn.SetPopupDirection = function(_, dir) popupDir = dir end
-                    btn.GetPopupDirection = function() return popupDir end
-                    btn.SetPopup = function(self2, popup)
-                        if popup then
-                            rawset(self2, "_quiPopup", popup)
-                        end
-                    end
-                    btn.ClearPopup = function(self2)
-                        rawset(self2, "_quiPopup", nil)
-                    end
-                end
-                btn.flashing = 0
-                btn.flashtime = 0
-                btn:SetAttribute("index", i)
-                btn:SetAttribute("action", i)
-                btn:SetAttribute("_childupdate-offset", [[
-                    local index = self:GetAttribute("index")
-                    local newAction = index + (message or 0)
-                    -- Always set action from restricted code so the attribute
-                    -- is untainted.  An addon-side SetAttribute taints the
-                    -- value; Blizzard's Update then propagates that taint
-                    -- through GetActionInfo → IsPressHoldReleaseSpell, causing
-                    -- "attempt to compare a secret number value" in combat.
-                    self:SetAttribute("action", newAction)
-                    -- Pre-set pressAndHoldAction from restricted code so the
-                    -- comparison in Blizzard's ActionButton:Update does not hit
-                    -- the taint barrier when IsPressHoldReleaseSpell returns a
-                    -- secret value during combat.
-                    if IsPressHoldReleaseSpell then
-                        local pressAndHold = false
-                        self:SetAttribute("typerelease", "actionrelease")
-                        local actionType, id, subType = GetActionInfo(newAction)
-                        if actionType == "spell" then
-                            pressAndHold = IsPressHoldReleaseSpell(id)
-                        elseif actionType == "macro" and subType == "spell" then
-                            pressAndHold = IsPressHoldReleaseSpell(id)
-                        end
-                        self:SetAttribute("pressAndHoldAction", pressAndHold)
-                    end
-                    -- Sync button.action on the Lua side so SafeUpdate reads
-                    -- the correct slot.  Without this, the mixin's
-                    -- OnAttributeChanged is the only sync path — fragile
-                    -- because that handler runs in tainted context.
-                    self:CallMethod("SafeSyncAction")
-                ]])
-                -- Methods called during the state driver's immediate fire:
-                -- RegisterStateDriver → _childupdate-offset →
-                -- CallMethod("SafeSyncAction") → SafeUpdate →
-                -- self:UpdateCooldown() / self:UpdateCount().
-                -- Must exist BEFORE SetupBar1Paging.
-                btn.SafeSyncAction = ActionBarsOwned.SafeSyncAction
-                btn.UpdateCooldown = function(self)
-                    ActionBarsOwned.UpdateCooldown(self)
-                end
-                btn.UpdateCount = function(self)
-                    local action = self.action
-                    if not action or not HasAction(action) then
-                        if self.Count then self.Count:SetText("") end
-                        return
-                    end
-                    if C_ActionBar and C_ActionBar.GetActionDisplayCount then
-                        if self.Count then self.Count:SetText(C_ActionBar.GetActionDisplayCount(action) or "") end
-                    elseif self.Count then
-                        self.Count:SetText("")
-                    end
-                end
-                -- Sync btn.action (ActionButtonTemplate has no
-                -- OnAttributeChanged to do this automatically).
-                btn.action = i
-            else
-                btn:SetParent(container)
-                btn.action = btn:GetAttribute("action") or i
-            end
-            btn:Show()
-            buttons[i] = btn
-        end
-
-        -- Register paging state driver
-        SetupBar1Paging(container)
+    if barKey == "bar1" or (barKey:match("^bar[2-8]$")) then
+        SuppressOriginalStandardBar(barFrame, barKey)
+        buttons = BuildStandardOwnedButtons(container, barKey)
     elseif barKey == "pet" or barKey == "stance" then
         -- PET/STANCE: Create fresh buttons from Blizzard templates, then
         -- fully suppress the originals (same pattern as bars 1-8 and
@@ -2861,111 +3044,12 @@ local function BuildBar(barKey)
                 end)
             end
         end
-    else
-        -- BARS 2-8: Create fresh ActionButtonTemplate buttons.
-        -- Fully dispose Blizzard's bar frame and original buttons to prevent
-        -- double event processing and taint propagation from hidden frames.
-        if barFrame then
-            HideManagedBlizzardBarFrame(barFrame, true)
-        end
-        -- Fully suppress hidden Blizzard buttons via shared helper.
-        local origButtons = GetOriginalBlizzButtons(barKey)
-        for _, blizzBtn in ipairs(origButtons) do
-            SuppressBlizzardButton(blizzBtn)
-        end
-
-        -- Action slot offsets: each bar maps to a fixed range of action slots.
-        local BAR_ACTION_OFFSETS = {
-            bar2 = 60,   -- slots 61-72
-            bar3 = 48,   -- slots 49-60
-            bar4 = 24,   -- slots 25-36
-            bar5 = 36,   -- slots 37-48
-            bar6 = 144,  -- slots 145-156
-            bar7 = 156,  -- slots 157-168
-            bar8 = 168,  -- slots 169-180
-        }
-        local offset = BAR_ACTION_OFFSETS[barKey] or 0
-        local barNum = barKey:sub(4)  -- "bar2" → "2"
-
-        for i = 1, 12 do
-            local btnName = "QUI_Bar" .. barNum .. "Button" .. i
-            local btn = _G[btnName]
-            if not btn then
-                -- pcall: during combat reload, the template's OnLoad fires
-                -- synchronously and hits secret-value comparisons in the
-                -- tainted call stack.  The frame IS created even if OnLoad
-                -- errors — retrieve it from globals.
-                local ok
-                ok, btn = pcall(CreateFrame, "CheckButton", btnName, container, "ActionButtonTemplate, SecureActionButtonTemplate")
-                if not ok then btn = _G[btnName] end
-                -- Secure action attributes (normally set by ActionBarActionButtonMixin:OnLoad)
-                btn:SetAttribute("type", "action")
-                btn:SetAttribute("checkselfcast", true)
-                btn:SetAttribute("checkfocuscast", true)
-                btn:SetAttribute("checkmouseovercast", true)
-                btn:SetAttribute("useparent-unit", true)
-                btn:SetAttribute("useparent-actionpage", true)
-                btn:RegisterForDrag("LeftButton", "RightButton")
-                -- Click registration and cast-timing policy — see the
-                -- comments on the matching block in the bar1 creation
-                -- path above for full rationale.
-                btn:RegisterForClicks("AnyDown", "AnyUp")
-                do
-                    local _db = GetDB()
-                    local _g = _db and _db.global
-                    btn:SetAttribute("useOnKeyDown", _g and _g.useOnKeyDown == true)
-                end
-                -- Popup direction support — see bar1 creation path.
-                if not btn.HasPopup then
-                    local popupDir
-                    btn.HasPopup = true
-                    btn.SetPopupDirection = function(_, dir) popupDir = dir end
-                    btn.GetPopupDirection = function() return popupDir end
-                    btn.SetPopup = function(self2, popup)
-                        if popup then
-                            rawset(self2, "_quiPopup", popup)
-                        end
-                    end
-                    btn.ClearPopup = function(self2)
-                        rawset(self2, "_quiPopup", nil)
-                    end
-                end
-                btn.flashing = 0
-                btn.flashtime = 0
-                local action = offset + i
-                -- Set action and pressAndHoldAction from RESTRICTED code.
-                -- OnAttributeChanged → Update populates icons here.
-                -- Mixin methods are shadowed AFTER this loop to prevent
-                -- taint errors during subsequent combat events.
-                container:SetFrameRef("init-btn", btn)
-                container:Execute(string.format([[
-                    local btn = self:GetFrameRef("init-btn")
-                    btn:SetAttribute("action", %d)
-                    btn:SetAttribute("typerelease", "actionrelease")
-                    if IsPressHoldReleaseSpell then
-                        local pressAndHold = false
-                        local actionType, id, subType = GetActionInfo(%d)
-                        if actionType == "spell" then
-                            pressAndHold = IsPressHoldReleaseSpell(id)
-                        elseif actionType == "macro" and subType == "spell" then
-                            pressAndHold = IsPressHoldReleaseSpell(id)
-                        end
-                        btn:SetAttribute("pressAndHoldAction", pressAndHold)
-                    end
-                ]], action, action))
-                -- Sync btn.action from the attribute (ActionButtonTemplate
-                -- has no OnAttributeChanged to do this automatically).
-                btn.action = offset + i
-            else
-                btn:SetParent(container)
-                btn.action = offset + i
-            end
-            btn:Show()
-            buttons[i] = btn
-        end
     end
 
     ActionBarsOwned.nativeButtons[barKey] = buttons
+    if barKey ~= "pet" and barKey ~= "stance" and barKey ~= "microbar" and barKey ~= "bags" then
+        FinalizeStandardOwnedActionButtons(container, barKey, buttons)
+    end
 
     -- Build slot→{button, barKey} lookup for O(1) ACTIONBAR_SLOT_CHANGED dispatch
     if not ActionBarsOwned.slotMap then ActionBarsOwned.slotMap = {} end
@@ -2986,212 +3070,13 @@ local function BuildBar(barKey)
     -- hits SafeUpdate instead of the original mixin code.
     if barKey ~= "pet" and barKey ~= "stance" and barKey ~= "microbar" and barKey ~= "bags" then
         for _, btn in ipairs(buttons) do
-            -- Unregister all events — QUI handles events centrally.
-            btn:UnregisterAllEvents()
-            -- Replace OnEvent with QUI's safe handler.  Routes cooldown
-            -- events to QUI's DurationObject path; everything else to
-            -- SafeUpdate.  Uses only truthiness checks — no secret value
-            -- comparisons — so the handler cannot taint the context.
-            btn:SetScript("OnEvent", function(self, event, ...)
-                if event == "ACTIONBAR_UPDATE_COOLDOWN"
-                    or event == "LOSS_OF_CONTROL_ADDED"
-                    or event == "LOSS_OF_CONTROL_UPDATE" then
-                    ActionBarsOwned.UpdateCooldown(self)
-                else
-                    ActionBarsOwned.SafeUpdate(self)
-                end
-            end)
-            -- Shadow taint-unsafe mixin methods.  These shadows are
-            -- permanent and serve two purposes:
-            --   1. Internal calls (e.g. SafeUpdate → self:UpdateCount())
-            --      hit the safe versions.
-            --   2. Any residual mixin paths (OnAttributeChanged → Update)
-            --      are intercepted before they can compare secret values.
-            btn.Update = ActionBarsOwned.SafeUpdate
-            btn.UpdateAction = ActionBarsOwned.SafeSyncAction
-            btn.SafeSyncAction = ActionBarsOwned.SafeSyncAction  -- CallMethod target
-            btn.UpdateCooldown = function(self)
-                ActionBarsOwned.UpdateCooldown(self)
-            end
-            btn.UpdatePressAndHoldAction = function() end
-            btn.UpdateCount = function(self)
-                local action = self.action
-                if not action or not HasAction(action) then
-                    self.Count:SetText("")
-                    return
-                end
-                if C_ActionBar and C_ActionBar.GetActionDisplayCount then
-                    self.Count:SetText(C_ActionBar.GetActionDisplayCount(action) or "")
-                else
-                    self.Count:SetText("")
-                end
-            end
-            -- Register with C-side so it pushes icon/state/cooldown updates.
-            -- Must come AFTER method shadows so ForceUpdateAction → Update()
-            -- hits SafeUpdate.
-            if SetActionUIButton and btn.action and btn.cooldown then
-                SetActionUIButton(btn, btn.action, btn.cooldown)
-            end
-
-            -- ActionButtonTemplate only provides BaseActionButtonMixin (flyout
-            -- handling).  Tooltip code lives in ActionBarActionButtonMixin
-            -- (part of ActionBarButtonTemplate) which QUI does not use.
-            -- Add SetTooltip + OnEnter/OnLeave hooks for action tooltips.
-            btn.SetTooltip = function(self)
-                if GetCVar("UberTooltips") == "1" then
-                    GameTooltip_SetDefaultAnchor(GameTooltip, self)
-                else
-                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                end
-                if GameTooltip:SetAction(self.action) then
-                    self.UpdateTooltip = self.SetTooltip
-                else
-                    self.UpdateTooltip = nil
-                end
-            end
-
-            -- Sync lockActionBars CVar → button attribute so the
-            -- restricted OnDragStart wrap's lock check can read it
-            -- (GetCVar is not available in the restricted env).
-            -- MUST run every Refresh so dropdown changes propagate.
-            btn:SetAttribute("buttonlock", GetCVar("lockActionBars") == "1")
-
-            btn.QUI_PostDrag = function(self)
-                OwnedButton_PostDrag(self)
-            end
-
-            -- One-time hook script and secure wrap install.  HookScript
-            -- and SecureHandlerWrapScript both STACK on repeat calls —
-            -- re-running these on every BuildBar/Refresh would layer N
-            -- copies of every wrap, breaking buttonlock and drag/click
-            -- behavior after a few setting changes.
-            if not btn.quiSecureHooksInstalled then
-                btn.quiSecureHooksInstalled = true
-
-                -- Re-evaluate pressAndHoldAction whenever the button's
-                -- `action` attribute changes.  Empowered / hold-to-
-                -- release spells (Evoker Fire Breath, channeled actions)
-                -- require pressAndHoldAction=true so the secure click
-                -- dispatch fires the "release" action on mouse-up.
-                -- Bar paging (_childupdate-offset, state driver) rewrites
-                -- the action attribute without re-running the initial
-                -- Execute block, so without this wrap the flag is stale
-                -- on every page change.
-                SecureHandlerWrapScript(btn, "OnAttributeChanged", btn, [[
-                    if name == "action" and IsPressHoldReleaseSpell and type(value) == "number" then
-                        local actionType, id, subType = GetActionInfo(value)
-                        local pressAndHold = false
-                        if actionType == "spell" then
-                            pressAndHold = IsPressHoldReleaseSpell(id)
-                        elseif actionType == "macro" and subType == "spell" then
-                            pressAndHold = IsPressHoldReleaseSpell(id)
-                        end
-                        self:SetAttribute("pressAndHoldAction", pressAndHold)
-                        self:SetAttribute("typerelease", "actionrelease")
-                    end
-                ]])
-
-                btn:HookScript("OnEnter", function(self)
-                    local global = GetGlobalSettings()
-                    if global and global.showTooltips == false then return end
-                    self:SetTooltip()
-                end)
-                btn:HookScript("OnLeave", function(self)
-                    self.UpdateTooltip = nil
-                    GameTooltip:Hide()
-                end)
-
-                -- ── PreClick: defer action to mouse-up when drag modifier held ──
-                -- When useOnKeyDown is true the action fires on mouse-
-                -- down, BEFORE OnDragStart can detect the drag motion.
-                -- Without intervention shift-click casts instead of
-                -- picking up the spell.  This Lua pre-click handler
-                -- temporarily disables useOnKeyDown so the action fires
-                -- on mouse-up instead — giving OnDragStart time to
-                -- detect drags while still letting the action through
-                -- for normal modifier+click (e.g. [mod:shift] macros).
-                -- When the cursor already carries a spell (placement),
-                -- the deferral is skipped so the drop goes through.
-                -- Uses Lua hooks (not restricted snippets) because the
-                -- restricted environment lacks GetCursorInfo().
-                -- SetAttribute is fine — bar rearranging is out-of-combat.
-                btn:HookScript("PreClick", function(self)
-                    if InCombatLockdown() then return end
-                    local useOnKeyDown = self:GetAttribute("useOnKeyDown")
-                    if useOnKeyDown
-                        and self:GetAttribute("buttonlock")
-                        and IsModifiedClick("PICKUPACTION")
-                        and not GetCursorInfo() then
-                        self:SetAttribute("useOnKeyDown", false)
-                        self._quiPreClickKeyDownBackup = useOnKeyDown
-                    end
-                end)
-                btn:HookScript("PostClick", function(self)
-                    if self._quiPreClickKeyDownBackup ~= nil then
-                        if not InCombatLockdown() then
-                            self:SetAttribute("useOnKeyDown", self._quiPreClickKeyDownBackup)
-                        end
-                        self._quiPreClickKeyDownBackup = nil
-                    end
-                end)
-
-                -- ── Pickup / Place (secure WrapScript pattern) ──
-                -- Lua OnDragStart/OnReceiveDrag handlers are nil'd, and
-                -- the drag logic runs inside secure WrapScript snippets
-                -- so pickup works in combat via the restricted path and
-                -- the lockActionBars check stays taint-safe.
-                --
-                -- Click timing is NOT handled here — it's seeded at
-                -- button creation from the `useOnKeyDown` profile
-                -- setting and re-applied via QUI_ApplyUseOnKeyDown.
-
-                -- OnDragStart: nil the Lua handler, let WrapScript do the
-                -- pickup via return "action", slot → secure PickupAction.
-                -- Double-wrapped: the post-script does NOT run when the
-                -- inner pre-script causes a pickup, so the outer wrap
-                -- returns a phony "message" so its post-body still fires
-                -- for visual refresh.
-                btn:SetScript("OnDragStart", nil)
-                SecureHandlerWrapScript(btn, "OnDragStart", btn, [[
-                    if (self:GetAttribute("buttonlock") and not IsModifiedClick("PICKUPACTION"))
-                        or self:GetAttribute("LABdisableDragNDrop") then
-                        return false
-                    end
-                    return "action", self:GetAttribute("action")
-                ]])
-                SecureHandlerWrapScript(btn, "OnDragStart", btn, [[
-                    return "message", "update"
-                ]], [[
-                    self:CallMethod("QUI_PostDrag")
-                ]])
-
-                -- OnReceiveDrag: same double-wrap pattern.
-                btn:SetScript("OnReceiveDrag", nil)
-                SecureHandlerWrapScript(btn, "OnReceiveDrag", btn, [[
-                    if (self:GetAttribute("buttonlock") and not IsModifiedClick("PICKUPACTION"))
-                        or self:GetAttribute("LABdisableDragNDrop") then
-                        return false
-                    end
-                    return "action", self:GetAttribute("action")
-                ]])
-                SecureHandlerWrapScript(btn, "OnReceiveDrag", btn, [[
-                    return "message", "update"
-                ]], [[
-                    self:CallMethod("QUI_PostDrag")
-                ]])
-            end
+            SetupStandardOwnedButtonRuntime(btn)
         end
 
         -- Populate visuals via the mixin (safe — GetActionCount is
         -- suppressed, and shadows are in place so any internal
         -- self:Method() calls hit the safe versions).
-        for _, btn in ipairs(buttons) do
-            if ActionButton_Update then
-                pcall(ActionButton_Update, btn)
-            end
-            ActionBarsOwned.UpdateCooldown(btn)
-            ActionBarsOwned.UpdateOverlayGlow(btn)
-        end
+        PrimeStandardOwnedButtonVisuals(buttons)
     end
 
     -- Register frame refs for the secure layout handler (must be outside combat).
@@ -4470,23 +4355,17 @@ abSlotFrame:SetScript("OnUpdate", function(self)
                 pcall(ActionBarsOwned.SafeUpdate, btn)
                 ActionBarsOwned.UpdateCooldown(btn)
                 ActionBarsOwned.UpdateOverlayGlow(btn)
-                -- Re-evaluate pressAndHoldAction for the new spell at
-                -- this slot.  The `action` attribute is the slot index
-                -- and hasn't changed, so the OnAttributeChanged wrap
-                -- won't fire — we must update it from Lua here.
-                -- SetAttribute on secure buttons is combat-blocked, so
-                -- skip in combat (ACTIONBAR_SLOT_CHANGED content changes
-                -- don't normally happen in combat anyway).
-                if not inCombat and IsPressHoldReleaseSpell then
-                    local actionType, id, subType = GetActionInfo(slot)
-                    local pressAndHold = false
-                    if actionType == "spell" then
-                        pressAndHold = IsPressHoldReleaseSpell(id)
-                    elseif actionType == "macro" and subType == "spell" then
-                        pressAndHold = IsPressHoldReleaseSpell(id)
+                -- Slot content can change without the button's action slot
+                -- changing (drag/drop within the same slot), so bounce the
+                -- secure release-state recompute through the bar container
+                -- instead of mutating button attributes from insecure Lua.
+                if not inCombat then
+                    local cont = ActionBarsOwned.containers and ActionBarsOwned.containers[barKey]
+                    local refreshRef = btn.GetAttribute and btn:GetAttribute("qui-refresh-ref")
+                    if cont and refreshRef then
+                        cont:SetAttribute("qui-refresh-target", refreshRef)
+                        cont:SetAttribute("qui-refresh-target", nil)
                     end
-                    btn:SetAttribute("pressAndHoldAction", pressAndHold)
-                    btn:SetAttribute("typerelease", "actionrelease")
                 end
                 if not inCombat then
                     local settings = GetEffectiveSettings(barKey)
