@@ -92,6 +92,72 @@ local function GetPreferredSpellID(icon)
     return entry.overrideSpellID or entry.spellID or entry.id
 end
 
+local PROC_ALERT_REGION_KEYS = {
+    "ProcStartFlipbook",
+    "ProcLoopFlipbook",
+}
+
+local function IsFrameActive(frame)
+    if not frame then return false end
+
+    local ok, active = pcall(function()
+        if type(frame.IsActive) == "function" then
+            return frame:IsActive()
+        end
+        return frame.active or frame.isActive
+    end)
+    if ok and type(active) == "boolean" and active then
+        return true
+    end
+
+    ok, active = pcall(function()
+        return frame:IsShown()
+    end)
+    if ok and active then
+        return true
+    end
+
+    ok, active = pcall(function()
+        return frame:IsVisible()
+    end)
+    if ok and active then
+        return true
+    end
+
+    ok, active = pcall(function()
+        return (frame:GetAlpha() or 0) > 0.05
+    end)
+    if ok and active then
+        return true
+    end
+
+    return false
+end
+
+local function IsBlizzProcVisualActive(icon)
+    if not icon or not icon._spellEntry then return false end
+
+    local child = icon._spellEntry._blizzChild
+    if not child then return false end
+
+    if IsFrameActive(child.SpellActivationAlert)
+        or IsFrameActive(child.OverlayGlow)
+        or IsFrameActive(child._ButtonGlow) then
+        return true
+    end
+
+    local alert = child.SpellActivationAlert
+    if alert then
+        for _, key in ipairs(PROC_ALERT_REGION_KEYS) do
+            if IsFrameActive(alert[key]) then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
 local function ForEachIconSpellID(icon, callback)
     if not icon or not icon._spellEntry or not callback then return end
 
@@ -653,6 +719,9 @@ local function EvaluateGlowForIcon(icon, includeHidden)
                 shouldGlow = true
             end
         end)
+        if not shouldGlow and IsBlizzProcVisualActive(icon) then
+            shouldGlow = true
+        end
     end
 
     if not shouldGlow and spellOvr and spellOvr.procOnUsable then

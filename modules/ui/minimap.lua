@@ -50,7 +50,6 @@ local inInitSafeWindow = false
 local pendingMinimapRefresh = false
 local pendingDrawerSetup = false
 local middleClickMenuHooked = false
-local middleClickBlockerOverlay = nil
 -- (micro/bag visibility now managed by action bars module)
 local minimapOriginalOnMouseUp = nil
 
@@ -1782,25 +1781,16 @@ local function ShowMiddleClickMenu(keepPosition)
 end
 
 local function UpdateMiddleClickMenuOverlayState()
-    if not middleClickBlockerOverlay then return end
-
     local settings = GetSettings()
     local enabled = settings and settings.enabled and settings.middleClickMenuEnabled
 
-    if enabled then
-        middleClickBlockerOverlay:Show()
-        middleClickBlockerOverlay:EnableMouse(true)
-
-        -- Keep hover/tooltips working for minimap children while still
-        -- intercepting MiddleButton clicks for the quick menu.
-        if middleClickBlockerOverlay.SetPropagateMouseMotion then
-            middleClickBlockerOverlay:SetPropagateMouseMotion(true)
-        elseif middleClickBlockerOverlay.SetMouseMotionEnabled then
-            middleClickBlockerOverlay:SetMouseMotionEnabled(false)
+    if not enabled then
+        if middleClickMenuFrame then
+            middleClickMenuFrame:Hide()
         end
-    else
-        middleClickBlockerOverlay:EnableMouse(false)
-        middleClickBlockerOverlay:Hide()
+        if middleClickMenuBlocker then
+            middleClickMenuBlocker:Hide()
+        end
     end
 end
 
@@ -1808,22 +1798,31 @@ local function SetupMiddleClickMenu()
     if middleClickMenuHooked then return end
     middleClickMenuHooked = true
 
-    -- Use a transparent overlay to intercept MiddleButton clicks before they
-    -- reach the Minimap. This prevents Blizzard's OnMouseUp from firing a ping.
-    -- The overlay only registers MiddleButton — all other clicks pass through.
-    if not middleClickBlockerOverlay then
-        middleClickBlockerOverlay = CreateFrame("Button", nil, Minimap)
-        middleClickBlockerOverlay:SetAllPoints(Minimap)
-        middleClickBlockerOverlay:SetFrameLevel(Minimap:GetFrameLevel() + 5)
-        middleClickBlockerOverlay:RegisterForClicks("MiddleButtonUp")
-        middleClickBlockerOverlay:SetPassThroughButtons("LeftButton", "RightButton")
-        middleClickBlockerOverlay:SetScript("OnClick", function(self, button)
-            local settings = GetSettings()
-            if settings and settings.enabled and settings.middleClickMenuEnabled and button == "MiddleButton" then
-                ShowMiddleClickMenu()
-            end
-        end)
+    -- TAINT SAFETY: Avoid SetPassThroughButtons/SetPropagateMouseClicks here.
+    -- Those protected mouse-pass-through APIs can taint Blizzard map pin code
+    -- later in the session, producing ADDON_ACTION_BLOCKED on WorldMap pins.
+    -- Wrapping Minimap's existing OnMouseUp keeps the middle-click feature local
+    -- to the minimap without touching protected pass-through state.
+    local currentOnMouseUp = Minimap:GetScript("OnMouseUp")
+    if currentOnMouseUp and currentOnMouseUp ~= minimapOriginalOnMouseUp then
+        minimapOriginalOnMouseUp = currentOnMouseUp
     end
+
+    Minimap:SetScript("OnMouseUp", function(self, button, ...)
+        local settings = GetSettings()
+        if settings and settings.enabled and settings.middleClickMenuEnabled and button == "MiddleButton" then
+            ShowMiddleClickMenu()
+            return
+        end
+
+        if minimapOriginalOnMouseUp then
+            return minimapOriginalOnMouseUp(self, button, ...)
+        end
+
+        if Minimap_OnClick then
+            return Minimap_OnClick(self)
+        end
+    end)
 
     UpdateMiddleClickMenuOverlayState()
 end
@@ -3164,7 +3163,6 @@ local function HideAllDecorations()
     if drawerFrame then drawerFrame:Hide() end
     if middleClickMenuFrame then middleClickMenuFrame:Hide() end
     if middleClickMenuBlocker then middleClickMenuBlocker:Hide() end
-    if middleClickBlockerOverlay then middleClickBlockerOverlay:Hide() end
     if clockTicker then clockTicker:Cancel(); clockTicker = nil end
     if coordsTicker then coordsTicker:Cancel(); coordsTicker = nil end
 end

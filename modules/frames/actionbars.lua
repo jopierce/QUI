@@ -101,6 +101,16 @@ local BUTTON_COUNTS = {
     bar6 = 12, bar7 = 12, bar8 = 12, pet = 10, stance = 10,
 }
 
+local BAR_ACTION_OFFSETS = {
+    bar2 = 60,   -- slots 61-72
+    bar3 = 48,   -- slots 49-60
+    bar4 = 24,   -- slots 25-36
+    bar5 = 36,   -- slots 37-48
+    bar6 = 144,  -- slots 145-156
+    bar7 = 156,  -- slots 157-168
+    bar8 = 168,  -- slots 169-180
+}
+
 -- Binding command prefixes for LibKeyBound integration
 local BINDING_COMMANDS = {
     bar1 = "ACTIONBUTTON",           -- ACTIONBUTTON1-12
@@ -368,6 +378,34 @@ local hiddenBarParent = CreateFrame("Frame")
 hiddenBarParent:Hide()
 
 local noop = function() end
+
+local function HideManagedBlizzardBarFrame(frame, clearEvents)
+    if not frame then return end
+
+    if clearEvents then
+        frame:UnregisterAllEvents()
+    end
+
+    -- Purge Edit Mode's tainted show flag before reparenting, matching the
+    -- safer HideBlizzard patterns used elsewhere in this module and by BT4.
+    if frame.system then
+        frame.isShownExternal = nil
+        local c = 42
+        repeat
+            if frame[c] == nil then
+                frame[c] = nil
+            end
+            c = c + 1
+        until issecurevariable(frame, "isShownExternal")
+    end
+
+    frame:SetParent(hiddenBarParent)
+    if frame.HideBase then
+        frame:HideBase()
+    else
+        frame:Hide()
+    end
+end
 
 -- QUI uses ActionButtonTemplate + SecureActionButtonTemplate (not
 -- ActionBarButtonTemplate) to avoid auto-registering with the secure
@@ -702,17 +740,21 @@ end
 local function IsSpellFlyoutActiveForBar(barKey)
     if not barKey then return false end
 
-    local flyout = _G.SpellFlyout
-    if not (flyout and flyout.IsShown and flyout:IsShown()) then
-        return false
+    local activeFlyouts = {
+        _G.QUI_SpellFlyout,
+        _G.SpellFlyout,
+    }
+
+    for _, flyout in ipairs(activeFlyouts) do
+        if flyout and flyout.IsShown and flyout:IsShown() then
+            local sourceBarKey = GetSpellFlyoutSourceBarKey(flyout)
+            if sourceBarKey == barKey then
+                return true
+            end
+        end
     end
 
-    local sourceBarKey = GetSpellFlyoutSourceBarKey(flyout)
-    if not sourceBarKey then
-        return false
-    end
-
-    return sourceBarKey == barKey
+    return false
 end
 
 local function ShouldSuspendMouseoverFade(barKey)
@@ -1155,10 +1197,37 @@ local function SetBarContainerShown(container, shown)
     if shown then
         container:Show()
     else
+        if ActionBarsOwned and ActionBarsOwned.HideOwnedFlyout then
+            ActionBarsOwned.HideOwnedFlyout()
+        end
         container:Hide()
     end
 end
+
+local function InstallSecureActionFlagRefresh(btn)
+    if not btn or btn._quiActionFlagRefreshInstalled then return end
+    btn._quiActionFlagRefreshInstalled = true
+    btn:SetAttribute("QUI_UpdateActionFlags", [[
+        local action = self:GetAttribute("action")
+        local pressAndHold = false
+
+        self:SetAttribute("typerelease", "actionrelease")
+        if action and IsPressHoldReleaseSpell then
+            local actionType, id, subType = GetActionInfo(action)
+            if actionType == "spell" then
+                pressAndHold = IsPressHoldReleaseSpell(id)
+            elseif actionType == "macro" and subType == "spell" then
+                pressAndHold = IsPressHoldReleaseSpell(id)
+            end
+        end
+
+        self:SetAttribute("pressAndHoldAction", pressAndHold)
+    ]])
+end
 ActionBarsOwned.SetBarContainerShown = SetBarContainerShown
+
+local EnsureOwnedFlyoutFrame
+local SyncOwnedFlyoutInfoToHandler
 
 ---------------------------------------------------------------------------
 -- LAYOUT ENGINE
@@ -1962,6 +2031,9 @@ end
 
 local function OnEditModeEnter()
     ActionBarsOwned.editModeActive = true
+    if ActionBarsOwned.HideOwnedFlyout then
+        ActionBarsOwned.HideOwnedFlyout()
+    end
 
     for _, barKey in ipairs(ALL_MANAGED_BAR_KEYS) do
         local container = ActionBarsOwned.containers[barKey]
@@ -2137,6 +2209,19 @@ local function SetupBar1Paging(container)
     RegisterStateDriver(container, "page", BuildPagingCondition())
 end
 
+local function SetupSecureActionFlagRefresh(container)
+    if not container or container._quiActionFlagRefreshSetup then return end
+    container._quiActionFlagRefreshSetup = true
+    container:SetAttribute("qui-refresh-target", nil)
+    container:SetAttribute("_onattributechanged", [[
+        if name ~= "qui-refresh-target" then return end
+        local ref = value and self:GetFrameRef(value)
+        if ref then
+            ref:RunAttribute("QUI_UpdateActionFlags")
+        end
+    ]])
+end
+
 ---------------------------------------------------------------------------
 -- BAR BUILD (native engine)
 ---------------------------------------------------------------------------
@@ -2158,6 +2243,317 @@ local function GetOriginalBlizzButtons(barKey)
     return buttons
 end
 
+local function EnsureOwnedActionButton(container, barKey, btnName, index)
+    local btn = _G[btnName]
+    local existed = btn ~= nil
+    if not btn then
+        local ok
+        ok, btn = pcall(CreateFrame, "CheckButton", btnName, container, "ActionButtonTemplate, SecureActionButtonTemplate")
+        if not ok then btn = _G[btnName] end
+        btn:SetAttribute("type", "action")
+        btn:SetAttribute("checkselfcast", true)
+        btn:SetAttribute("checkfocuscast", true)
+        btn:SetAttribute("checkmouseovercast", true)
+        btn:SetAttribute("useparent-unit", true)
+        btn:SetAttribute("useparent-actionpage", true)
+        btn:RegisterForDrag("LeftButton", "RightButton")
+        btn:RegisterForClicks("AnyDown", "AnyUp")
+        do
+            local _db = GetDB()
+            local _g = _db and _db.global
+            btn:SetAttribute("useOnKeyDown", _g and _g.useOnKeyDown == true)
+        end
+        if not btn.HasPopup then
+            local popupDir
+            btn.HasPopup = true
+            btn.SetPopupDirection = function(_, dir) popupDir = dir end
+            btn.GetPopupDirection = function() return popupDir end
+            btn.SetPopup = function(self2, popup)
+                if popup then
+                    rawset(self2, "_quiPopup", popup)
+                end
+            end
+            btn.ClearPopup = function(self2)
+                rawset(self2, "_quiPopup", nil)
+            end
+        end
+        btn.flashing = 0
+        btn.flashtime = 0
+    else
+        btn:SetParent(container)
+    end
+
+    btn:SetAttribute("qui-refresh-ref", "btn-refresh-" .. barKey .. "-" .. index)
+    InstallSecureActionFlagRefresh(btn)
+    return btn, existed
+end
+
+local function SetupPagedOwnedActionButton(btn, index)
+    btn:SetAttribute("index", index)
+    btn:SetAttribute("action", index)
+    btn:SetAttribute("_childupdate-offset", [[
+        local index = self:GetAttribute("index")
+        local newAction = index + (message or 0)
+        self:SetAttribute("action", newAction)
+        self:RunAttribute("QUI_UpdateActionFlags")
+        self:CallMethod("SafeSyncAction")
+    ]])
+    btn.SafeSyncAction = ActionBarsOwned.SafeSyncAction
+    btn.UpdateCooldown = function(self)
+        ActionBarsOwned.UpdateCooldown(self)
+    end
+    btn.UpdateCount = function(self)
+        local action = self.action
+        if not action or not HasAction(action) then
+            if self.Count then self.Count:SetText("") end
+            return
+        end
+        if C_ActionBar and C_ActionBar.GetActionDisplayCount then
+            if self.Count then self.Count:SetText(C_ActionBar.GetActionDisplayCount(action) or "") end
+        elseif self.Count then
+            self.Count:SetText("")
+        end
+    end
+end
+
+local function SetupFixedOwnedActionButton(container, btn, action)
+    container:SetFrameRef("init-btn", btn)
+    container:Execute(string.format([[
+        local btn = self:GetFrameRef("init-btn")
+        btn:SetAttribute("action", %d)
+        btn:RunAttribute("QUI_UpdateActionFlags")
+    ]], action))
+end
+
+local function FinalizeStandardOwnedActionButtons(container, barKey, buttons)
+    SetupSecureActionFlagRefresh(container)
+    for i, btn in ipairs(buttons) do
+        container:SetFrameRef("btn-refresh-" .. barKey .. "-" .. i, btn)
+    end
+end
+
+local function SuppressOriginalStandardBar(barFrame, barKey)
+    if barFrame then
+        HideManagedBlizzardBarFrame(barFrame, true)
+    end
+    local origButtons = GetOriginalBlizzButtons(barKey)
+    for _, blizzBtn in ipairs(origButtons) do
+        if barKey == "bar1" then
+            blizzBtn:SetParent(hiddenBarParent)
+        end
+        SuppressBlizzardButton(blizzBtn)
+    end
+    if barKey == "bar1" then
+        local leaveBtn = _G.MainMenuBarVehicleLeaveButton
+        if leaveBtn then
+            leaveBtn:SetParent(UIParent)
+        end
+    end
+end
+
+local function BuildStandardOwnedButtons(container, barKey)
+    local buttons = {}
+
+    if barKey == "bar1" then
+        for i = 1, 12 do
+            local btnName = "QUI_Bar1Button" .. i
+            local btn, existed = EnsureOwnedActionButton(container, barKey, btnName, i)
+            if not existed then
+                SetupPagedOwnedActionButton(btn, i)
+                btn.action = i
+            else
+                btn.action = btn:GetAttribute("action") or i
+            end
+            btn:Show()
+            buttons[i] = btn
+        end
+        SetupBar1Paging(container)
+        return buttons
+    end
+
+    local offset = BAR_ACTION_OFFSETS[barKey] or 0
+    local barNum = barKey:sub(4)
+    for i = 1, 12 do
+        local btnName = "QUI_Bar" .. barNum .. "Button" .. i
+        local btn, existed = EnsureOwnedActionButton(container, barKey, btnName, i)
+        local action = offset + i
+        if not existed then
+            SetupFixedOwnedActionButton(container, btn, action)
+        end
+        btn.action = action
+        btn:Show()
+        buttons[i] = btn
+    end
+
+    return buttons
+end
+
+local function SetupStandardOwnedButtonRuntime(container, btn)
+    btn:UnregisterAllEvents()
+    btn:SetScript("OnEvent", function(self, event, ...)
+        if event == "ACTIONBAR_UPDATE_COOLDOWN"
+            or event == "LOSS_OF_CONTROL_ADDED"
+            or event == "LOSS_OF_CONTROL_UPDATE" then
+            ActionBarsOwned.UpdateCooldown(self)
+        else
+            ActionBarsOwned.SafeUpdate(self)
+        end
+    end)
+    btn.Update = ActionBarsOwned.SafeUpdate
+    btn.UpdateAction = ActionBarsOwned.SafeSyncAction
+    btn.SafeSyncAction = ActionBarsOwned.SafeSyncAction
+    btn.UpdateCooldown = function(self)
+        ActionBarsOwned.UpdateCooldown(self)
+    end
+    btn.UpdatePressAndHoldAction = function() end
+    btn.UpdateCount = function(self)
+        local action = self.action
+        if not action or not HasAction(action) then
+            self.Count:SetText("")
+            return
+        end
+        if C_ActionBar and C_ActionBar.GetActionDisplayCount then
+            self.Count:SetText(C_ActionBar.GetActionDisplayCount(action) or "")
+        else
+            self.Count:SetText("")
+        end
+    end
+    if SetActionUIButton and btn.action and btn.cooldown then
+        SetActionUIButton(btn, btn.action, btn.cooldown)
+    end
+
+    btn.SetTooltip = function(self)
+        if GetCVar("UberTooltips") == "1" then
+            GameTooltip_SetDefaultAnchor(GameTooltip, self)
+        else
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        end
+        if GameTooltip:SetAction(self.action) then
+            self.UpdateTooltip = self.SetTooltip
+        else
+            self.UpdateTooltip = nil
+        end
+    end
+
+    btn:SetAttribute("buttonlock", GetCVar("lockActionBars") == "1")
+    btn.QUI_PostDrag = function(self)
+        OwnedButton_PostDrag(self)
+    end
+
+    if not btn.quiSecureHooksInstalled then
+        btn.quiSecureHooksInstalled = true
+        SecureHandlerWrapScript(btn, "OnAttributeChanged", btn, [[
+            if name == "action" and IsPressHoldReleaseSpell and type(value) == "number" then
+                self:RunAttribute("QUI_UpdateActionFlags")
+            end
+            if name == "action" then
+                local container = self:GetParent()
+                local flyoutHandler = container and container.GetFrameRef and container:GetFrameRef("qui-flyout-handler")
+                if flyoutHandler and flyoutHandler:GetAttribute("flyoutParentHandle") == self then
+                    local actionType, flyoutID = value and GetActionInfo(value)
+                    if actionType ~= "flyout" or flyoutID ~= flyoutHandler:GetAttribute("flyoutID") then
+                        flyoutHandler:Hide()
+                    end
+                end
+            end
+        ]])
+
+        btn:HookScript("OnEnter", function(self)
+            local global = GetGlobalSettings()
+            if global and global.showTooltips == false then return end
+            self:SetTooltip()
+        end)
+        btn:HookScript("OnLeave", function(self)
+            self.UpdateTooltip = nil
+            GameTooltip:Hide()
+        end)
+
+        btn:HookScript("PreClick", function(self)
+            if InCombatLockdown() then return end
+            local useOnKeyDown = self:GetAttribute("useOnKeyDown")
+            if useOnKeyDown
+                and self:GetAttribute("buttonlock")
+                and IsModifiedClick("PICKUPACTION")
+                and not GetCursorInfo() then
+                self:SetAttribute("useOnKeyDown", false)
+                self._quiPreClickKeyDownBackup = useOnKeyDown
+            end
+        end)
+        btn:HookScript("PostClick", function(self)
+            if self._quiPreClickKeyDownBackup ~= nil then
+                if not InCombatLockdown() then
+                    self:SetAttribute("useOnKeyDown", self._quiPreClickKeyDownBackup)
+                end
+                self._quiPreClickKeyDownBackup = nil
+            end
+        end)
+        if container then
+            SecureHandlerWrapScript(btn, "OnClick", container, [[
+                local flyoutHandler = owner:GetFrameRef("qui-flyout-handler")
+                if self:GetAttribute("type") == "action" then
+                    local action = self:GetAttribute("action")
+                    local actionType, flyoutID = action and GetActionInfo(action)
+                    if actionType == "flyout" and flyoutHandler then
+                        if not down then
+                            flyoutHandler:SetAttribute("flyoutParentHandle", self)
+                            flyoutHandler:RunAttribute("HandleFlyout", flyoutID)
+                        end
+                        return false
+                    end
+                    if flyoutHandler then
+                        flyoutHandler:SetAttribute("flyoutID", nil)
+                        flyoutHandler:Hide()
+                    end
+                elseif flyoutHandler and (not down or self:GetParent() ~= flyoutHandler) then
+                    flyoutHandler:SetAttribute("flyoutID", nil)
+                    flyoutHandler:Hide()
+                end
+                if button == "Keybind" then
+                    return "LeftButton"
+                end
+            ]])
+        end
+
+        btn:SetScript("OnDragStart", nil)
+        SecureHandlerWrapScript(btn, "OnDragStart", btn, [[
+            if (self:GetAttribute("buttonlock") and not IsModifiedClick("PICKUPACTION"))
+                or self:GetAttribute("LABdisableDragNDrop") then
+                return false
+            end
+            return "action", self:GetAttribute("action")
+        ]])
+        SecureHandlerWrapScript(btn, "OnDragStart", btn, [[
+            return "message", "update"
+        ]], [[
+            self:CallMethod("QUI_PostDrag")
+        ]])
+
+        btn:SetScript("OnReceiveDrag", nil)
+        SecureHandlerWrapScript(btn, "OnReceiveDrag", btn, [[
+            if (self:GetAttribute("buttonlock") and not IsModifiedClick("PICKUPACTION"))
+                or self:GetAttribute("LABdisableDragNDrop") then
+                return false
+            end
+            return "action", self:GetAttribute("action")
+        ]])
+        SecureHandlerWrapScript(btn, "OnReceiveDrag", btn, [[
+            return "message", "update"
+        ]], [[
+            self:CallMethod("QUI_PostDrag")
+        ]])
+    end
+end
+
+local function PrimeStandardOwnedButtonVisuals(buttons)
+    for _, btn in ipairs(buttons) do
+        if ActionButton_Update then
+            pcall(ActionButton_Update, btn)
+        end
+        ActionBarsOwned.UpdateCooldown(btn)
+        ActionBarsOwned.UpdateOverlayGlow(btn)
+    end
+end
+
 local function BuildBar(barKey)
     local barFrame = GetBarFrame(barKey)
 
@@ -2169,147 +2565,9 @@ local function BuildBar(barKey)
     local settings = GetEffectiveSettings(barKey)
     local buttons = {}
 
-    if barKey == "bar1" then
-        -- BAR 1: Create new ActionButtonTemplate buttons with paging
-        -- Hide Blizzard's bar frame and original buttons
-        if barFrame then
-            barFrame:UnregisterAllEvents()
-            barFrame:SetParent(hiddenBarParent)
-            barFrame:Hide()
-        end
-        local origButtons = GetOriginalBlizzButtons(barKey)
-        for _, blizzBtn in ipairs(origButtons) do
-            blizzBtn:SetParent(hiddenBarParent)
-            SuppressBlizzardButton(blizzBtn)
-        end
-
-        -- Rescue the leave-vehicle button from the hidden Blizzard bar hierarchy.
-        -- MainMenuBarVehicleLeaveButton is a child of MainActionBar; reparenting
-        -- the bar to hiddenBarParent makes it invisible. Reparent to UIParent so
-        -- Blizzard's visibility driver can still show/hide it normally.
-        local leaveBtn = _G.MainMenuBarVehicleLeaveButton
-        if leaveBtn then
-            leaveBtn:SetParent(UIParent)
-        end
-
-        -- Create or reuse QUI bar1 buttons
-        for i = 1, 12 do
-            local btnName = "QUI_Bar1Button" .. i
-            local btn = _G[btnName]
-            if not btn then
-                local ok
-                ok, btn = pcall(CreateFrame, "CheckButton", btnName, container, "ActionButtonTemplate, SecureActionButtonTemplate")
-                if not ok then btn = _G[btnName] end
-                -- Secure action attributes (normally set by ActionBarActionButtonMixin:OnLoad)
-                btn:SetAttribute("type", "action")
-                btn:SetAttribute("checkselfcast", true)
-                btn:SetAttribute("checkfocuscast", true)
-                btn:SetAttribute("checkmouseovercast", true)
-                btn:SetAttribute("useparent-unit", true)
-                btn:SetAttribute("useparent-actionpage", true)
-                btn:RegisterForDrag("LeftButton", "RightButton")
-                -- Register for both down and up clicks — empowered
-                -- spells (Evoker Fire Breath etc.) need mouse-down to
-                -- start the empower and mouse-up to release.
-                btn:RegisterForClicks("AnyDown", "AnyUp")
-                -- Click timing is user-configurable:
-                --   • false (default) — cast on mouse-up. Drag motions
-                --     naturally pre-empt the cast.
-                --   • true — cast on mouse-down for snappier response.
-                -- Empowered spells still work in both modes because
-                -- pressAndHoldAction + typerelease="actionrelease"
-                -- override the timing for press/release flow.
-                do
-                    local _db = GetDB()
-                    local _g = _db and _db.global
-                    btn:SetAttribute("useOnKeyDown", _g and _g.useOnKeyDown == true)
-                end
-                -- Popup direction support for spell flyouts.
-                -- BaseActionButtonMixin:UpdateFlyout bails at
-                -- "if not self.HasPopup" without these methods,
-                -- so the flyoutDirection attribute is never read.
-                if not btn.HasPopup then
-                    local popupDir
-                    btn.HasPopup = true
-                    btn.SetPopupDirection = function(_, dir) popupDir = dir end
-                    btn.GetPopupDirection = function() return popupDir end
-                    btn.SetPopup = function(self2, popup)
-                        if popup then
-                            rawset(self2, "_quiPopup", popup)
-                        end
-                    end
-                    btn.ClearPopup = function(self2)
-                        rawset(self2, "_quiPopup", nil)
-                    end
-                end
-                btn.flashing = 0
-                btn.flashtime = 0
-                btn:SetAttribute("index", i)
-                btn:SetAttribute("action", i)
-                btn:SetAttribute("_childupdate-offset", [[
-                    local index = self:GetAttribute("index")
-                    local newAction = index + (message or 0)
-                    -- Always set action from restricted code so the attribute
-                    -- is untainted.  An addon-side SetAttribute taints the
-                    -- value; Blizzard's Update then propagates that taint
-                    -- through GetActionInfo → IsPressHoldReleaseSpell, causing
-                    -- "attempt to compare a secret number value" in combat.
-                    self:SetAttribute("action", newAction)
-                    -- Pre-set pressAndHoldAction from restricted code so the
-                    -- comparison in Blizzard's ActionButton:Update does not hit
-                    -- the taint barrier when IsPressHoldReleaseSpell returns a
-                    -- secret value during combat.
-                    if IsPressHoldReleaseSpell then
-                        local pressAndHold = false
-                        self:SetAttribute("typerelease", "actionrelease")
-                        local actionType, id, subType = GetActionInfo(newAction)
-                        if actionType == "spell" then
-                            pressAndHold = IsPressHoldReleaseSpell(id)
-                        elseif actionType == "macro" and subType == "spell" then
-                            pressAndHold = IsPressHoldReleaseSpell(id)
-                        end
-                        self:SetAttribute("pressAndHoldAction", pressAndHold)
-                    end
-                    -- Sync button.action on the Lua side so SafeUpdate reads
-                    -- the correct slot.  Without this, the mixin's
-                    -- OnAttributeChanged is the only sync path — fragile
-                    -- because that handler runs in tainted context.
-                    self:CallMethod("SafeSyncAction")
-                ]])
-                -- Methods called during the state driver's immediate fire:
-                -- RegisterStateDriver → _childupdate-offset →
-                -- CallMethod("SafeSyncAction") → SafeUpdate →
-                -- self:UpdateCooldown() / self:UpdateCount().
-                -- Must exist BEFORE SetupBar1Paging.
-                btn.SafeSyncAction = ActionBarsOwned.SafeSyncAction
-                btn.UpdateCooldown = function(self)
-                    ActionBarsOwned.UpdateCooldown(self)
-                end
-                btn.UpdateCount = function(self)
-                    local action = self.action
-                    if not action or not HasAction(action) then
-                        if self.Count then self.Count:SetText("") end
-                        return
-                    end
-                    if C_ActionBar and C_ActionBar.GetActionDisplayCount then
-                        if self.Count then self.Count:SetText(C_ActionBar.GetActionDisplayCount(action) or "") end
-                    elseif self.Count then
-                        self.Count:SetText("")
-                    end
-                end
-                -- Sync btn.action (ActionButtonTemplate has no
-                -- OnAttributeChanged to do this automatically).
-                btn.action = i
-            else
-                btn:SetParent(container)
-                btn.action = btn:GetAttribute("action") or i
-            end
-            btn:Show()
-            buttons[i] = btn
-        end
-
-        -- Register paging state driver
-        SetupBar1Paging(container)
+    if barKey == "bar1" or (barKey:match("^bar[2-8]$")) then
+        SuppressOriginalStandardBar(barFrame, barKey)
+        buttons = BuildStandardOwnedButtons(container, barKey)
     elseif barKey == "pet" or barKey == "stance" then
         -- PET/STANCE: Create fresh buttons from Blizzard templates, then
         -- fully suppress the originals (same pattern as bars 1-8 and
@@ -2835,113 +3093,18 @@ local function BuildBar(barKey)
                 end)
             end
         end
-    else
-        -- BARS 2-8: Create fresh ActionButtonTemplate buttons.
-        -- Fully dispose Blizzard's bar frame and original buttons to prevent
-        -- double event processing and taint propagation from hidden frames.
-        if barFrame then
-            barFrame:UnregisterAllEvents()
-            barFrame:SetParent(hiddenBarParent)
-            barFrame:Hide()
-        end
-        -- Fully suppress hidden Blizzard buttons via shared helper.
-        local origButtons = GetOriginalBlizzButtons(barKey)
-        for _, blizzBtn in ipairs(origButtons) do
-            SuppressBlizzardButton(blizzBtn)
-        end
-
-        -- Action slot offsets: each bar maps to a fixed range of action slots.
-        local BAR_ACTION_OFFSETS = {
-            bar2 = 60,   -- slots 61-72
-            bar3 = 48,   -- slots 49-60
-            bar4 = 24,   -- slots 25-36
-            bar5 = 36,   -- slots 37-48
-            bar6 = 144,  -- slots 145-156
-            bar7 = 156,  -- slots 157-168
-            bar8 = 168,  -- slots 169-180
-        }
-        local offset = BAR_ACTION_OFFSETS[barKey] or 0
-        local barNum = barKey:sub(4)  -- "bar2" → "2"
-
-        for i = 1, 12 do
-            local btnName = "QUI_Bar" .. barNum .. "Button" .. i
-            local btn = _G[btnName]
-            if not btn then
-                -- pcall: during combat reload, the template's OnLoad fires
-                -- synchronously and hits secret-value comparisons in the
-                -- tainted call stack.  The frame IS created even if OnLoad
-                -- errors — retrieve it from globals.
-                local ok
-                ok, btn = pcall(CreateFrame, "CheckButton", btnName, container, "ActionButtonTemplate, SecureActionButtonTemplate")
-                if not ok then btn = _G[btnName] end
-                -- Secure action attributes (normally set by ActionBarActionButtonMixin:OnLoad)
-                btn:SetAttribute("type", "action")
-                btn:SetAttribute("checkselfcast", true)
-                btn:SetAttribute("checkfocuscast", true)
-                btn:SetAttribute("checkmouseovercast", true)
-                btn:SetAttribute("useparent-unit", true)
-                btn:SetAttribute("useparent-actionpage", true)
-                btn:RegisterForDrag("LeftButton", "RightButton")
-                -- Click registration and cast-timing policy — see the
-                -- comments on the matching block in the bar1 creation
-                -- path above for full rationale.
-                btn:RegisterForClicks("AnyDown", "AnyUp")
-                do
-                    local _db = GetDB()
-                    local _g = _db and _db.global
-                    btn:SetAttribute("useOnKeyDown", _g and _g.useOnKeyDown == true)
-                end
-                -- Popup direction support — see bar1 creation path.
-                if not btn.HasPopup then
-                    local popupDir
-                    btn.HasPopup = true
-                    btn.SetPopupDirection = function(_, dir) popupDir = dir end
-                    btn.GetPopupDirection = function() return popupDir end
-                    btn.SetPopup = function(self2, popup)
-                        if popup then
-                            rawset(self2, "_quiPopup", popup)
-                        end
-                    end
-                    btn.ClearPopup = function(self2)
-                        rawset(self2, "_quiPopup", nil)
-                    end
-                end
-                btn.flashing = 0
-                btn.flashtime = 0
-                local action = offset + i
-                -- Set action and pressAndHoldAction from RESTRICTED code.
-                -- OnAttributeChanged → Update populates icons here.
-                -- Mixin methods are shadowed AFTER this loop to prevent
-                -- taint errors during subsequent combat events.
-                container:SetFrameRef("init-btn", btn)
-                container:Execute(string.format([[
-                    local btn = self:GetFrameRef("init-btn")
-                    btn:SetAttribute("action", %d)
-                    btn:SetAttribute("typerelease", "actionrelease")
-                    if IsPressHoldReleaseSpell then
-                        local pressAndHold = false
-                        local actionType, id, subType = GetActionInfo(%d)
-                        if actionType == "spell" then
-                            pressAndHold = IsPressHoldReleaseSpell(id)
-                        elseif actionType == "macro" and subType == "spell" then
-                            pressAndHold = IsPressHoldReleaseSpell(id)
-                        end
-                        btn:SetAttribute("pressAndHoldAction", pressAndHold)
-                    end
-                ]], action, action))
-                -- Sync btn.action from the attribute (ActionButtonTemplate
-                -- has no OnAttributeChanged to do this automatically).
-                btn.action = offset + i
-            else
-                btn:SetParent(container)
-                btn.action = offset + i
-            end
-            btn:Show()
-            buttons[i] = btn
-        end
     end
 
     ActionBarsOwned.nativeButtons[barKey] = buttons
+    if barKey ~= "pet" and barKey ~= "stance" and barKey ~= "microbar" and barKey ~= "bags" then
+        FinalizeStandardOwnedActionButtons(container, barKey, buttons)
+        if EnsureOwnedFlyoutFrame then
+            local flyoutHandler = EnsureOwnedFlyoutFrame()
+            if flyoutHandler then
+                container:SetFrameRef("qui-flyout-handler", flyoutHandler)
+            end
+        end
+    end
 
     -- Build slot→{button, barKey} lookup for O(1) ACTIONBAR_SLOT_CHANGED dispatch
     if not ActionBarsOwned.slotMap then ActionBarsOwned.slotMap = {} end
@@ -2962,212 +3125,13 @@ local function BuildBar(barKey)
     -- hits SafeUpdate instead of the original mixin code.
     if barKey ~= "pet" and barKey ~= "stance" and barKey ~= "microbar" and barKey ~= "bags" then
         for _, btn in ipairs(buttons) do
-            -- Unregister all events — QUI handles events centrally.
-            btn:UnregisterAllEvents()
-            -- Replace OnEvent with QUI's safe handler.  Routes cooldown
-            -- events to QUI's DurationObject path; everything else to
-            -- SafeUpdate.  Uses only truthiness checks — no secret value
-            -- comparisons — so the handler cannot taint the context.
-            btn:SetScript("OnEvent", function(self, event, ...)
-                if event == "ACTIONBAR_UPDATE_COOLDOWN"
-                    or event == "LOSS_OF_CONTROL_ADDED"
-                    or event == "LOSS_OF_CONTROL_UPDATE" then
-                    ActionBarsOwned.UpdateCooldown(self)
-                else
-                    ActionBarsOwned.SafeUpdate(self)
-                end
-            end)
-            -- Shadow taint-unsafe mixin methods.  These shadows are
-            -- permanent and serve two purposes:
-            --   1. Internal calls (e.g. SafeUpdate → self:UpdateCount())
-            --      hit the safe versions.
-            --   2. Any residual mixin paths (OnAttributeChanged → Update)
-            --      are intercepted before they can compare secret values.
-            btn.Update = ActionBarsOwned.SafeUpdate
-            btn.UpdateAction = ActionBarsOwned.SafeSyncAction
-            btn.SafeSyncAction = ActionBarsOwned.SafeSyncAction  -- CallMethod target
-            btn.UpdateCooldown = function(self)
-                ActionBarsOwned.UpdateCooldown(self)
-            end
-            btn.UpdatePressAndHoldAction = function() end
-            btn.UpdateCount = function(self)
-                local action = self.action
-                if not action or not HasAction(action) then
-                    self.Count:SetText("")
-                    return
-                end
-                if C_ActionBar and C_ActionBar.GetActionDisplayCount then
-                    self.Count:SetText(C_ActionBar.GetActionDisplayCount(action) or "")
-                else
-                    self.Count:SetText("")
-                end
-            end
-            -- Register with C-side so it pushes icon/state/cooldown updates.
-            -- Must come AFTER method shadows so ForceUpdateAction → Update()
-            -- hits SafeUpdate.
-            if SetActionUIButton and btn.action and btn.cooldown then
-                SetActionUIButton(btn, btn.action, btn.cooldown)
-            end
-
-            -- ActionButtonTemplate only provides BaseActionButtonMixin (flyout
-            -- handling).  Tooltip code lives in ActionBarActionButtonMixin
-            -- (part of ActionBarButtonTemplate) which QUI does not use.
-            -- Add SetTooltip + OnEnter/OnLeave hooks for action tooltips.
-            btn.SetTooltip = function(self)
-                if GetCVar("UberTooltips") == "1" then
-                    GameTooltip_SetDefaultAnchor(GameTooltip, self)
-                else
-                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                end
-                if GameTooltip:SetAction(self.action) then
-                    self.UpdateTooltip = self.SetTooltip
-                else
-                    self.UpdateTooltip = nil
-                end
-            end
-
-            -- Sync lockActionBars CVar → button attribute so the
-            -- restricted OnDragStart wrap's lock check can read it
-            -- (GetCVar is not available in the restricted env).
-            -- MUST run every Refresh so dropdown changes propagate.
-            btn:SetAttribute("buttonlock", GetCVar("lockActionBars") == "1")
-
-            btn.QUI_PostDrag = function(self)
-                OwnedButton_PostDrag(self)
-            end
-
-            -- One-time hook script and secure wrap install.  HookScript
-            -- and SecureHandlerWrapScript both STACK on repeat calls —
-            -- re-running these on every BuildBar/Refresh would layer N
-            -- copies of every wrap, breaking buttonlock and drag/click
-            -- behavior after a few setting changes.
-            if not btn.quiSecureHooksInstalled then
-                btn.quiSecureHooksInstalled = true
-
-                -- Re-evaluate pressAndHoldAction whenever the button's
-                -- `action` attribute changes.  Empowered / hold-to-
-                -- release spells (Evoker Fire Breath, channeled actions)
-                -- require pressAndHoldAction=true so the secure click
-                -- dispatch fires the "release" action on mouse-up.
-                -- Bar paging (_childupdate-offset, state driver) rewrites
-                -- the action attribute without re-running the initial
-                -- Execute block, so without this wrap the flag is stale
-                -- on every page change.
-                SecureHandlerWrapScript(btn, "OnAttributeChanged", btn, [[
-                    if name == "action" and IsPressHoldReleaseSpell and type(value) == "number" then
-                        local actionType, id, subType = GetActionInfo(value)
-                        local pressAndHold = false
-                        if actionType == "spell" then
-                            pressAndHold = IsPressHoldReleaseSpell(id)
-                        elseif actionType == "macro" and subType == "spell" then
-                            pressAndHold = IsPressHoldReleaseSpell(id)
-                        end
-                        self:SetAttribute("pressAndHoldAction", pressAndHold)
-                        self:SetAttribute("typerelease", "actionrelease")
-                    end
-                ]])
-
-                btn:HookScript("OnEnter", function(self)
-                    local global = GetGlobalSettings()
-                    if global and global.showTooltips == false then return end
-                    self:SetTooltip()
-                end)
-                btn:HookScript("OnLeave", function(self)
-                    self.UpdateTooltip = nil
-                    GameTooltip:Hide()
-                end)
-
-                -- ── PreClick: defer action to mouse-up when drag modifier held ──
-                -- When useOnKeyDown is true the action fires on mouse-
-                -- down, BEFORE OnDragStart can detect the drag motion.
-                -- Without intervention shift-click casts instead of
-                -- picking up the spell.  This Lua pre-click handler
-                -- temporarily disables useOnKeyDown so the action fires
-                -- on mouse-up instead — giving OnDragStart time to
-                -- detect drags while still letting the action through
-                -- for normal modifier+click (e.g. [mod:shift] macros).
-                -- When the cursor already carries a spell (placement),
-                -- the deferral is skipped so the drop goes through.
-                -- Uses Lua hooks (not restricted snippets) because the
-                -- restricted environment lacks GetCursorInfo().
-                -- SetAttribute is fine — bar rearranging is out-of-combat.
-                btn:HookScript("PreClick", function(self)
-                    if InCombatLockdown() then return end
-                    local useOnKeyDown = self:GetAttribute("useOnKeyDown")
-                    if useOnKeyDown
-                        and self:GetAttribute("buttonlock")
-                        and IsModifiedClick("PICKUPACTION")
-                        and not GetCursorInfo() then
-                        self:SetAttribute("useOnKeyDown", false)
-                        self._quiPreClickKeyDownBackup = useOnKeyDown
-                    end
-                end)
-                btn:HookScript("PostClick", function(self)
-                    if self._quiPreClickKeyDownBackup ~= nil then
-                        if not InCombatLockdown() then
-                            self:SetAttribute("useOnKeyDown", self._quiPreClickKeyDownBackup)
-                        end
-                        self._quiPreClickKeyDownBackup = nil
-                    end
-                end)
-
-                -- ── Pickup / Place (secure WrapScript pattern) ──
-                -- Lua OnDragStart/OnReceiveDrag handlers are nil'd, and
-                -- the drag logic runs inside secure WrapScript snippets
-                -- so pickup works in combat via the restricted path and
-                -- the lockActionBars check stays taint-safe.
-                --
-                -- Click timing is NOT handled here — it's seeded at
-                -- button creation from the `useOnKeyDown` profile
-                -- setting and re-applied via QUI_ApplyUseOnKeyDown.
-
-                -- OnDragStart: nil the Lua handler, let WrapScript do the
-                -- pickup via return "action", slot → secure PickupAction.
-                -- Double-wrapped: the post-script does NOT run when the
-                -- inner pre-script causes a pickup, so the outer wrap
-                -- returns a phony "message" so its post-body still fires
-                -- for visual refresh.
-                btn:SetScript("OnDragStart", nil)
-                SecureHandlerWrapScript(btn, "OnDragStart", btn, [[
-                    if (self:GetAttribute("buttonlock") and not IsModifiedClick("PICKUPACTION"))
-                        or self:GetAttribute("LABdisableDragNDrop") then
-                        return false
-                    end
-                    return "action", self:GetAttribute("action")
-                ]])
-                SecureHandlerWrapScript(btn, "OnDragStart", btn, [[
-                    return "message", "update"
-                ]], [[
-                    self:CallMethod("QUI_PostDrag")
-                ]])
-
-                -- OnReceiveDrag: same double-wrap pattern.
-                btn:SetScript("OnReceiveDrag", nil)
-                SecureHandlerWrapScript(btn, "OnReceiveDrag", btn, [[
-                    if (self:GetAttribute("buttonlock") and not IsModifiedClick("PICKUPACTION"))
-                        or self:GetAttribute("LABdisableDragNDrop") then
-                        return false
-                    end
-                    return "action", self:GetAttribute("action")
-                ]])
-                SecureHandlerWrapScript(btn, "OnReceiveDrag", btn, [[
-                    return "message", "update"
-                ]], [[
-                    self:CallMethod("QUI_PostDrag")
-                ]])
-            end
+            SetupStandardOwnedButtonRuntime(container, btn)
         end
 
         -- Populate visuals via the mixin (safe — GetActionCount is
         -- suppressed, and shadows are in place so any internal
         -- self:Method() calls hit the safe versions).
-        for _, btn in ipairs(buttons) do
-            if ActionButton_Update then
-                pcall(ActionButton_Update, btn)
-            end
-            ActionBarsOwned.UpdateCooldown(btn)
-            ActionBarsOwned.UpdateOverlayGlow(btn)
-        end
+        PrimeStandardOwnedButtonVisuals(buttons)
     end
 
     -- Register frame refs for the secure layout handler (must be outside combat).
@@ -3379,6 +3343,9 @@ UpdatePetBarVisibility = function()
     if barDB and barDB.enabled == false then
         container:SetAttribute("qui-user-shown", false)
         if not InCombatLockdown() or inInitSafeWindow then
+            if ActionBarsOwned.HideOwnedFlyout then
+                ActionBarsOwned.HideOwnedFlyout()
+            end
             container:Hide()
         else
             ActionBarsOwned.pendingPetUpdate = true
@@ -3418,6 +3385,9 @@ UpdatePetBarVisibility = function()
         ActionBarsOwned.pendingPetUpdate = true
     else
         container:SetAttribute("qui-user-shown", false)
+        if ActionBarsOwned.HideOwnedFlyout then
+            ActionBarsOwned.HideOwnedFlyout()
+        end
         container:Hide()
     end
     -- Notify anchoring system when visibility changed so dependents re-anchor
@@ -3440,6 +3410,9 @@ UpdateStanceBarLayout = function()
     local barDB = GetBarSettings("stance")
     if barDB and barDB.enabled == false then
         container:SetAttribute("qui-user-shown", false)
+        if ActionBarsOwned.HideOwnedFlyout then
+            ActionBarsOwned.HideOwnedFlyout()
+        end
         container:Hide()
         if _G.QUI_UpdateFramesAnchoredTo then _G.QUI_UpdateFramesAnchoredTo("stanceBar") end
         return
@@ -3458,6 +3431,9 @@ UpdateStanceBarLayout = function()
             return
         end
         container:SetAttribute("qui-user-shown", false)
+        if ActionBarsOwned.HideOwnedFlyout then
+            ActionBarsOwned.HideOwnedFlyout()
+        end
         container:Hide()
         if wasShown and _G.QUI_UpdateFramesAnchoredTo then
             _G.QUI_UpdateFramesAnchoredTo("stanceBar")
@@ -4446,23 +4422,17 @@ abSlotFrame:SetScript("OnUpdate", function(self)
                 pcall(ActionBarsOwned.SafeUpdate, btn)
                 ActionBarsOwned.UpdateCooldown(btn)
                 ActionBarsOwned.UpdateOverlayGlow(btn)
-                -- Re-evaluate pressAndHoldAction for the new spell at
-                -- this slot.  The `action` attribute is the slot index
-                -- and hasn't changed, so the OnAttributeChanged wrap
-                -- won't fire — we must update it from Lua here.
-                -- SetAttribute on secure buttons is combat-blocked, so
-                -- skip in combat (ACTIONBAR_SLOT_CHANGED content changes
-                -- don't normally happen in combat anyway).
-                if not inCombat and IsPressHoldReleaseSpell then
-                    local actionType, id, subType = GetActionInfo(slot)
-                    local pressAndHold = false
-                    if actionType == "spell" then
-                        pressAndHold = IsPressHoldReleaseSpell(id)
-                    elseif actionType == "macro" and subType == "spell" then
-                        pressAndHold = IsPressHoldReleaseSpell(id)
+                -- Slot content can change without the button's action slot
+                -- changing (drag/drop within the same slot), so bounce the
+                -- secure release-state recompute through the bar container
+                -- instead of mutating button attributes from insecure Lua.
+                if not inCombat then
+                    local cont = ActionBarsOwned.containers and ActionBarsOwned.containers[barKey]
+                    local refreshRef = btn.GetAttribute and btn:GetAttribute("qui-refresh-ref")
+                    if cont and refreshRef then
+                        cont:SetAttribute("qui-refresh-target", refreshRef)
+                        cont:SetAttribute("qui-refresh-target", nil)
                     end
-                    btn:SetAttribute("pressAndHoldAction", pressAndHold)
-                    btn:SetAttribute("typerelease", "actionrelease")
                 end
                 if not inCombat then
                     local settings = GetEffectiveSettings(barKey)
@@ -4480,6 +4450,9 @@ abSlotFrame:SetScript("OnUpdate", function(self)
     wipe(abDirtySlots)
     -- Rebuild spell-to-button map after slot content changes (drag/drop)
     ActionBarsOwned.RebuildSpellIdMap()
+    if SyncOwnedFlyoutInfoToHandler then
+        SyncOwnedFlyoutInfoToHandler()
+    end
     -- Slot contents changed — the rotation action may have moved to a
     -- different button.  Invalidate the cached rotation button so the
     -- next UpdateAllAssistedCombatRotation re-discovers it from the
@@ -4520,6 +4493,9 @@ local function OnOwnedEvent(self, event, ...)
         _lastPagingTime = GetTime()
         -- Page swap may remap which button holds the rotation action.
         _assistRotationButton = nil
+        if HideOwnedFlyout then
+            HideOwnedFlyout()
+        end
         -- Paging is handled by state driver: _childupdate-offset sets the
         -- action attribute and calls CallMethod("SafeSyncAction") which
         -- syncs self.action and refreshes visuals on each button.
@@ -4638,6 +4614,14 @@ local function OnOwnedEvent(self, event, ...)
             ActionBarsOwned.pendingFlyoutDirection = false
             if ApplyAllFlyoutDirections then ApplyAllFlyoutDirections() end
         end
+        if ActionBarsOwned.pendingFlyoutSkin then
+            ActionBarsOwned.pendingFlyoutSkin = false
+            if SkinSpellFlyoutButtons then SkinSpellFlyoutButtons() end
+        end
+        if ActionBarsOwned.pendingOwnedFlyoutSync then
+            ActionBarsOwned.pendingOwnedFlyoutSync = false
+            if SyncOwnedFlyoutInfoToHandler then SyncOwnedFlyoutInfoToHandler() end
+        end
         -- SafeUpdate keeps all visuals live during combat (icon, cooldown,
         -- glow, usability, count, checked state).  Skinning state does not
         -- drift in combat, so no post-combat re-skin pass is needed.
@@ -4699,6 +4683,7 @@ local function OnOwnedEvent(self, event, ...)
         UpdatePetBarVisibility()
         UpdateStanceBarLayout()
         ApplyAllFlyoutDirections()
+        if SyncOwnedFlyoutInfoToHandler then SyncOwnedFlyoutInfoToHandler() end
         inInitSafeWindow = false
         ns._inInitSafeWindow = false
         -- Second pass after Blizzard frames settle; defer if safe period ended
@@ -4722,6 +4707,7 @@ local function OnOwnedEvent(self, event, ...)
             UpdatePetBarVisibility()
             UpdateStanceBarLayout()
             ApplyAllFlyoutDirections()
+            if SyncOwnedFlyoutInfoToHandler then SyncOwnedFlyoutInfoToHandler() end
         end)
         local db = GetDB()
         if db and db.bars and db.bars.bar1 then
@@ -4839,6 +4825,7 @@ local function OnOwnedEvent(self, event, ...)
         end
         -- Rebuild spell-to-button map (slot contents may have changed)
         ActionBarsOwned.RebuildSpellIdMap()
+        if SyncOwnedFlyoutInfoToHandler then SyncOwnedFlyoutInfoToHandler() end
 
     elseif event == "PLAYER_ENTER_COMBAT" or event == "PLAYER_LEAVE_COMBAT" then
         -- Auto-attack flash state changes (SafeUpdate handles flash now)
@@ -4868,6 +4855,7 @@ local function OnOwnedEvent(self, event, ...)
             end
         end
         ApplyAllFlyoutDirections()
+        if SyncOwnedFlyoutInfoToHandler then SyncOwnedFlyoutInfoToHandler() end
         for _, barKey in ipairs(STANDARD_BAR_KEYS) do
             local btns = ActionBarsOwned.nativeButtons[barKey]
             local s = GetEffectiveSettings(barKey)
@@ -4891,6 +4879,7 @@ local function OnOwnedEvent(self, event, ...)
             end
         end
         ApplyAllFlyoutDirections()
+        if SyncOwnedFlyoutInfoToHandler then SyncOwnedFlyoutInfoToHandler() end
 
     elseif event == "SPELL_UPDATE_USABLE" then
         -- Spell usability changed (e.g. resource gained/spent, GCD ended).
@@ -5540,6 +5529,9 @@ end
 local FadeHideEffects
 local FadeShowEffects
 local SkinSpellFlyoutButtons
+local ApplySpellFlyoutButtonStateTextures
+local ShowOwnedFlyoutForButton
+local HideOwnedFlyout
 local PROC_ALERT_REGION_KEYS = {
     "ProcStartFlipbook",
     "ProcLoopFlipbook",
@@ -6792,6 +6784,10 @@ ApplyFlyoutDirection = function(barKey)
         return
     end
 
+    if HideOwnedFlyout then
+        HideOwnedFlyout()
+    end
+
     local dir = layout.flyoutDirection
     if not VALID_FLYOUT_DIRS[dir] then dir = nil end -- AUTO / unset
 
@@ -7561,6 +7557,355 @@ do -- spell flyout skinning
 
 local spellFlyoutSkinHooked = false
 
+do -- owned spell flyout (retail migration)
+
+local USE_OWNED_FLYOUT = (WOW_PROJECT_ID == WOW_PROJECT_MAINLINE)
+ActionBarsOwned.useOwnedFlyout = USE_OWNED_FLYOUT
+
+local ownedFlyout
+local ownedFlyoutButtons = {}
+local lastOwnedFlyoutSyncPayload
+
+local function GetOwnedFlyoutSettings(parentButton)
+    local barKey = GetBarKeyFromButton(parentButton)
+    if barKey then
+        local settings = GetEffectiveSettings(barKey)
+        if settings then return settings end
+    end
+    return GetGlobalSettings()
+end
+
+local function ApplyOwnedFlyoutButtonVisuals(button, spellID)
+    if not button then return end
+    button._quiFlyoutSpellID = spellID
+    if button.icon then
+        button.icon:SetTexture(spellID and GetSpellTexture(spellID) or nil)
+        if spellID then
+            button.icon:Show()
+        else
+            button.icon:Hide()
+        end
+    end
+    if button.Name then button.Name:SetText("") end
+    if button.Count then button.Count:SetText("") end
+    ApplySpellFlyoutButtonStateTextures(button)
+
+    if InCombatLockdown() then return end
+    local sourceButton = ownedFlyout and ownedFlyout:GetParent()
+    local settings = GetOwnedFlyoutSettings(sourceButton)
+    if settings and settings.skinEnabled then
+        SkinButton(button, settings)
+    end
+end
+
+EnsureOwnedFlyoutFrame = function()
+    if ownedFlyout or not USE_OWNED_FLYOUT then return ownedFlyout end
+
+    ownedFlyout = CreateFrame("Frame", "QUI_SpellFlyout", UIParent, "SecureHandlerBaseTemplate")
+    ownedFlyout:SetFrameStrata("DIALOG")
+    ownedFlyout:SetClampedToScreen(true)
+    ownedFlyout:Hide()
+
+    ownedFlyout.Background = CreateFrame("Frame", nil, ownedFlyout)
+    ownedFlyout.Background:SetAllPoints()
+    ownedFlyout.BackgroundTex = ownedFlyout.Background:CreateTexture(nil, "BACKGROUND")
+    ownedFlyout.BackgroundTex:SetAllPoints()
+    ownedFlyout.BackgroundTex:SetColorTexture(0, 0, 0, 0.35)
+    ownedFlyout:SetAttribute("numFlyoutButtons", 0)
+    ownedFlyout:Execute([[QUI_FlyoutInfo = newtable()]])
+    ownedFlyout:SetAttribute("HandleFlyout", [[
+        local parent = self:GetAttribute("flyoutParentHandle")
+        if not parent then
+            self:SetAttribute("flyoutID", nil)
+            self:Hide()
+            return
+        end
+
+        if self:IsShown() and self:GetParent() == parent then
+            self:SetAttribute("flyoutID", nil)
+            self:Hide()
+            return
+        end
+
+        local flyoutID = ...
+        local info = QUI_FlyoutInfo and QUI_FlyoutInfo[flyoutID]
+        if not info or not info.slots then
+            self:SetAttribute("flyoutID", nil)
+            self:Hide()
+            return
+        end
+
+        local direction = parent:GetAttribute("flyoutDirection") or "UP"
+        local width = tonumber(parent:GetWidth()) or 45
+        local height = tonumber(parent:GetHeight()) or 45
+        if width <= 0 then width = 45 end
+        if height <= 0 then height = 45 end
+
+        local usedSlots = 0
+        local prevButton
+        for slotID, slotInfo in ipairs(info.slots) do
+            if slotInfo and slotInfo.isKnown and slotInfo.spellID then
+                usedSlots = usedSlots + 1
+                local slotButton = self:GetFrameRef("flyoutButton" .. usedSlots)
+                if slotButton then
+                    slotButton:SetAttribute("type", "spell")
+                    slotButton:SetAttribute("spell", slotInfo.spellID)
+                    slotButton:SetAttribute("qui-flyout-spell", slotInfo.spellID)
+                    slotButton:SetWidth(width)
+                    slotButton:SetHeight(height)
+                    slotButton:CallMethod("QUI_UpdateOwnedFlyoutVisuals", slotInfo.spellID)
+                    slotButton:ClearAllPoints()
+
+                    if direction == "DOWN" then
+                        if prevButton then
+                            slotButton:SetPoint("TOP", prevButton, "BOTTOM", 0, -4)
+                        else
+                            slotButton:SetPoint("TOP", self, "TOP", 0, -7)
+                        end
+                    elseif direction == "LEFT" then
+                        if prevButton then
+                            slotButton:SetPoint("RIGHT", prevButton, "LEFT", -4, 0)
+                        else
+                            slotButton:SetPoint("RIGHT", self, "RIGHT", -7, 0)
+                        end
+                    elseif direction == "RIGHT" then
+                        if prevButton then
+                            slotButton:SetPoint("LEFT", prevButton, "RIGHT", 4, 0)
+                        else
+                            slotButton:SetPoint("LEFT", self, "LEFT", 7, 0)
+                        end
+                    else
+                        if prevButton then
+                            slotButton:SetPoint("BOTTOM", prevButton, "TOP", 0, 4)
+                        else
+                            slotButton:SetPoint("BOTTOM", self, "BOTTOM", 0, 7)
+                        end
+                    end
+
+                    slotButton:Show()
+                    prevButton = slotButton
+                end
+            end
+        end
+
+        for i = usedSlots + 1, self:GetAttribute("numFlyoutButtons") do
+            local slotButton = self:GetFrameRef("flyoutButton" .. i)
+            if slotButton then
+                slotButton:Hide()
+                slotButton:SetAttribute("type", nil)
+                slotButton:SetAttribute("spell", nil)
+                slotButton:SetAttribute("qui-flyout-spell", nil)
+                slotButton:CallMethod("QUI_ClearOwnedFlyoutVisuals")
+            end
+        end
+
+        if usedSlots == 0 then
+            self:SetAttribute("flyoutID", nil)
+            self:Hide()
+            return
+        end
+
+        local extent
+        if direction == "LEFT" or direction == "RIGHT" then
+            extent = 14 + usedSlots * width + (usedSlots - 1) * 4
+            self:SetSize(extent, height)
+        else
+            extent = 14 + usedSlots * height + (usedSlots - 1) * 4
+            self:SetSize(width, extent)
+        end
+
+        self:SetParent(parent)
+        self:SetAttribute("flyoutID", flyoutID)
+        self:ClearAllPoints()
+        if direction == "DOWN" then
+            self:SetPoint("TOP", parent, "BOTTOM", 0, -4)
+        elseif direction == "LEFT" then
+            self:SetPoint("RIGHT", parent, "LEFT", -4, 0)
+        elseif direction == "RIGHT" then
+            self:SetPoint("LEFT", parent, "RIGHT", 4, 0)
+        else
+            self:SetPoint("BOTTOM", parent, "TOP", 0, 4)
+        end
+
+        self:Show()
+    ]])
+
+    return ownedFlyout
+end
+
+local function EnsureOwnedFlyoutButton(index)
+    local btn = ownedFlyoutButtons[index]
+    if btn then return btn end
+
+    local flyout = EnsureOwnedFlyoutFrame()
+    if not flyout then return nil end
+
+    local name = "QUI_SpellFlyoutButton" .. index
+    btn = CreateFrame("CheckButton", name, flyout, "ActionButtonTemplate, SecureActionButtonTemplate")
+    btn:RegisterForClicks("AnyDown", "AnyUp")
+    do
+        local _db = GetDB()
+        local _g = _db and _db.global
+        btn:SetAttribute("useOnKeyDown", _g and _g.useOnKeyDown == true)
+    end
+    btn:SetAttribute("checkselfcast", true)
+    btn:SetAttribute("checkfocuscast", true)
+    btn:SetAttribute("checkmouseovercast", true)
+    btn:SetAttribute("type", nil)
+    btn._quiOwnedFlyout = true
+
+    btn:SetScript("OnDragStart", nil)
+    btn:SetScript("OnReceiveDrag", nil)
+    btn.QUI_UpdateOwnedFlyoutVisuals = function(self, spellID)
+        ApplyOwnedFlyoutButtonVisuals(self, spellID)
+    end
+    btn.QUI_ClearOwnedFlyoutVisuals = function(self)
+        ApplyOwnedFlyoutButtonVisuals(self, nil)
+    end
+    btn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        if self._quiFlyoutSpellID then
+            GameTooltip:SetSpellByID(self._quiFlyoutSpellID)
+        end
+        GameTooltip:Show()
+    end)
+    btn:SetScript("OnLeave", GameTooltip_Hide)
+    ApplySpellFlyoutButtonStateTextures(btn)
+    if btn.Name then btn.Name:SetText("") end
+    if btn.Count then btn.Count:SetText("") end
+    SecureHandlerWrapScript(btn, "OnClick", flyout, [[
+        if not down then
+            owner:SetAttribute("flyoutID", nil)
+            owner:Hide()
+        end
+        if button == "Keybind" then
+            return "LeftButton"
+        end
+    ]])
+
+    flyout:SetFrameRef("flyoutButton" .. index, btn)
+    ownedFlyoutButtons[index] = btn
+    return btn
+end
+
+local function RebuildOwnedFlyoutIdSet()
+    local activeFlyoutIds = {}
+
+    for _, barKey in ipairs(STANDARD_BAR_KEYS) do
+        local buttons = ActionBarsOwned.nativeButtons and ActionBarsOwned.nativeButtons[barKey]
+        if buttons then
+            for _, btn in ipairs(buttons) do
+                local action = btn and btn.action
+                if type(action) == "number" and action > 0 then
+                    local actionType, flyoutID = GetActionInfo(action)
+                    if actionType == "flyout" and type(flyoutID) == "number" and flyoutID > 0 then
+                        activeFlyoutIds[flyoutID] = true
+                    end
+                end
+            end
+        end
+    end
+
+    ActionBarsOwned.activeFlyoutIds = activeFlyoutIds
+    return activeFlyoutIds
+end
+
+HideOwnedFlyout = function()
+    if ownedFlyout then
+        if InCombatLockdown() then
+            return
+        end
+        ownedFlyout:Hide()
+        ownedFlyout:SetAttribute("flyoutID", nil)
+    end
+end
+ActionBarsOwned.HideOwnedFlyout = HideOwnedFlyout
+
+SyncOwnedFlyoutInfoToHandler = function()
+    if not USE_OWNED_FLYOUT then return end
+    if InCombatLockdown() then
+        ActionBarsOwned.pendingOwnedFlyoutSync = true
+        return
+    end
+
+    local flyout = EnsureOwnedFlyoutFrame()
+    if not flyout then return end
+
+    local activeFlyoutIds = RebuildOwnedFlyoutIdSet()
+    local infoByFlyout = {}
+    local maxNumSlots = 0
+    local data = "QUI_FlyoutInfo = newtable();\n"
+    for flyoutID in pairs(activeFlyoutIds) do
+        local _, _, numSlots, isKnown = GetFlyoutInfo(flyoutID)
+        if isKnown and type(numSlots) == "number" and numSlots > 0 then
+            local info = { slots = {} }
+            infoByFlyout[flyoutID] = info
+            if numSlots > maxNumSlots then
+                maxNumSlots = numSlots
+            end
+            for slot = 1, numSlots do
+                local spellID, overrideSpellID, isKnownSlot = GetFlyoutSlotInfo(flyoutID, slot)
+                local castSpellID = (overrideSpellID and overrideSpellID > 0) and overrideSpellID or spellID
+                info.slots[slot] = {
+                    spellID = castSpellID,
+                    isKnown = isKnownSlot and type(castSpellID) == "number" and castSpellID > 0 or false,
+                }
+            end
+        end
+    end
+
+    for flyoutID, info in pairs(infoByFlyout) do
+        data = data .. ("QUI_FlyoutInfo[%d] = newtable();QUI_FlyoutInfo[%d].slots = newtable();\n"):format(flyoutID, flyoutID)
+        for slotID, slotInfo in ipairs(info.slots) do
+            local spellID = (slotInfo and type(slotInfo.spellID) == "number" and slotInfo.spellID > 0) and slotInfo.spellID or 0
+            data = data .. ("QUI_FlyoutInfo[%d].slots[%d] = newtable();QUI_FlyoutInfo[%d].slots[%d].spellID = %d;QUI_FlyoutInfo[%d].slots[%d].isKnown = %s;\n")
+                :format(flyoutID, slotID, flyoutID, slotID, spellID, flyoutID, slotID, slotInfo and slotInfo.isKnown and "true" or "nil")
+        end
+    end
+
+    if maxNumSlots > #ownedFlyoutButtons then
+        for i = #ownedFlyoutButtons + 1, maxNumSlots do
+            EnsureOwnedFlyoutButton(i)
+        end
+        flyout:SetAttribute("numFlyoutButtons", #ownedFlyoutButtons)
+    end
+
+    if data ~= lastOwnedFlyoutSyncPayload then
+        flyout:Execute(data)
+        lastOwnedFlyoutSyncPayload = data
+    end
+
+    ActionBarsOwned.pendingOwnedFlyoutSync = false
+end
+
+ShowOwnedFlyoutForButton = function(parentButton)
+    if not USE_OWNED_FLYOUT or not parentButton then
+        return false
+    end
+
+    local action = parentButton.action
+    if not action then
+        HideOwnedFlyout()
+        return false
+    end
+
+    local actionType, flyoutID = GetActionInfo(action)
+    if actionType ~= "flyout" or not flyoutID then
+        HideOwnedFlyout()
+        return false
+    end
+
+    SyncOwnedFlyoutInfoToHandler()
+    local flyout = EnsureOwnedFlyoutFrame()
+    if not flyout then return false end
+
+    flyout:SetAttribute("flyoutParentHandle", parentButton)
+    flyout:RunAttribute("HandleFlyout", flyoutID)
+    return flyout:IsShown()
+end
+
+end -- do (owned spell flyout)
+
 local function IsSpellFlyoutButtonFrame(button, flyout)
     if not button then return false end
     if flyout and button.GetParent and button:GetParent() == flyout then
@@ -7649,7 +7994,7 @@ local function SkinSpellFlyoutContainer(flyout)
     if bg.VerticalMiddle then bg.VerticalMiddle:SetAlpha(0) end
 end
 
-local function ApplySpellFlyoutButtonStateTextures(button)
+ApplySpellFlyoutButtonStateTextures = function(button)
     if not button then return end
 
     if button.SetHitRectInsets then
@@ -7686,8 +8031,13 @@ local function ApplySpellFlyoutButtonStateTextures(button)
 end
 
 SkinSpellFlyoutButtons = function()
+    if ActionBarsOwned.useOwnedFlyout then return end
     local flyout = _G.SpellFlyout
     if not (flyout and flyout.IsShown and flyout:IsShown()) then return end
+    if InCombatLockdown() then
+        ActionBarsOwned.pendingFlyoutSkin = true
+        return
+    end
 
     SkinSpellFlyoutContainer(flyout)
 
@@ -7883,12 +8233,6 @@ function ActionBarsOwned:Initialize()
         ownedEventFrame:RegisterEvent("LEARNED_SPELL_IN_SKILL_LINE")
     end
     ownedEventFrame:Show()
-
-    -- Force all action bars enabled so owned buttons function correctly
-    C_CVar.SetCVar("SHOW_MULTI_ACTIONBAR_1", "1")
-    C_CVar.SetCVar("SHOW_MULTI_ACTIONBAR_2", "1")
-    C_CVar.SetCVar("SHOW_MULTI_ACTIONBAR_3", "1")
-    C_CVar.SetCVar("SHOW_MULTI_ACTIONBAR_4", "1")
 
     -- Build all managed bars (1-8 + pet/stance)
     for _, barKey in ipairs(ALL_MANAGED_BAR_KEYS) do
@@ -8178,6 +8522,10 @@ function ActionBarsOwned:Refresh()
         return
     end
 
+    if HideOwnedFlyout then
+        HideOwnedFlyout()
+    end
+
     for _, barKey in ipairs(ALL_MANAGED_BAR_KEYS) do
         BuildBar(barKey)
     end
@@ -8219,6 +8567,9 @@ function ActionBarsOwned:Refresh()
     -- Apply bar layout settings (spacing, empty slot visibility)
     ApplyAllBarSpacing()
     ApplyAllFlyoutDirections()
+    if SyncOwnedFlyoutInfoToHandler then
+        SyncOwnedFlyoutInfoToHandler()
+    end
 
     -- Hide bars that are disabled in DB
     for _, barKey in ipairs(ALL_MANAGED_BAR_KEYS) do
@@ -8268,6 +8619,16 @@ _G.QUI_ApplyUseOnKeyDown = function()
     for bar = 1, 8 do
         for i = 1, 12 do
             local btn = _G["QUI_Bar" .. bar .. "Button" .. i]
+            if btn then
+                btn:SetAttribute("useOnKeyDown", value)
+            end
+        end
+    end
+    if EnsureOwnedFlyoutFrame then
+        local flyout = EnsureOwnedFlyoutFrame()
+        local count = (flyout and flyout.GetAttribute and flyout:GetAttribute("numFlyoutButtons")) or 0
+        for i = 1, count do
+            local btn = _G["QUI_SpellFlyoutButton" .. i]
             if btn then
                 btn:SetAttribute("useOnKeyDown", value)
             end
@@ -8429,6 +8790,9 @@ do
                         if val then
                             container:Show()
                         else
+                            if ActionBarsOwned.HideOwnedFlyout then
+                                ActionBarsOwned.HideOwnedFlyout()
+                            end
                             container:Hide()
                         end
                     end
@@ -8464,6 +8828,9 @@ do
                     if not container then return end
                     container:SetAttribute("qui-user-shown", (not hide) and true or false)
                     if hide then
+                        if ActionBarsOwned.HideOwnedFlyout then
+                            ActionBarsOwned.HideOwnedFlyout()
+                        end
                         container:Hide()
                     else
                         container:Show()
