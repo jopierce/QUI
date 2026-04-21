@@ -20,6 +20,8 @@ local IsSpellOverlayed = (C_SpellActivationOverlay and C_SpellActivationOverlay.
 -- Event-based overlay tracking: ultimate fallback when neither query API exists,
 -- and also used to check override spell IDs that the API might miss.
 local overlayedSpells = {}  -- [spellID] = true
+local overlayedSpellCounts = {}  -- [spellID] = refcount
+local overlayedSourceMap = {}  -- [sourceSpellID] = { [candidateID] = true }
 
 local function ForEachSpellCandidate(spellID, callback)
     if not spellID or not callback then return end
@@ -110,28 +112,67 @@ local function IsFrameActive(frame)
         return true
     end
 
+    local alphaActive = nil
     ok, active = pcall(function()
-        return frame:IsShown()
+        return (frame.GetAlpha and frame:GetAlpha() or 0) > 0.05
     end)
-    if ok and active then
-        return true
+    if ok then
+        alphaActive = active and true or false
+        if alphaActive then
+            return true
+        end
     end
 
-    ok, active = pcall(function()
-        return frame:IsVisible()
-    end)
-    if ok and active then
-        return true
-    end
+    -- Blizzard proc visuals can linger with IsShown() == true while faded out.
+    -- Treat shown/visible as active only when alpha is unknown; if alpha is
+    -- readable and near zero, that should win and clear our mirrored glow.
+    if alphaActive == nil then
+        ok, active = pcall(function()
+            return frame:IsShown()
+        end)
+        if ok and active then
+            return true
+        end
 
-    ok, active = pcall(function()
-        return (frame:GetAlpha() or 0) > 0.05
-    end)
-    if ok and active then
-        return true
+        ok, active = pcall(function()
+            return frame:IsVisible()
+        end)
+        if ok and active then
+            return true
+        end
     end
 
     return false
+end
+
+local function ClearOverlaySource(sourceSpellID)
+    local mapped = sourceSpellID and overlayedSourceMap[sourceSpellID]
+    if not mapped then return end
+    for candidateID in pairs(mapped) do
+        local count = (overlayedSpellCounts[candidateID] or 0) - 1
+        if count > 0 then
+            overlayedSpellCounts[candidateID] = count
+            overlayedSpells[candidateID] = true
+        else
+            overlayedSpellCounts[candidateID] = nil
+            overlayedSpells[candidateID] = nil
+        end
+    end
+    overlayedSourceMap[sourceSpellID] = nil
+end
+
+local function MarkOverlaySource(sourceSpellID)
+    if not sourceSpellID then return end
+    ClearOverlaySource(sourceSpellID)
+    local mapped = {}
+    ForEachSpellCandidate(sourceSpellID, function(candidateID)
+        if candidateID then
+            mapped[candidateID] = true
+            overlayedSpellCounts[candidateID] = (overlayedSpellCounts[candidateID] or 0) + 1
+            overlayedSpells[candidateID] = true
+        end
+    end)
+    overlayedSourceMap[sourceSpellID] = mapped
 end
 
 local function IsBlizzProcVisualActive(icon)
@@ -719,9 +760,6 @@ local function EvaluateGlowForIcon(icon, includeHidden)
                 shouldGlow = true
             end
         end)
-        if not shouldGlow and IsBlizzProcVisualActive(icon) then
-            shouldGlow = true
-        end
     end
 
     if not shouldGlow and spellOvr and spellOvr.procOnUsable then
@@ -862,27 +900,17 @@ eventFrame:SetScript("OnEvent", function(_, event, spellID)
         return
     end
     if event == "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW" and spellID then
-        overlayedSpells[spellID] = true
-        if C_Spell and C_Spell.GetOverrideSpell then
-            local overrideID = C_Spell.GetOverrideSpell(spellID)
-            if overrideID and overrideID ~= spellID then
-                overlayedSpells[overrideID] = true
-            end
-        end
+        MarkOverlaySource(spellID)
         ScanGlowsForSpell(spellID)
         return
     elseif event == "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE" and spellID then
-        overlayedSpells[spellID] = nil
-        if C_Spell and C_Spell.GetOverrideSpell then
-            local overrideID = C_Spell.GetOverrideSpell(spellID)
-            if overrideID and overrideID ~= spellID then
-                overlayedSpells[overrideID] = nil
-            end
-        end
+        ClearOverlaySource(spellID)
         ScanGlowsForSpell(spellID)
         return
     elseif event == "PLAYER_ENTERING_WORLD" then
         wipe(overlayedSpells)
+        wipe(overlayedSpellCounts)
+        wipe(overlayedSourceMap)
     end
     ScanAllGlows()
 end)
