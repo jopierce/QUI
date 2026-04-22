@@ -29,6 +29,11 @@ local InCombatLockdown = InCombatLockdown
 local AddPrivateAuraAnchor = C_UnitAuras and C_UnitAuras.AddPrivateAuraAnchor
 local RemovePrivateAuraAnchor = C_UnitAuras and C_UnitAuras.RemovePrivateAuraAnchor
 
+-- 12.0.5+ requires `isContainer` on AddPrivateAuraAnchor args; non-container
+-- anchors must pass `isContainer = false` or registration silently fails.
+local CLIENT_VERSION = select(4, GetBuildInfo())
+local IS_CONTAINER_SUPPORTED = CLIENT_VERSION and CLIENT_VERSION >= 120005
+
 ---------------------------------------------------------------------------
 -- DEFAULTS
 ---------------------------------------------------------------------------
@@ -127,7 +132,6 @@ local previewActive = false
 local PA_MAX_SLOTS = 3
 local paSlots = {}
 local paAnchorIDs = {}
-local paPendingSetup = false   -- deferred AddPrivateAuraAnchor after combat
 
 ---------------------------------------------------------------------------
 -- ICON STYLING
@@ -621,22 +625,19 @@ end
 ---------------------------------------------------------------------------
 local function ClearPrivateAuraAnchors()
     if not RemovePrivateAuraAnchor then return end
-    if InCombatLockdown() then
-        paPendingSetup = true
-        return
-    end
     for i = 1, #paAnchorIDs do
         local id = paAnchorIDs[i]
         if id then pcall(RemovePrivateAuraAnchor, id) end
     end
     wipe(paAnchorIDs)
-    -- Hide any stale WoW-rendered children left on anchor slots
+    -- Hide any stale WoW-rendered children left on anchor slots. pcall in
+    -- case any child is a protected C-side frame that can't be hidden in combat.
     for i = 1, PA_MAX_SLOTS do
         local slot = paSlots[i]
         if slot then
             for j = 1, slot:GetNumChildren() do
                 local child = select(j, slot:GetChildren())
-                if child then child:Hide() end
+                if child then pcall(child.Hide, child) end
             end
         end
     end
@@ -748,10 +749,6 @@ end
 
 local function SetupPrivateAuras()
     if not AddPrivateAuraAnchor or not debuffContainer then return end
-    if InCombatLockdown() then
-        paPendingSetup = true
-        return
-    end
     ClearPrivateAuraAnchors()
 
     local settings = GetSettings()
@@ -777,7 +774,7 @@ local function SetupPrivateAuras()
         StyleSlotBorders(slot, settings)
 
         -- Inset the icon by borderSize so the border is visible around it
-        local ok, anchorID = pcall(AddPrivateAuraAnchor, {
+        local anchorArgs = {
             unitToken = "player",
             auraIndex = i,
             parent = slot,
@@ -795,7 +792,9 @@ local function SetupPrivateAuras()
                     offsetY = 0,
                 },
             },
-        })
+        }
+        if IS_CONTAINER_SUPPORTED then anchorArgs.isContainer = false end
+        local ok, anchorID = pcall(AddPrivateAuraAnchor, anchorArgs)
         paAnchorIDs[i] = ok and anchorID or nil
     end
 
@@ -1116,10 +1115,6 @@ local PA_REFRESH_CD = 1.0
 
 local function RefreshPrivateAuraAnchors()
     if not AddPrivateAuraAnchor or not debuffContainer then return end
-    if InCombatLockdown() then
-        paPendingSetup = true
-        return
-    end
     local now = GetTime()
     if now - paLastRefresh < PA_REFRESH_CD then return end
     paLastRefresh = now
@@ -1410,22 +1405,16 @@ enchantEventFrame:SetScript("OnEvent", function(self, event, unit)
     end
 end)
 
--- Combat-end handler: process deferred private aura anchor work and re-sync
+-- Combat-end handler: re-sync secure header attributes (SetAttribute on
+-- SecureAuraHeaderTemplate is protected in combat) and force a restyle.
 local paRegenFrame = CreateFrame("Frame")
 paRegenFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 paRegenFrame:SetScript("OnEvent", function()
-    if paPendingSetup then
-        paPendingSetup = false
-        SetupPrivateAuras()
-        LayoutPrivateAuraSlots()
-    end
-    -- Re-sync header attributes that couldn't be changed during combat
     local settings = GetSettings()
     if settings then
         SyncHeaderAttributes(buffContainer, settings, "buff")
         SyncHeaderAttributes(debuffContainer, settings, "debuff")
     end
-    -- Force re-style
     UpdateBuffIcons()
     UpdateDebuffIcons()
 end)
