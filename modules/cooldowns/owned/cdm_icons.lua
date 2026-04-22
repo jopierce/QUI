@@ -534,9 +534,7 @@ local function GetItemCooldown(itemID)
     if not itemID or not C_Item.GetItemCooldown then return nil, nil, nil end
     local startTime, duration = C_Item.GetItemCooldown(itemID)
     if IsSecretValue(startTime) or IsSecretValue(duration) then
-        -- Secret values can no longer be forwarded via SetCooldown (12.0.5+).
-        -- No DurationObject API exists for items; graceful degradation.
-        return nil, nil, nil
+        return startTime, duration, nil -- CooldownFrame can handle secret values
     end
     if not IsSafeNumeric(startTime) or not IsSafeNumeric(duration) or duration <= 0 then
         return nil, nil, nil
@@ -547,6 +545,9 @@ end
 local function GetSlotCooldown(slotID)
     if not slotID or not GetInventoryItemCooldown then return nil, nil, nil end
     local startTime, duration, enabled = GetInventoryItemCooldown("player", slotID)
+    if IsSecretValue(startTime) or IsSecretValue(duration) then
+        return startTime, duration, nil -- CooldownFrame can handle secret values
+    end
     if not IsSafeNumeric(startTime) or not IsSafeNumeric(duration) then
         return nil, nil, nil
     end

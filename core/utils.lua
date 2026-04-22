@@ -1439,18 +1439,20 @@ function Helpers.ApplyCooldownFromStart(cooldownFrame, durationObj, startTime, d
         end
     end
 
-    if Helpers.IsSecretValue(startTime) or Helpers.IsSecretValue(duration) or Helpers.IsSecretValue(modRate) then
+    if not cooldownFrame.SetCooldown then
         return false
     end
-    if type(startTime) ~= "number" or type(duration) ~= "number" then
-        return false
-    end
-    if duration <= 0 or not cooldownFrame.SetCooldown then
-        return false
+    if not Helpers.IsSecretValue(startTime) and not Helpers.IsSecretValue(duration) then
+        if type(startTime) ~= "number" or type(duration) ~= "number" then
+            return false
+        end
+        if duration <= 0 then
+            return false
+        end
     end
 
     if modRate ~= nil then
-        if type(modRate) ~= "number" then
+        if not Helpers.IsSecretValue(modRate) and type(modRate) ~= "number" then
             return false
         end
         return pcall(cooldownFrame.SetCooldown, cooldownFrame, startTime, duration, modRate)
