@@ -1126,6 +1126,21 @@ local function EnsureContainerBootstrapSize(container, trackerKey)
         local db = GetDB()
         local tbs = db and db.trackedBar
         container:SetSize((tbs and tbs.barWidth) or 215, (tbs and tbs.barHeight) or 25)
+    elseif trackerKey == "buff" then
+        -- Match buffbar.lua's single-icon dims so the anchored edge's
+        -- midpoint doesn't shift when LayoutBuffIcons resizes to real
+        -- iconSize under a non-center anchor (e.g. anchored to Essential).
+        local db = GetDB()
+        local buff = db and db.buff
+        local iconSize = (buff and buff.iconSize) or 30
+        local aspectRatio = (buff and buff.aspectRatioCrop) or 1.0
+        local iconWidth, iconHeight = iconSize, iconSize
+        if aspectRatio > 1.0 then
+            iconHeight = iconSize / aspectRatio
+        elseif aspectRatio < 1.0 then
+            iconWidth = iconSize * aspectRatio
+        end
+        container:SetSize(iconWidth, iconHeight)
     else
         container:SetSize(100, 40)
     end
@@ -2290,6 +2305,14 @@ _G.QUI_OnEditModeEnterCDM = function()
 
     -- Force buff icons visible immediately (don't wait for ticker).
     ForceBuffIconsVisible()
+
+    -- Re-run buff layout so the owned container (and its layout mode
+    -- mover) sizes to match every now-visible icon, mirroring the
+    -- trackedBar path above. Without this, the mover reflects only the
+    -- pre-ForceBuffIconsVisible count and clips icons during layout mode.
+    if _G.QUI_OnBuffLayoutReady then
+        _G.QUI_OnBuffLayoutReady()
+    end
 
     -- Disable mouse on QUI icon frames so overlay catches clicks.
     DisableMouseForEditMode("essential")
