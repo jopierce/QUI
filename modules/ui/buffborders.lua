@@ -1319,6 +1319,18 @@ local function FullRefresh()
     UpdateDebuffIcons()
 end
 
+-- Secure aura headers can populate a little after Init() finishes on
+-- /reload. If the first Update*Icons pass lands before real children exist,
+-- the container stays at its 1x1 bootstrap size until something else
+-- (layout mode, a new aura event) forces another pass. Use a couple of
+-- out-of-combat retries so the headers settle into their real anchored size.
+local function TryDeferredFullRefresh()
+    if previewActive then return end
+    if not buffContainer or not debuffContainer then return end
+    if InCombatLockdown() then return end
+    FullRefresh()
+end
+
 ---------------------------------------------------------------------------
 -- INITIALIZATION
 ---------------------------------------------------------------------------
@@ -1395,6 +1407,9 @@ local function Init()
         UpdateBuffIcons()
         UpdateDebuffIcons()
     end)
+
+    C_Timer.After(0.5, TryDeferredFullRefresh)
+    C_Timer.After(2.0, TryDeferredFullRefresh)
 end
 
 ---------------------------------------------------------------------------
@@ -1423,13 +1438,7 @@ end)
 local paRegenFrame = CreateFrame("Frame")
 paRegenFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 paRegenFrame:SetScript("OnEvent", function()
-    local settings = GetSettings()
-    if settings then
-        SyncHeaderAttributes(buffContainer, settings, "buff")
-        SyncHeaderAttributes(debuffContainer, settings, "debuff")
-    end
-    UpdateBuffIcons()
-    UpdateDebuffIcons()
+    TryDeferredFullRefresh()
 end)
 
 -- Initialize after AceDB is ready (called from core/main.lua OnEnable)
