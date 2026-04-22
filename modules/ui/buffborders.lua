@@ -12,6 +12,7 @@ local GetGeneralFontOutline = Helpers.GetGeneralFontOutline
 local IsSecretValue = Helpers.IsSecretValue
 local SafeValue = Helpers.SafeValue
 local SafeToNumber = Helpers.SafeToNumber
+local ApplyCooldownFromAura = Helpers.ApplyCooldownFromAura
 
 -- Upvalue caching
 local type = type
@@ -136,6 +137,19 @@ local paAnchorIDs = {}
 ---------------------------------------------------------------------------
 -- ICON STYLING
 ---------------------------------------------------------------------------
+local function ConfigureAuraCooldownFrame(cooldown)
+    if not cooldown then return end
+
+    -- Buff/debuff timers need Blizzard's aura countdown rules or long-duration
+    -- auras can round like generic cooldowns.
+    if cooldown.SetUseAuraDisplayTime then
+        pcall(cooldown.SetUseAuraDisplayTime, cooldown, true)
+    end
+    if cooldown.SetHideCountdownNumbers then
+        pcall(cooldown.SetHideCountdownNumbers, cooldown, false)
+    end
+end
+
 local function StyleIcon(icon, settings, isBuff, debuffType)
     if not icon or not settings then return end
 
@@ -390,20 +404,18 @@ local function StyleHeaderChildren(header, settings, isBuff)
             end)
         end
 
-        -- Cooldown via DurationObject — the only secret-safe path in 12.0.5+.
-        -- GetAuraDuration returns a DurationObject; SetCooldownFromDurationObject
-        -- is C-side and accepts it natively without tainting.
+        -- Aura cooldowns prefer DurationObjects for 12.0.5+ secret-safe updates,
+        -- and fall back to numeric timing only when the values are readable.
         if child.Cooldown then
-            if C_UnitAuras.GetAuraDuration and data.auraInstanceID then
-                local ok, durObj = pcall(C_UnitAuras.GetAuraDuration, "player", data.auraInstanceID)
-                if ok then
-                    pcall(child.Cooldown.SetCooldownFromDurationObject, child.Cooldown, durObj, true)
-                else
-                    pcall(child.Cooldown.Clear, child.Cooldown)
-                end
-            else
-                pcall(child.Cooldown.Clear, child.Cooldown)
-            end
+            ConfigureAuraCooldownFrame(child.Cooldown)
+            ApplyCooldownFromAura(
+                child.Cooldown,
+                "player",
+                data.auraInstanceID,
+                data.expirationTime,
+                data.duration,
+                true
+            )
             -- Swipe settings
             local showSwipe = not settings.hideSwipe
             child.Cooldown:SetDrawSwipe(showSwipe)
@@ -449,6 +461,7 @@ local function StyleHeaderChildren(header, settings, isBuff)
                 end
                 -- Enchant cooldown from GetWeaponEnchantInfo
                 if child.Cooldown then
+                    ConfigureAuraCooldownFrame(child.Cooldown)
                     local hasMain, mainExp, _, _, hasOff, offExp = GetWeaponEnchantInfo()
                     local expMs = (slot == 16) and (hasMain and mainExp) or (slot == 17) and (hasOff and offExp) or nil
                     if expMs and not IsSecretValue(expMs) and expMs > 0 then
