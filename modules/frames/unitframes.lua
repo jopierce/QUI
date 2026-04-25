@@ -4724,6 +4724,57 @@ do
                 end, sections, relayout)
             end
 
+            -- Portrait (player, target, focus)
+            if unitKey == "player" or unitKey == "target" or unitKey == "focus" then
+                if unitDB.showPortrait == nil then unitDB.showPortrait = false end
+                if unitDB.portraitSide == nil then
+                    unitDB.portraitSide = (unitKey == "player") and "LEFT" or "RIGHT"
+                end
+                if unitDB.portraitSize == nil then
+                    if unitDB.portraitScale then
+                        unitDB.portraitSize = math_floor((unitDB.height or 40) * unitDB.portraitScale)
+                    else
+                        unitDB.portraitSize = (unitKey == "focus") and 30 or 40
+                    end
+                end
+                if unitDB.portraitBorderSize == nil then unitDB.portraitBorderSize = 1 end
+                if unitDB.portraitGap == nil then unitDB.portraitGap = 0 end
+                if unitDB.portraitOffsetX == nil then unitDB.portraitOffsetX = 0 end
+                if unitDB.portraitOffsetY == nil then unitDB.portraitOffsetY = 0 end
+                if unitDB.portraitBorderUseClassColor == nil then unitDB.portraitBorderUseClassColor = false end
+                if unitDB.portraitBorderColor == nil then unitDB.portraitBorderColor = { 0, 0, 0, 1 } end
+
+                local sideOptions = {
+                    {value = "LEFT", text = "Left"},
+                    {value = "RIGHT", text = "Right"},
+                }
+
+                CreateCollapsible(content, "Portrait", 9 * FORM_ROW + 8, function(body)
+                    local sy = -4
+                    local borderColorPicker
+
+                    sy = P(GUI:CreateFormCheckbox(body, "Show Portrait", "showPortrait", unitDB, RefreshUF), body, sy)
+                    sy = P(GUI:CreateFormDropdown(body, "Portrait Side", sideOptions, "portraitSide", unitDB, RefreshUF), body, sy)
+                    sy = P(GUI:CreateFormSlider(body, "Portrait Size", 20, 150, 1, "portraitSize", unitDB, RefreshUF, DEFER), body, sy)
+                    sy = P(GUI:CreateFormSlider(body, "Portrait Border", 0, 5, 1, "portraitBorderSize", unitDB, RefreshUF, DEFER), body, sy)
+                    sy = P(GUI:CreateFormSlider(body, "Portrait Gap", 0, 10, 1, "portraitGap", unitDB, RefreshUF, DEFER), body, sy)
+                    sy = P(GUI:CreateFormSlider(body, "Portrait Offset X", -500, 500, 1, "portraitOffsetX", unitDB, RefreshUF, DEFER), body, sy)
+                    sy = P(GUI:CreateFormSlider(body, "Portrait Offset Y", -500, 500, 1, "portraitOffsetY", unitDB, RefreshUF, DEFER), body, sy)
+                    sy = P(GUI:CreateFormCheckbox(body, "Use Class Color for Border", "portraitBorderUseClassColor", unitDB, function(val)
+                        RefreshUF()
+                        if borderColorPicker and borderColorPicker.SetEnabled then
+                            borderColorPicker:SetEnabled(not val)
+                        end
+                    end), body, sy)
+
+                    borderColorPicker = GUI:CreateFormColorPicker(body, "Border Color", "portraitBorderColor", unitDB, RefreshUF)
+                    if borderColorPicker.SetEnabled then
+                        borderColorPicker:SetEnabled(not unitDB.portraitBorderUseClassColor)
+                    end
+                    P(borderColorPicker, body, sy)
+                end, sections, relayout)
+            end
+
             -- Absorb Indicator
             if unitDB.absorbs == nil then unitDB.absorbs = {} end
             Helpers.EnsureDefaults(unitDB.absorbs, {
