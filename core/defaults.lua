@@ -2504,6 +2504,11 @@ local defaults = {
                     enabled = true,
                     color = { 1, 1, 1, 0.6 },
                 },
+                -- Range alpha (dim boss frames when the boss unit is out of range)
+                range = {
+                    enabled = true,
+                    outOfRangeAlpha = 0.4,
+                },
             },
         },
 
