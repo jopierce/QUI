@@ -390,7 +390,9 @@ local function GetAuraApplications(unit, auraInstanceID)
         _tickAuraApplicationCacheTime[auraInstanceID] = nil
     end
     _tickAuraStats.applicationQueries = _tickAuraStats.applicationQueries + 1
-    local ok, stacks = pcall(C_UnitAuras.GetAuraApplicationDisplayCount, unit, auraInstanceID, 2, 99)
+    -- minDisplay=1 so single-stack stacking auras (e.g. Mana Tea on
+    -- Mistweaver) display their first stack instead of being clamped to nil.
+    local ok, stacks = pcall(C_UnitAuras.GetAuraApplicationDisplayCount, unit, auraInstanceID, 1, 99)
     if ok then
         _tickAuraApplicationCache[auraInstanceID] = stacks
         _tickAuraApplicationResolved[auraInstanceID] = true

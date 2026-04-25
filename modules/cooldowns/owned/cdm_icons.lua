@@ -978,14 +978,19 @@ local function MirrorCurrentBlizzCooldown(icon, blizzCD)
     if not addonCD or not blizzCD then return false end
 
     local synced = false
-    if blizzCD.GetCooldownDuration and addonCD.SetCooldownFromDurationObject then
-        local okDur, durObj = pcall(blizzCD.GetCooldownDuration, blizzCD)
-        -- Prefer Blizzard's live DurationObject when present. This remains
-        -- the only secret-safe way for addon code to mirror cooldown state in
-        -- combat, including rune/resource waits that do not classify cleanly
-        -- through the numeric GetCooldownTimes snapshot.
-        if okDur and durObj then
-            synced = pcall(addonCD.SetCooldownFromDurationObject, addonCD, durObj) and true or false
+    -- Pull the spell's DurationObject from C_Spell.GetSpellCooldownDuration —
+    -- the secret-safe authority. blizzCD:GetCooldownDuration returns a number
+    -- (secret in combat), not a DurationObject, so it cannot be forwarded to
+    -- SetCooldownFromDurationObject from tainted code.
+    if addonCD.SetCooldownFromDurationObject and C_Spell and C_Spell.GetSpellCooldownDuration then
+        local entry = icon and icon._spellEntry
+        local sid = icon and icon._runtimeSpellID
+            or (entry and (entry.spellID or entry.overrideSpellID or entry.id))
+        if sid then
+            local okDur, durObj = pcall(C_Spell.GetSpellCooldownDuration, sid)
+            if okDur and durObj then
+                synced = pcall(addonCD.SetCooldownFromDurationObject, addonCD, durObj) and true or false
+            end
         end
     end
 
@@ -1035,13 +1040,10 @@ local function GetBlizzCooldownPayload(blizzCD)
         return nil, nil, nil
     end
 
-    if blizzCD.GetCooldownDuration then
-        local okDur, durObj = pcall(blizzCD.GetCooldownDuration, blizzCD)
-        if okDur and durObj and (IsSecretValue(durObj) or durObj ~= 0) then
-            return nil, nil, durObj
-        end
-    end
-
+    -- Cooldown:GetCooldownDuration returns a number (secret in combat), not a
+    -- DurationObject — passing it to SetCooldownFromDurationObject silently
+    -- no-ops. Use C_Spell.GetSpellCooldownDuration upstream for the
+    -- DurationObject; this helper now only surfaces the numeric snapshot.
     if blizzCD.GetCooldownTimes then
         local okTimes, rawStart, rawDuration = pcall(blizzCD.GetCooldownTimes, blizzCD)
         if okTimes and not IsSecretValue(rawStart) and not IsSecretValue(rawDuration) then
@@ -1349,6 +1351,17 @@ local function HookBlizzStackText(icon, blizzChild)
     if not blizzChild then return end
 
     local entry = icon._spellEntry
+
+    -- Buff viewer children: do NOT reparent Applications/ChargeCount.
+    -- Blizzard's buff-viewer display layer (e.g. Mana Tea on Mistweaver)
+    -- doesn't reliably drive these frames the way the cooldown viewer
+    -- templates do, so reparenting leaves the count permanently blank.
+    -- Leave the native frames on their original parent (hidden behind
+    -- the alpha=0 viewer) and let the API path drive icon.StackText.
+    if entry and entry.viewerType == "buff" then
+        return
+    end
+
     local chargeFrame = blizzChild.ChargeCount
     local appFrame = blizzChild.Applications
 
@@ -2273,30 +2286,26 @@ local function UpdateIconCooldown(icon)
                             pcall(icon.Cooldown.SetReverse, icon.Cooldown, true)
                         end
 
-                        -- Stacks: prefer hook-driven values (Applications.SetText
-                        -- hook fires immediately when Blizzard updates stacks).
-                        -- The API path (GetAuraDataBySpellName) lags behind the
-                        -- hook by 1+ frames and may return secret values in
-                        -- combat — only use it as a fallback when hooks aren't
-                        -- actively driving stack text for this icon.
+                        -- Stacks: forward r.stacks directly to C-side. Blizzard's
+                        -- aura APIs return secret values in combat, so any Lua-
+                        -- side comparison on r.stacks is unsafe — instead, "or 0"
+                        -- maps nil → 0 via short-circuit (no value inspection),
+                        -- and TruncateWhenZero / SetText accept secret integers
+                        -- natively. For charged entries, raw 0 is meaningful
+                        -- (all charges depleted); for non-charged auras,
+                        -- TruncateWhenZero collapses 0 to "" and the stack
+                        -- text simply renders empty.
                         local _auraHookActive = (not r.isTotemInstance) and IsHookStackActive(entry, icon)
                         if not _auraHookActive then
                             if r.isTotemInstance then
                                 icon.StackText:SetText("")
                                 icon.StackText:Hide()
-                            elseif r.stacks ~= nil then
-                                -- Charged abilities: "0" is meaningful (all
-                                -- charges depleted). Only truncate zero for
-                                -- non-charged resource stacks.
-                                if entry.hasCharges then
-                                    pcall(icon.StackText.SetText, icon.StackText, r.stacks)
-                                else
-                                    pcall(icon.StackText.SetText, icon.StackText, C_StringUtil.TruncateWhenZero(r.stacks))
-                                end
+                            else
+                                local stacks = r.stacks or 0
+                                local text = entry.hasCharges and stacks
+                                    or C_StringUtil.TruncateWhenZero(stacks)
+                                pcall(icon.StackText.SetText, icon.StackText, text)
                                 icon.StackText:Show()
-                            elseif not InCombatLockdown() then
-                                icon.StackText:SetText("")
-                                icon.StackText:Hide()
                             end
                         end
 
@@ -2789,8 +2798,21 @@ local function UpdateIconCooldown(icon)
                 and apiIsActive == true
                 and spellUsable == true
             if realCooldownActive and not mirrorActive and not startTime and not duration and not durObj
-                and not entry.hasCharges and entry._blizzChild and entry._blizzChild.Cooldown then
-                startTime, duration, durObj = GetBlizzCooldownPayload(entry._blizzChild.Cooldown)
+                and not entry.hasCharges then
+                -- Prefer the spell's DurationObject (secret-safe primary API).
+                -- Covers the post-aura-phase case where the mirror hook may not
+                -- re-fire when a self-buff defensive transitions from aura to
+                -- pure-cooldown display (e.g. Divine Protection, Divine Shield).
+                if _runtimeSid and C_Spell and C_Spell.GetSpellCooldownDuration then
+                    local okDur, spellDurObj = pcall(C_Spell.GetSpellCooldownDuration, _runtimeSid)
+                    if okDur and spellDurObj then
+                        durObj = spellDurObj
+                    end
+                end
+                -- Numeric fallback (out of combat / non-secret payloads only).
+                if not durObj and entry._blizzChild and entry._blizzChild.Cooldown then
+                    startTime, duration, durObj = GetBlizzCooldownPayload(entry._blizzChild.Cooldown)
+                end
             end
             local expiredNow = CooldownHasExpiredNow(startTime, duration, durObj, _batchTime)
             local cooldownInactive = (apiIsActive == false)

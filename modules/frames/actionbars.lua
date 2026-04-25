@@ -8747,6 +8747,41 @@ function ActionBarsOwned:Initialize()
             end
         end
     end
+
+    -- Apply layout-mode hidden state during the addon-load safe window.
+    -- The bar containers use SecureHandlerStateTemplate + RegisterStateDriver,
+    -- which makes SetAttribute protected during combat. Layout Mode's
+    -- EnforceGameplayVisibility runs at PLAYER_ENTERING_WORLD+3s — past the
+    -- safe window — so applying hidden state from there triggers
+    -- ADDON_ACTION_BLOCKED on a combat /reload. Apply it here while the
+    -- safe window is open, and pre-mark _gameplayHidden so the later pass
+    -- treats the work as already done and skips the redundant SetAttribute.
+    local profile = Helpers.GetProfile()
+    local hiddenHandles = profile and profile.layoutMode and profile.layoutMode.hiddenHandles
+    if hiddenHandles then
+        local LAYOUT_TO_CONTAINER = {
+            bar1 = "bar1", bar2 = "bar2", bar3 = "bar3", bar4 = "bar4",
+            bar5 = "bar5", bar6 = "bar6", bar7 = "bar7", bar8 = "bar8",
+            petBar = "pet", stanceBar = "stance",
+            microMenu = "microbar", bagBar = "bags",
+        }
+        local lm = ns.QUI_LayoutMode
+        if lm then
+            lm._gameplayHidden = lm._gameplayHidden or {}
+        end
+        for layoutKey, containerKey in pairs(LAYOUT_TO_CONTAINER) do
+            if hiddenHandles[layoutKey] then
+                local container = self.containers[containerKey]
+                if container then
+                    container:SetAttribute("qui-user-shown", false)
+                    container:Hide()
+                    if lm then
+                        lm._gameplayHidden[layoutKey] = true
+                    end
+                end
+            end
+        end
+    end
 end
 
 function ActionBarsOwned:Refresh()
