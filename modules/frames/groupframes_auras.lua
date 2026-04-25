@@ -594,6 +594,55 @@ local function IsDurationTextEnabled(auraSettings, settingKey)
     return auraSettings.showDurationText ~= false
 end
 
+local function IsDurationTimeColorEnabled(auraSettings, settingKey)
+    if not auraSettings then return true end
+    local specific = auraSettings[settingKey]
+    if specific ~= nil then
+        return specific ~= false
+    end
+    return auraSettings.showDurationColor ~= false
+end
+
+local function GetDurationTextColor(auraSettings, colorKey)
+    if auraSettings then
+        local c = auraSettings[colorKey]
+        if c then
+            return c[1] or 1, c[2] or 1, c[3] or 1, c[4] or 1
+        end
+    end
+    return 1, 1, 1, 1
+end
+
+local function GetDurationFontPath(auraSettings, fontKey)
+    local fontName = auraSettings and auraSettings[fontKey]
+    if fontName and fontName ~= "" then
+        local fetched = LSM:Fetch("font", fontName)
+        if fetched then return fetched end
+    end
+    return GetFontPath()
+end
+
+local function ApplyDurationTextStyle(icon, auraSettings, prefix)
+    if not icon or not icon.durationText then return end
+
+    local durationText = icon.durationText
+    local fontPath = GetDurationFontPath(auraSettings, prefix .. "DurationFont")
+    local fontSize = auraSettings and (auraSettings[prefix .. "DurationFontSize"] or auraSettings.durationFontSize) or 9
+    local anchor = auraSettings and auraSettings[prefix .. "DurationAnchor"] or "BOTTOM"
+    local offsetX = auraSettings and auraSettings[prefix .. "DurationOffsetX"] or 0
+    local offsetY = auraSettings and auraSettings[prefix .. "DurationOffsetY"] or -6
+
+    durationText:SetFont(fontPath, fontSize or 9, "OUTLINE")
+    durationText:ClearAllPoints()
+    durationText:SetPoint(anchor or "BOTTOM", icon, anchor or "BOTTOM", offsetX or 0, offsetY or -6)
+
+    local state = icon._auraState
+    if state then
+        state._lastBucket = nil
+        state._lastColorBand = nil
+    end
+end
+
 local function SharedTimerOnUpdate(self, dt)
     timerElapsed = timerElapsed + dt
     if timerElapsed < TIMER_INTERVAL then return end
@@ -634,9 +683,9 @@ local function SharedTimerOnUpdate(self, dt)
                             icon.durationText:SetText(FormatDuration(remaining))
                             state._lastBucket = bucket
                         end
-                        -- Color: throttled to 1 Hz per icon (expensive in raids)
-                        local showDurationColor = not auraSettings or auraSettings.showDurationColor ~= false
-                        if showDurationColor then
+                        -- Color: throttled to 1 Hz per icon for dynamic duration bands.
+                        local useTimeColor = IsDurationTimeColorEnabled(auraSettings, icon._durationUseTimeColorKey)
+                        if useTimeColor then
                             local lastColorTime = state._lastColorTime or 0
                             if (now - lastColorTime) >= 1.0 then
                                 state._lastColorTime = now
@@ -647,9 +696,10 @@ local function SharedTimerOnUpdate(self, dt)
                                     state._lastColorBand = band
                                 end
                             end
-                        elseif state._lastColorBand ~= 0 then
-                            icon.durationText:SetTextColor(1, 1, 1, 1)
-                            state._lastColorBand = 0
+                        elseif state._lastColorBand ~= "static" then
+                            local r, g, b, a = GetDurationTextColor(auraSettings, icon._durationColorKey)
+                            icon.durationText:SetTextColor(r, g, b, a)
+                            state._lastColorBand = "static"
                         end
                     else
                         icon.durationText:SetText("")
@@ -1263,8 +1313,6 @@ local function UpdateFrameAuras(frame)
                 framePrevDebuffCount[frame] = vc
             end
         end
-        local fontPath = GetFontPath()
-        local durationFontSize = auraSettings.durationFontSize or 9
         for i = 1, maxDebuffs do
             local auraData = sortedAuras[i]
             if not frame.debuffIcons[i] then
@@ -1277,13 +1325,12 @@ local function UpdateFrameAuras(frame)
                 frame.debuffIcons[i]:ClearAllPoints()
                 frame.debuffIcons[i]:SetPoint(dAnchor, frame, dAnchor, dOffX + offX, dOffY + offY)
                 frame.debuffIcons[i]:SetSize(iconSize, iconSize)
-                -- Apply duration font size from settings
-                if frame.debuffIcons[i].durationText then
-                    frame.debuffIcons[i].durationText:SetFont(fontPath, durationFontSize, "OUTLINE")
-                end
             end
             local icon = frame.debuffIcons[i]
             icon._durationTextSettingKey = "showDebuffDurationText"
+            icon._durationUseTimeColorKey = "debuffDurationUseTimeColor"
+            icon._durationColorKey = "debuffDurationColor"
+            ApplyDurationTextStyle(icon, auraSettings, "debuff")
             SafeSetDrawSwipe(icon and icon.cooldown, auraSettings.debuffHideSwipe ~= true)
             SafeSetReverse(icon and icon.cooldown, auraSettings.debuffReverseSwipe == true)
             if auraData then
@@ -1424,8 +1471,6 @@ local function UpdateFrameAuras(frame)
                 framePrevBuffCount[frame] = vc
             end
         end
-        local fontPath = GetFontPath()
-        local buffFontSize = auraSettings.durationFontSize or 9
         for i = 1, maxBuffs do
             local auraData = sortedAuras[i]
             if not frame.buffIcons[i] then
@@ -1438,13 +1483,12 @@ local function UpdateFrameAuras(frame)
                 frame.buffIcons[i]:ClearAllPoints()
                 frame.buffIcons[i]:SetPoint(bAnchor, frame, bAnchor, bOffX + offX, bOffY + offY)
                 frame.buffIcons[i]:SetSize(iconSize, iconSize)
-                -- Apply duration font size from settings
-                if frame.buffIcons[i].durationText then
-                    frame.buffIcons[i].durationText:SetFont(fontPath, buffFontSize, "OUTLINE")
-                end
             end
             local bIcon = frame.buffIcons[i]
             bIcon._durationTextSettingKey = "showBuffDurationText"
+            bIcon._durationUseTimeColorKey = "buffDurationUseTimeColor"
+            bIcon._durationColorKey = "buffDurationColor"
+            ApplyDurationTextStyle(bIcon, auraSettings, "buff")
             SafeSetDrawSwipe(bIcon and bIcon.cooldown, auraSettings.buffHideSwipe ~= true)
             SafeSetReverse(bIcon and bIcon.cooldown, auraSettings.buffReverseSwipe == true)
             if auraData then

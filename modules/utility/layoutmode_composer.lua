@@ -276,6 +276,13 @@ local function GetTextureList()
     return list
 end
 
+local function GetFontListWithDefault()
+    local U = ns.QUI_LayoutMode_Utils
+    local list = U and U.GetFontList and U.GetFontList() or {}
+    table.insert(list, 1, { value = "", text = "(Frame Font)" })
+    return list
+end
+
 ---------------------------------------------------------------------------
 -- VISUAL PROXY
 ---------------------------------------------------------------------------
@@ -1122,12 +1129,26 @@ local function BuildNameSettings(content, gfdb, onChange)
     relayout()
 end
 
-local function AddAuraDurationTextRow(body, layout, auras, dbKey, label, onChange, enabledCond)
-    layout:Row(
-        GUI:CreateFormCheckbox(body, label, dbKey, auras, onChange),
-        FORM_ROW,
-        enabledCond
-    )
+local function AddAuraDurationTextRows(body, layout, auras, prefix, labelPrefix, onChange, enabledCond)
+    local textCond = function()
+        return enabledCond() and auras["show" .. labelPrefix .. "DurationText"] ~= false
+    end
+    local staticColorCond = function()
+        local useTimeColor = auras[prefix .. "DurationUseTimeColor"]
+        if useTimeColor == nil then
+            useTimeColor = auras.showDurationColor ~= false
+        end
+        return textCond() and not useTimeColor
+    end
+
+    layout:Row(GUI:CreateFormCheckbox(body, "Show " .. labelPrefix .. " Duration Text", "show" .. labelPrefix .. "DurationText", auras, onChange), FORM_ROW, enabledCond)
+    layout:Row(GUI:CreateFormDropdown(body, "Duration Font", GetFontListWithDefault(), prefix .. "DurationFont", auras, onChange, nil, { searchable = true }), DROP_ROW, textCond)
+    layout:Row(GUI:CreateFormSlider(body, "Duration Font Size", 6, 24, 1, prefix .. "DurationFontSize", auras, onChange), SLIDER_HEIGHT, textCond)
+    layout:Row(GUI:CreateFormDropdown(body, "Duration Anchor", NINE_POINT_OPTIONS, prefix .. "DurationAnchor", auras, onChange), DROP_ROW, textCond)
+    layout:Row(GUI:CreateFormSlider(body, "Duration X Offset", -40, 40, 1, prefix .. "DurationOffsetX", auras, onChange), SLIDER_HEIGHT, textCond)
+    layout:Row(GUI:CreateFormSlider(body, "Duration Y Offset", -40, 40, 1, prefix .. "DurationOffsetY", auras, onChange), SLIDER_HEIGHT, textCond)
+    layout:Row(GUI:CreateFormCheckbox(body, "Use Time-Based Duration Color", prefix .. "DurationUseTimeColor", auras, onChange), FORM_ROW, textCond)
+    layout:Row(GUI:CreateFormColorPicker(body, "Duration Text Color", prefix .. "DurationColor", auras, onChange), FORM_ROW, staticColorCond)
 end
 
 local function BuildBuffsSettings(content, gfdb, onChange)
@@ -1150,7 +1171,7 @@ local function BuildBuffsSettings(content, gfdb, onChange)
         L:Row(GUI:CreateFormSlider(body, "Max Buffs", 0, 8, 1, "maxBuffs", auras, syncedOnChange), SLIDER_HEIGHT, cond)
         L:Row(GUI:CreateFormSlider(body, "Icon Size", 8, 32, 1, "buffIconSize", auras, syncedOnChange), SLIDER_HEIGHT, cond)
         L:Row(GUI:CreateFormCheckbox(body, "Hide Duration Swipe", "buffHideSwipe", auras, syncedOnChange), FORM_ROW, cond)
-        AddAuraDurationTextRow(body, L, auras, "showBuffDurationText", "Show Buff Duration Text", syncedOnChange, cond)
+        AddAuraDurationTextRows(body, L, auras, "buff", "Buff", syncedOnChange, cond)
         L:Row(GUI:CreateFormCheckbox(body, "Reverse Swipe", "buffReverseSwipe", auras, syncedOnChange), FORM_ROW, reverseCond)
         L:Row(GUI:CreateFormDropdown(body, "Anchor", NINE_POINT_OPTIONS, "buffAnchor", auras, syncedOnChange), DROP_ROW, cond)
         L:Row(GUI:CreateFormDropdown(body, "Grow Direction", AURA_GROW_OPTIONS, "buffGrowDirection", auras, syncedOnChange), DROP_ROW, cond)
@@ -1223,7 +1244,7 @@ local function BuildDebuffsSettings(content, gfdb, onChange)
         L:Row(GUI:CreateFormSlider(body, "Max Debuffs", 0, 8, 1, "maxDebuffs", auras, syncedOnChange), SLIDER_HEIGHT, cond)
         L:Row(GUI:CreateFormSlider(body, "Icon Size", 8, 32, 1, "debuffIconSize", auras, syncedOnChange), SLIDER_HEIGHT, cond)
         L:Row(GUI:CreateFormCheckbox(body, "Hide Duration Swipe", "debuffHideSwipe", auras, syncedOnChange), FORM_ROW, cond)
-        AddAuraDurationTextRow(body, L, auras, "showDebuffDurationText", "Show Debuff Duration Text", syncedOnChange, cond)
+        AddAuraDurationTextRows(body, L, auras, "debuff", "Debuff", syncedOnChange, cond)
         L:Row(GUI:CreateFormCheckbox(body, "Reverse Swipe", "debuffReverseSwipe", auras, syncedOnChange), FORM_ROW, reverseCond)
         L:Row(GUI:CreateFormDropdown(body, "Anchor", NINE_POINT_OPTIONS, "debuffAnchor", auras, syncedOnChange), DROP_ROW, cond)
         L:Row(GUI:CreateFormDropdown(body, "Grow Direction", AURA_GROW_OPTIONS, "debuffGrowDirection", auras, syncedOnChange), DROP_ROW, cond)
@@ -3226,6 +3247,53 @@ local function CreateDesignerPreview(container, previewType, childRefs)
         return offY
     end
 
+    local function IsPreviewDurationTextEnabled(showKey)
+        local specific = auraDB[showKey]
+        if specific ~= nil then
+            return specific ~= false
+        end
+        return auraDB.showDurationText ~= false
+    end
+
+    local function GetPreviewDurationFontPath(prefix)
+        local fontName = auraDB[prefix .. "DurationFont"]
+        if fontName and fontName ~= "" and LSM then
+            local fetched = LSM:Fetch("font", fontName)
+            if fetched then return fetched end
+        end
+        return fontPath
+    end
+
+    local function GetPreviewDurationTextColor(prefix)
+        local useTimeColor = auraDB[prefix .. "DurationUseTimeColor"]
+        if useTimeColor == nil then
+            useTimeColor = auraDB.showDurationColor ~= false
+        end
+        if useTimeColor then
+            return 0.2, 1, 0.2, 1
+        end
+
+        local c = auraDB[prefix .. "DurationColor"]
+        if c then
+            return c[1] or 1, c[2] or 1, c[3] or 1, c[4] or 1
+        end
+        return 1, 1, 1, 1
+    end
+
+    local function AddPreviewDurationText(parentFrame, icon, prefix, text)
+        local duration = parentFrame:CreateFontString(nil, "OVERLAY")
+        local size = auraDB[prefix .. "DurationFontSize"] or auraDB.durationFontSize or 9
+        local anchor = auraDB[prefix .. "DurationAnchor"] or "BOTTOM"
+        local offX = (auraDB[prefix .. "DurationOffsetX"] or 0) * PREVIEW_SCALE
+        local offY = (auraDB[prefix .. "DurationOffsetY"] or -6) * PREVIEW_SCALE
+        duration:SetFont(GetPreviewDurationFontPath(prefix), size * PREVIEW_SCALE, "OUTLINE")
+        duration:SetPoint(anchor, icon, anchor, offX, offY)
+        duration:SetJustifyH("CENTER")
+        duration:SetText(text)
+        duration:SetTextColor(GetPreviewDurationTextColor(prefix))
+        return duration
+    end
+
     if auraDB.showBuffs then
         local buffSize = (auraDB.buffIconSize or 14) * PREVIEW_SCALE
         local maxBuffs = auraDB.maxBuffs or 3
@@ -3244,6 +3312,9 @@ local function CreateDesignerPreview(container, previewType, childRefs)
                 icon:SetTexture(FAKE_BUFF_ICONS[i])
                 if i == 1 then icon:SetPoint("LEFT", buffContainer, "LEFT", 0, 0)
                 else icon:SetPoint("LEFT", buffContainer, "LEFT", (i - 1) * (buffSize + buffSpacing), 0) end
+                if IsPreviewDurationTextEnabled("showBuffDurationText") then
+                    AddPreviewDurationText(buffContainer, icon, "buff", i == 1 and "5m" or "45")
+                end
             end
             childRefs.buffContainer = buffContainer
         end
@@ -3272,6 +3343,9 @@ local function CreateDesignerPreview(container, previewType, childRefs)
                 else
                     local offset = (i - 1) * (debuffSize + debuffSpacing)
                     icon:SetPoint(startAnchor, debuffContainer, startAnchor, debuffGrow == "LEFT" and -offset or offset, 0)
+                end
+                if IsPreviewDurationTextEnabled("showDebuffDurationText") then
+                    AddPreviewDurationText(debuffContainer, icon, "debuff", i == 1 and "12" or "45")
                 end
             end
             childRefs.debuffContainer = debuffContainer
