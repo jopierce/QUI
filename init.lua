@@ -274,6 +274,18 @@ function QUI:SlashCommandOpen(input)
         framePos("buffFrame", "buffFrame")
         framePos("minimap", "minimap")
         return
+    elseif input and input:match("^tooltipdebug") then
+        -- /qui tooltipdebug on [N]  -> print tooltip churn samples every N seconds
+        -- /qui tooltipdebug report  -> print the current sample without resetting
+        -- /qui tooltipdebug slow N  -> log functions slower than N ms in samples
+        -- /qui tooltipdebug bypass qol|skin|all|off -> isolate tooltip processors
+        local subcmd, arg = input:match("^tooltipdebug%s+(%S+)%s*(%S*)")
+        if _G.QUI_TooltipDebug then
+            _G.QUI_TooltipDebug(subcmd, arg)
+        else
+            print("|cff60A5FAQUI:|r Tooltip debug sampler not loaded yet.")
+        end
+        return
     elseif input and input == "tooltipdbg" then
         local isS = issecretvalue
         local count = 0
