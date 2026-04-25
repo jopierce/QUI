@@ -1404,8 +1404,61 @@ end
 ---------------------------------------------------------------------------
 -- UPDATE: Summon Pending
 ---------------------------------------------------------------------------
+_state.IsPlayerUnit = function(unit)
+    if unit == "player" then return true end
+    if UnitIsUnit then
+        local ok, isPlayer = pcall(UnitIsUnit, unit, "player")
+        return ok and not IsSecretValue(isPlayer) and isPlayer == true
+    end
+    return false
+end
+
+_state.GetActivePlayerSummonPopup = function()
+    if not StaticPopup_FindVisible then return nil, nil end
+
+    local checkedPopup = false
+    local ok, popup = pcall(StaticPopup_FindVisible, "CONFIRM_SUMMON")
+    if ok and not IsSecretValue(popup) then
+        if popup then return true, "CONFIRM_SUMMON" end
+        checkedPopup = true
+    end
+
+    ok, popup = pcall(StaticPopup_FindVisible, "CONFIRM_SUMMON_SCENARIO")
+    if ok and not IsSecretValue(popup) then
+        if popup then return true, "CONFIRM_SUMMON_SCENARIO" end
+        checkedPopup = true
+    end
+
+    ok, popup = pcall(StaticPopup_FindVisible, "CONFIRM_SUMMON_STARTING_AREA")
+    if ok and not IsSecretValue(popup) then
+        if popup then return true, "CONFIRM_SUMMON_STARTING_AREA" end
+        checkedPopup = true
+    end
+
+    if checkedPopup then return false, nil end
+    return nil, nil
+end
+
+_state.HasActivePlayerSummonConfirmation = function()
+    local popupVisible = _state.GetActivePlayerSummonPopup()
+    if popupVisible ~= nil then return popupVisible end
+
+    if C_SummonInfo and C_SummonInfo.GetSummonConfirmTimeLeft then
+        local ok, timeLeft = pcall(C_SummonInfo.GetSummonConfirmTimeLeft)
+        if ok and not IsSecretValue(timeLeft) then
+            return SafeToNumber(timeLeft, 0) > 0
+        end
+    end
+    return false
+end
+
 local function UpdateSummonPending(frame)
     if not frame or not frame.unit or not frame.summonIcon then return end
+    if not UnitExists(frame.unit) then
+        frame.summonIcon:Hide()
+        return
+    end
+
     local isRaid = frame._isRaid
     local indSettings = GetIndicatorSettings(isRaid)
     if not indSettings or indSettings.showSummonPending == false then
@@ -1413,8 +1466,26 @@ local function UpdateSummonPending(frame)
         return
     end
 
-    local hasSummon = C_IncomingSummon and C_IncomingSummon.HasIncomingSummon(frame.unit)
-    if hasSummon then
+    local showSummon = false
+    if C_IncomingSummon and C_IncomingSummon.HasIncomingSummon and C_IncomingSummon.IncomingSummonStatus then
+        local okHas, hasSummon = pcall(C_IncomingSummon.HasIncomingSummon, frame.unit)
+        local okStatus, status = pcall(C_IncomingSummon.IncomingSummonStatus, frame.unit)
+        if okHas and okStatus and not IsSecretValue(hasSummon) and not IsSecretValue(status) and hasSummon == true then
+            local pendingStatus = Enum and Enum.SummonStatus and Enum.SummonStatus.Pending or 1
+            showSummon = status == pendingStatus
+        end
+    elseif C_IncomingSummon and C_IncomingSummon.HasIncomingSummon then
+        local ok, hasSummon = pcall(C_IncomingSummon.HasIncomingSummon, frame.unit)
+        if ok and not IsSecretValue(hasSummon) then
+            showSummon = hasSummon == true
+        end
+    end
+
+    if showSummon and _state.IsPlayerUnit(frame.unit) then
+        showSummon = _state.HasActivePlayerSummonConfirmation()
+    end
+
+    if showSummon then
         frame.summonIcon:Show()
     else
         frame.summonIcon:Hide()
@@ -2573,6 +2644,7 @@ local function DecorateGroupFrame(frame)
             if not value then
                 -- Unit cleared (frame hidden by header)
                 _state.unitGuidCache[self] = nil
+                if self.summonIcon then self.summonIcon:Hide() end
                 return
             end
 
