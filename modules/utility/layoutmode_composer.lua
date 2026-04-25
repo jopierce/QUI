@@ -1122,6 +1122,14 @@ local function BuildNameSettings(content, gfdb, onChange)
     relayout()
 end
 
+local function AddAuraDurationTextRow(body, layout, auras, dbKey, label, onChange, enabledCond)
+    layout:Row(
+        GUI:CreateFormCheckbox(body, label, dbKey, auras, onChange),
+        FORM_ROW,
+        enabledCond
+    )
+end
+
 local function BuildBuffsSettings(content, gfdb, onChange)
     local auras = gfdb.auras; if not auras then gfdb.auras = {} auras = gfdb.auras end
     local sections = {}
@@ -1142,6 +1150,7 @@ local function BuildBuffsSettings(content, gfdb, onChange)
         L:Row(GUI:CreateFormSlider(body, "Max Buffs", 0, 8, 1, "maxBuffs", auras, syncedOnChange), SLIDER_HEIGHT, cond)
         L:Row(GUI:CreateFormSlider(body, "Icon Size", 8, 32, 1, "buffIconSize", auras, syncedOnChange), SLIDER_HEIGHT, cond)
         L:Row(GUI:CreateFormCheckbox(body, "Hide Duration Swipe", "buffHideSwipe", auras, syncedOnChange), FORM_ROW, cond)
+        AddAuraDurationTextRow(body, L, auras, "showBuffDurationText", "Show Buff Duration Text", syncedOnChange, cond)
         L:Row(GUI:CreateFormCheckbox(body, "Reverse Swipe", "buffReverseSwipe", auras, syncedOnChange), FORM_ROW, reverseCond)
         L:Row(GUI:CreateFormDropdown(body, "Anchor", NINE_POINT_OPTIONS, "buffAnchor", auras, syncedOnChange), DROP_ROW, cond)
         L:Row(GUI:CreateFormDropdown(body, "Grow Direction", AURA_GROW_OPTIONS, "buffGrowDirection", auras, syncedOnChange), DROP_ROW, cond)
@@ -1214,6 +1223,7 @@ local function BuildDebuffsSettings(content, gfdb, onChange)
         L:Row(GUI:CreateFormSlider(body, "Max Debuffs", 0, 8, 1, "maxDebuffs", auras, syncedOnChange), SLIDER_HEIGHT, cond)
         L:Row(GUI:CreateFormSlider(body, "Icon Size", 8, 32, 1, "debuffIconSize", auras, syncedOnChange), SLIDER_HEIGHT, cond)
         L:Row(GUI:CreateFormCheckbox(body, "Hide Duration Swipe", "debuffHideSwipe", auras, syncedOnChange), FORM_ROW, cond)
+        AddAuraDurationTextRow(body, L, auras, "showDebuffDurationText", "Show Debuff Duration Text", syncedOnChange, cond)
         L:Row(GUI:CreateFormCheckbox(body, "Reverse Swipe", "debuffReverseSwipe", auras, syncedOnChange), FORM_ROW, reverseCond)
         L:Row(GUI:CreateFormDropdown(body, "Anchor", NINE_POINT_OPTIONS, "debuffAnchor", auras, syncedOnChange), DROP_ROW, cond)
         L:Row(GUI:CreateFormDropdown(body, "Grow Direction", AURA_GROW_OPTIONS, "debuffGrowDirection", auras, syncedOnChange), DROP_ROW, cond)

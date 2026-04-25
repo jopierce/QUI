@@ -584,6 +584,16 @@ end
 local timerElapsed = 0
 local cachedShowDurationColor = true
 
+local function IsDurationTextEnabled(auraSettings, settingKey)
+    if not auraSettings then return true end
+    local specific = auraSettings[settingKey]
+    if specific ~= nil then
+        return specific ~= false
+    end
+    -- Backward compatibility for profiles that still only have the legacy shared key.
+    return auraSettings.showDurationText ~= false
+end
+
 local function SharedTimerOnUpdate(self, dt)
     timerElapsed = timerElapsed + dt
     if timerElapsed < TIMER_INTERVAL then return end
@@ -615,7 +625,7 @@ local function SharedTimerOnUpdate(self, dt)
                 if icon.durationText then
                     local isRaid = icon.unitFrame and icon.unitFrame._isRaid
                     local auraSettings = isRaid and raidAuras or partyAuras
-                    local showDurationText = not auraSettings or auraSettings.showDurationText ~= false
+                    local showDurationText = IsDurationTextEnabled(auraSettings, icon._durationTextSettingKey)
                     if showDurationText then
                         -- PERF: Compute bucket (zero allocation) BEFORE formatting.
                         -- Only call FormatDuration (string.format) when display changes.
@@ -1273,6 +1283,7 @@ local function UpdateFrameAuras(frame)
                 end
             end
             local icon = frame.debuffIcons[i]
+            icon._durationTextSettingKey = "showDebuffDurationText"
             SafeSetDrawSwipe(icon and icon.cooldown, auraSettings.debuffHideSwipe ~= true)
             SafeSetReverse(icon and icon.cooldown, auraSettings.debuffReverseSwipe == true)
             if auraData then
@@ -1433,6 +1444,7 @@ local function UpdateFrameAuras(frame)
                 end
             end
             local bIcon = frame.buffIcons[i]
+            bIcon._durationTextSettingKey = "showBuffDurationText"
             SafeSetDrawSwipe(bIcon and bIcon.cooldown, auraSettings.buffHideSwipe ~= true)
             SafeSetReverse(bIcon and bIcon.cooldown, auraSettings.buffReverseSwipe == true)
             if auraData then
