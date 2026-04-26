@@ -3627,6 +3627,19 @@ end
 -- collapse around missing items instead of leaving a gap.
 CDMIcons.ComputeFilterHides = ComputeFilterHides
 
+local function GetIconRowOpacity(icon)
+    local opacity = icon and icon._rowOpacity
+    if opacity == nil then
+        return 1
+    end
+    return opacity
+end
+
+local function SetIconRowAlpha(icon, multiplier)
+    if not icon then return end
+    icon:SetAlpha(GetIconRowOpacity(icon) * (multiplier or 1))
+end
+
 -- Apply visibility state respecting dynamicLayout.
 -- dynamicLayout = true/nil (default): Hide/Show — bar collapses around hidden icons.
 -- dynamicLayout = false:              SetAlpha(0) — slot reserved, icon invisible.
@@ -3636,11 +3649,11 @@ CDMIcons.ComputeFilterHides = ComputeFilterHides
 local function ApplyIconVisibility(icon, shouldShow, dynamicLayout)
     if dynamicLayout == false then
         if not icon:IsShown() then icon:Show() end
-        icon:SetAlpha(shouldShow and 1 or 0)
+        icon:SetAlpha(shouldShow and GetIconRowOpacity(icon) or 0)
     else
         if shouldShow then
             if not icon:IsShown() then icon:Show() end
-            icon:SetAlpha(1)
+            SetIconRowAlpha(icon)
         else
             if icon:IsShown() then icon:Hide() end
         end
