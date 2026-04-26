@@ -1351,17 +1351,6 @@ local function HookBlizzStackText(icon, blizzChild)
     if not blizzChild then return end
 
     local entry = icon._spellEntry
-
-    -- Buff viewer children: do NOT reparent Applications/ChargeCount.
-    -- Blizzard's buff-viewer display layer (e.g. Mana Tea on Mistweaver)
-    -- doesn't reliably drive these frames the way the cooldown viewer
-    -- templates do, so reparenting leaves the count permanently blank.
-    -- Leave the native frames on their original parent (hidden behind
-    -- the alpha=0 viewer) and let the API path drive icon.StackText.
-    if entry and entry.viewerType == "buff" then
-        return
-    end
-
     local chargeFrame = blizzChild.ChargeCount
     local appFrame = blizzChild.Applications
 
@@ -2296,15 +2285,19 @@ local function UpdateIconCooldown(icon)
                             if r.isTotemInstance then
                                 icon.StackText:SetText("")
                                 icon.StackText:Hide()
-                            else
-                                local stacks = r.stacks or 0
-                                local text = stacks
-                                if not entry.hasCharges then
-                                    local truncOk, truncText = pcall(C_StringUtil.TruncateWhenZero, stacks)
-                                    text = truncOk and truncText or ""
+                            elseif r.stacks then
+                                -- Charged abilities: "0" is meaningful (all
+                                -- charges depleted). Only truncate zero for
+                                -- non-charged resource stacks.
+                                if entry.hasCharges then
+                                    pcall(icon.StackText.SetText, icon.StackText, r.stacks)
+                                else
+                                    pcall(icon.StackText.SetText, icon.StackText, C_StringUtil.TruncateWhenZero(r.stacks))
                                 end
-                                pcall(icon.StackText.SetText, icon.StackText, text)
                                 icon.StackText:Show()
+                            elseif not InCombatLockdown() then
+                                icon.StackText:SetText("")
+                                icon.StackText:Hide()
                             end
                         end
 
