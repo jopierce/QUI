@@ -583,6 +583,7 @@ end
 
 local timerElapsed = 0
 local cachedShowDurationColor = true
+local GetFontPath
 
 local function IsDurationTextEnabled(auraSettings, settingKey)
     if not auraSettings then return true end
@@ -814,7 +815,7 @@ local pendingMouseFix = false
 -- Cached font path: rebuilt on layout invalidation, avoids per-icon DB+LSM lookups.
 local _cachedFontPath = nil
 
-local function GetFontPath()
+function GetFontPath()
     if _cachedFontPath then return _cachedFontPath end
     local db = GetDB()
     local vdb = db and (db.party or db)
