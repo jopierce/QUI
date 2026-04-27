@@ -54,10 +54,37 @@ end
 local function SuppressBlizzardPetFrame()
     if not PetFrame then return end
 
-    -- PetFrame is both protected and Edit Mode managed. On corrupted Blizzard
-    -- Edit Mode layouts, mutating its frame table, scripts, events, or anchors
-    -- can make the next Blizzard layout pass blame QUI for
-    -- PetFrame:ClearAllPointsBase(). Keep this to visual suppression only.
+    -- Mark PetFrame as skip-in-layout so PlayerFrameBottomManagedFramesContainer's
+    -- LayoutChildren pass — fired in combat whenever a sibling (TotemFrame, the
+    -- vehicle leave button, etc.) hides via SetShown and triggers
+    -- UIParentManagedFrameMixin:OnHide -> layoutParent:RemoveManagedFrame ->
+    -- self:Layout() -> LayoutChildren — bypasses PetFrame entirely.
+    --
+    -- LayoutChildren gathers regions from self:GetChildren()/:GetRegions(),
+    -- then filters via BaseLayoutMixin:AddLayoutChildren which checks:
+    --     local canInclude = (not region.ignoreInLayout) and ...
+    -- Verified against Blizzard_SharedXML/LayoutFrame.lua lines 28-37 of
+    -- the live wow-ui-source mirror. Setting ignoreInLayout = true makes the
+    -- iteration skip PetFrame, so child:ClearAllPoints() is never called on
+    -- it during the Layout pass — eliminating the protected ClearAllPointsBase
+    -- block in combat regardless of any pre-existing taint on the frame.
+    --
+    -- ignoreFramePositionManager is paired so AddManagedFrame's early-return
+    -- prevents UpdateFrame's own frame:ClearAllPoints() call when Blizzard
+    -- re-enrolls PetFrame on pet summon / vehicle exit (verified against
+    -- Blizzard_UIParent/Shared/UIParent.lua AddManagedFrame).
+    --
+    -- Two boolean writes to PetFrame's frame table — same taint profile as the
+    -- BossTargetFrameContainer fix at line ~282 of this file. Both flags are
+    -- read only by Blizzard's iteration and early-return code paths; no
+    -- protected operation surfaces them.
+    if not _blizzFrameGuards.petFrameLayoutSkip then
+        _blizzFrameGuards.petFrameLayoutSkip = true
+        PetFrame.ignoreInLayout = true
+        PetFrame.ignoreFramePositionManager = true
+    end
+
+    -- Visual suppression. Method calls only — no frame-table writes.
     pcall(PetFrame.SetAlpha, PetFrame, 0)
     pcall(PetFrame.EnableMouse, PetFrame, false)
 end
