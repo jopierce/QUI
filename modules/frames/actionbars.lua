@@ -5658,6 +5658,16 @@ local function SuppressProcVisualFrame(frame)
         if frame.StopAnimating then
             frame:StopAnimating()
         end
+        -- ActionButtonSpellAlertMixin keeps the proc loop alive via two
+        -- AnimationGroups (ProcStartAnim → ProcLoop) defined on the alert
+        -- frame itself. StopAnimating() doesn't traverse them, so the swirl
+        -- keeps playing under SetAlpha(0) and pops back on the next Show.
+        if frame.ProcStartAnim and frame.ProcStartAnim.Stop then
+            frame.ProcStartAnim:Stop()
+        end
+        if frame.ProcLoop and frame.ProcLoop.Stop then
+            frame.ProcLoop:Stop()
+        end
     end)
 
     if frame.Show then
@@ -7712,8 +7722,12 @@ local function ApplyOwnedFlyoutButtonVisuals(button, spellID)
     end
     if button.Name then button.Name:SetText("") end
     if button.Count then button.Count:SetText("") end
-    ApplySpellFlyoutButtonStateTextures(button)
 
+    -- State textures + hit rect are static button-level setup, applied once
+    -- at button creation in EnsureOwnedFlyoutButton. Re-running here would
+    -- call SetHitRectInsets from the tainted secure-CallMethod context that
+    -- triggers this update, and that method is protected on SecureAction
+    -- buttons.
     if InCombatLockdown() then return end
     local sourceButton = ownedFlyout and ownedFlyout:GetParent()
     local settings = GetOwnedFlyoutSettings(sourceButton)
@@ -7739,9 +7753,17 @@ local function UpdateOwnedFlyoutButtonCooldown(button)
 
     local cdInfo = C_Spell.GetSpellCooldown and C_Spell.GetSpellCooldown(spellID)
     local chargeInfo = C_Spell.GetSpellCharges and C_Spell.GetSpellCharges(spellID)
-    local showCharge = chargeInfo and chargeInfo.currentCharges and chargeInfo.maxCharges
-        and chargeInfo.currentCharges < chargeInfo.maxCharges
-    local showNormal = cdInfo and cdInfo.isEnabled and cdInfo.duration and cdInfo.duration > 0
+
+    -- This runs via secure CallMethod from the flyout snippet, so any field
+    -- on cdInfo / chargeInfo may be secret. Comparing secret numbers errors;
+    -- coerce through Helpers before gating display.
+    local cur = Helpers.SafeToNumber(chargeInfo and chargeInfo.currentCharges, 0)
+    local max = Helpers.SafeToNumber(chargeInfo and chargeInfo.maxCharges, 0)
+    local showCharge = max > 0 and cur < max
+
+    local enabled = Helpers.SafeValue(cdInfo and cdInfo.isEnabled, false)
+    local dur     = Helpers.SafeToNumber(cdInfo and cdInfo.duration, 0)
+    local showNormal = enabled and dur > 0
 
     if showNormal then
         local ok, durObj = pcall(C_Spell.GetSpellCooldownDuration, spellID)
@@ -8836,6 +8858,24 @@ function ActionBarsOwned:Refresh()
             end
         end)
 
+        -- Modern retail (post-rename): proc swirl is created lazily by
+        -- ActionButtonSpellAlertManager:ShowAlert. Hook the manager so we
+        -- catch the alert frame the moment it exists, both for the default
+        -- alert and the AssistedCombatRotationFrame's separate alert.
+        if ActionButtonSpellAlertManager and ActionButtonSpellAlertManager.ShowAlert then
+            hooksecurefunc(ActionButtonSpellAlertManager, "ShowAlert", function(_, actionButton)
+                if not actionButton then return end
+                if not ActionBarsOwned.skinnedButtons[actionButton] then return end
+                ActionBarsOwned.SuppressButtonProcVisuals(actionButton)
+                local acrf = actionButton.AssistedCombatRotationFrame
+                if acrf and acrf.SpellActivationAlert then
+                    SuppressProcVisualFrame(acrf.SpellActivationAlert)
+                end
+            end)
+        end
+        -- Legacy global path — kept as a fallback for clients that still
+        -- expose ActionButton_ShowOverlayGlow before the SpellAlertManager
+        -- refactor.
         if type(ActionButton_ShowOverlayGlow) == "function" then
             hooksecurefunc("ActionButton_ShowOverlayGlow", function(button)
                 if ActionBarsOwned.skinnedButtons[button] then
