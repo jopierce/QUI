@@ -355,7 +355,12 @@ end
 
 local function FormatTimeRemaining(seconds)
     if seconds >= 3600 then
-        return string.format("%dh", math.floor(seconds / 3600))
+        local hours = math.floor(seconds / 3600)
+        local mins = math.floor((seconds % 3600) / 60)
+        if mins > 0 then
+            return string.format("%dh %dm", hours, mins)
+        end
+        return string.format("%dh", hours)
     elseif seconds >= 60 then
         return string.format("%dm", math.floor(seconds / 60))
     else
