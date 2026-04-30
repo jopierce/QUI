@@ -3734,21 +3734,21 @@ do
                                     NotifyPeerRefresh(dropZone)
                                 end
                             elseif cursorType == "spell" then
-                                local spellID = id4
-                                if not spellID and id1 then
-                                    local spellBank = (id2 == "pet") and Enum.SpellBookSpellBank.Pet or Enum.SpellBookSpellBank.Player
-                                    local spellBookInfo = C_SpellBook.GetSpellBookItemInfo(id1, spellBank)
-                                    if spellBookInfo then spellID = spellBookInfo.spellID end
-                                end
+                                -- Probe id4 (modern API spellID), then id1
+                                -- (spellbook slot / cdID / action-bar spellID).
+                                -- Helpers.ResolveDragToSpellID validates each
+                                -- against IsPlayerSpell + applies talent override.
+                                local spellID = (Helpers.ResolveDragToSpellID and Helpers.ResolveDragToSpellID(id4))
+                                                or (Helpers.ResolveDragToSpellID and Helpers.ResolveDragToSpellID(id1))
                                 if spellID then
-                                    local overrideID = C_Spell.GetOverrideSpell(spellID)
-                                    if overrideID and overrideID ~= spellID then spellID = overrideID end
                                     if ns.CustomCDM then
                                         ns.CustomCDM:AddEntry(dbKey, "spell", spellID)
                                         ClearCursor()
                                         rebuildCustomEntries()
                                         NotifyPeerRefresh(dropZone)
                                     end
+                                elseif Helpers.NotifyDragResolutionFailed then
+                                    Helpers.NotifyDragResolutionFailed()
                                 end
                             end
                         end
