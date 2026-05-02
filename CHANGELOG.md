@@ -14,6 +14,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
 
+
+## v3.5.7 - 2026-05-03
+
+### Fixed
+- fix(profile-io): include layoutMode and options panel collapsible state in selective export
 ## v3.5.6 - 2026-05-01
 
 ### Fixed
